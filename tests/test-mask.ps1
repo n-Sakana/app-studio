@@ -1,0 +1,16 @@
+$ErrorActionPreference='Stop'
+if($PSVersionTable.PSEdition-eq'Core'){$ps5=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe';&$ps5 -NoProfile -ExecutionPolicy Bypass -STA -File $PSCommandPath;if($LASTEXITCODE-ne0){throw ('Windows PowerShell test failed: '+$LASTEXITCODE)};return}
+$root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path;&(Join-Path $root 'app-studio.ps1') -CompileOnly
+$temp=Join-Path ([IO.Path]::GetTempPath()) ('pui-mask-'+[Guid]::NewGuid().ToString('N'));New-Item -ItemType Directory $temp|Out-Null
+try{
+ $shotPath=Join-Path $temp 'shot.png';$bitmap=New-Object Drawing.Bitmap(100,80);try{$g=[Drawing.Graphics]::FromImage($bitmap);try{$g.Clear([Drawing.Color]::White)}finally{$g.Dispose()};$bitmap.Save($shotPath,[Drawing.Imaging.ImageFormat]::Png)}finally{$bitmap.Dispose()}
+ $shot=New-Object AppStudio.ShotResult;$shot.File=$shotPath;$shot.Rect=New-Object AppStudio.RectValue;$shot.Rect.Width=100;$shot.Rect.Height=80;$shot.MaskedRects=@();$shot.Status=[AppStudio.ProbeStatus]::Ok();$mask=New-Object AppStudio.MaskRect;$mask.Rect=New-Object AppStudio.RectValue;$mask.Rect.X=20;$mask.Rect.Y=15;$mask.Rect.Width=30;$mask.Rect.Height=20;$mask.RuleId='manual-el-0001-02';$null=[AppStudio.Capture]::AddMasks($shot,@($mask));$check=New-Object Drawing.Bitmap($shotPath);try{$pixel=$check.GetPixel(25,20);if($pixel.R-ne0-or$pixel.G-ne0-or$pixel.B-ne0){throw 'manual mask pixel was not black'}}finally{$check.Dispose()};if($shot.MaskedRects.Count-ne1-or$shot.Sha256.Length-ne64){throw 'manual mask metadata/hash missing'}
+ $recorder=New-Object AppStudio.SessionRecorder((Join-Path $temp 'shots'));$uia=New-Object AppStudio.UiaInfo;$uia.LiveValue='sensitive-body';$uia.Name='Customer';$uia.ControlType='Edit'
+ $masked=$recorder.RecordValueFor($uia,'el-0001');if($masked.Content-or-not$masked.Masked-or$masked.Length-ne14-or$masked.MaskRule-ne'policy.maskedOnly'){throw 'maskedOnly value shape mismatch'}
+ $recorder.SetValueCapture('full','explicit test');$full=$recorder.RecordValueFor($uia,'el-0001');if($full.Content-ne'sensitive-body'-or$full.Masked){throw 'explicit full did not record value'}
+ $uia.IsPassword=$true;$password=$recorder.RecordValueFor($uia,'el-0001');if($password.Content-or$password.MaskRule-ne'isPassword'){throw 'IsPassword leaked in full mode'};$uia.IsPassword=$false
+ $rule=New-Object AppStudio.MaskRule;$rule.RuleId='customer-name';$rule.Kind='nameRegex';$rule.Pattern='Customer';$rule.AppliesTo='all';$recorder.AddMaskRule($rule);$regexMasked=$recorder.RecordValueFor($uia,'el-0001');if($regexMasked.Content-or-not$regexMasked.Masked){throw 'nameRegex did not override full mode'}
+ $threw=$false;try{$reserved=New-Object AppStudio.MaskRule;$reserved.RuleId='replace';$reserved.Kind='isPassword';$recorder.AddMaskRule($reserved)}catch{$threw=$true};if(-not$threw){throw 'built-in IsPassword rule was replaceable'}
+ $recorder.SetValueCapture('none','explicit test');$none=$recorder.RecordValueFor($uia,'el-0001');if($none.Content-or$none.Length-ne0-or$none.Kind-ne'none'){throw 'none mode retained metadata'}
+ Write-Output ('PASS test-mask manualPixel=black metadata=1 maskedOnly=length+kind full=explicit isPassword=fixed nameRegex=masked none=empty')
+}finally{Remove-Item $temp -Recurse -Force}

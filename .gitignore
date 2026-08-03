@@ -1,0 +1,23 @@
+# Runtime state written by launching the app on a specific machine.
+# Excluded because it holds host diagnostics, local hotkey settings and
+# full-screen captures of whatever was on the operator's display.
+/runtime/
+
+# Generated measurement output of the WP-S smoke harness, screen captures taken
+# while testing, and written run reports. Captures show whatever else was on the
+# operator's display, and reports name the machine and the applications that
+# happened to be open, so none of it belongs in a public repository.
+# Regenerate with tests/wp-s/run-wp-s.ps1 (see README.md).
+/artifacts/
+
+# Compiled fixtures, harness executables, interop assemblies and run logs.
+# Regenerate with tests/build-fixtures.ps1 and tests/wp-s/build-wp-s.ps1.
+.build/
+
+# Build and editor noise.
+*.pdb
+*.suo
+*.user
+.vs/
+Thumbs.db
+desktop.ini
