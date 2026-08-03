@@ -135,53 +135,6 @@ namespace AppStudio
                 .Add("screens", items.ToArray());
         }
 
-        public static ScreenLedger Load(string path)
-        {
-            string text = CaseStore.ReadText(path);
-            Dictionary<string, object> root = text == null ? null : JsonReader.ReadObject(text);
-            if (root == null) return null;
-            ScreenLedger ledger = new ScreenLedger();
-            ledger.ScanId = JsonReader.Text(root, "scanId");
-            object[] items = JsonReader.Items(root, "screens");
-            if (items == null) return ledger;
-            for (int index = 0; index < items.Length; index++)
-            {
-                Dictionary<string, object> item = items[index] as Dictionary<string, object>;
-                if (item == null) continue;
-                ScreenRecord screen = new ScreenRecord();
-                screen.ScanId = JsonReader.Text(item, "scanId");
-                screen.ScreenId = JsonReader.Text(item, "screenId");
-                screen.Hwnd = JsonReader.Number64(item, "hwnd", 0);
-                screen.Title = JsonReader.Text(item, "title");
-                screen.ClassName = JsonReader.Text(item, "className");
-                screen.NodeCount = JsonReader.Number(item, "nodeCount", 0);
-                screen.ShotFile = JsonReader.Text(item, "shotFile");
-                screen.Sha256 = JsonReader.Text(item, "sha256");
-                screen.CaptureMethod = JsonReader.Text(item, "captureMethod");
-                screen.ShotProblem = JsonReader.Text(item, "shotProblem");
-                screen.PdfPage = JsonReader.Number(item, "pdfPage", 0);
-                Dictionary<string, object> rect = JsonReader.Child(item, "rect");
-                if (rect != null)
-                {
-                    RectValue value = new RectValue();
-                    value.X = JsonReader.Number(rect, "x", 0);
-                    value.Y = JsonReader.Number(rect, "y", 0);
-                    value.Width = JsonReader.Number(rect, "width", 0);
-                    value.Height = JsonReader.Number(rect, "height", 0);
-                    screen.Rect = value;
-                }
-                object[] components = JsonReader.Items(item, "componentIds");
-                if (components != null)
-                {
-                    for (int part = 0; part < components.Length; part++)
-                    {
-                        screen.ComponentIds.Add(Convert.ToString(components[part], CultureInfo.InvariantCulture));
-                    }
-                }
-                ledger.Screens.Add(screen);
-            }
-            return ledger;
-        }
     }
 
     // Takes the picture that belongs to one screen. The window has to be in
@@ -198,13 +151,23 @@ namespace AppStudio
         public static void Raise(long hwnd)
         {
             if (hwnd == 0) return;
-            NativeMethods.SetForegroundWindow(new IntPtr(hwnd));
+            WindowTools.BringToFront(hwnd);
         }
 
         // Fills the picture fields of one screen. Everything that goes wrong is
         // written into ShotProblem instead of throwing, because a screen with no
         // picture still has to appear in the ledger and in the attachment.
         public static void Shoot(ScreenRecord screen, string folder)
+        {
+            Shoot(screen, folder, null);
+        }
+
+        // The masks are the rectangles of whatever the session decided is a
+        // secret. A password box normally shows dots, but an application with a
+        // "show the characters" switch, or a field holding a key rather than a
+        // password, shows them in full, and a picture of that would carry it out
+        // of here.
+        public static void Shoot(ScreenRecord screen, string folder, MaskRect[] masks)
         {
             if (screen == null) return;
             if (screen.Hwnd == 0)
@@ -239,7 +202,7 @@ namespace AppStudio
             ShotResult shot;
             try
             {
-                shot = Capture.Crop(rect, new MaskRect[0], path, handle);
+                shot = Capture.Crop(rect, masks == null ? new MaskRect[0] : masks, path, handle);
             }
             catch (Exception exception)
             {

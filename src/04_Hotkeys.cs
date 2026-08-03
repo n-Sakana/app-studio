@@ -42,12 +42,10 @@ namespace AppStudio
             source.AddHook(Hook);
             settingsPath = path;
             Dictionary<string, string> saved = Load(path);
-            RegisterWithFallback(1, "toggle", Saved(saved, "toggle", "F8"));
-            RegisterWithFallback(2, "freeze", Saved(saved, "freeze", "F9"));
-            RegisterWithFallback(3, "pin", Saved(saved, "pin", "F10"));
-            RegisterWithFallback(4, "fullShot", Saved(saved, "fullShot", "F11"));
-            RegisterWithFallback(5, "memo", Saved(saved, "memo", "F6"));
-            RegisterWithFallback(6, "emergency", Saved(saved, "emergency", "Shift+F12"));
+            // Only what has to work while this window is hidden: stopping a
+            // recording or a replay, and the hard stop.
+            RegisterWithFallback(1, "stop", Saved(saved, "stop", "F9"));
+            RegisterWithFallback(2, "emergency", Saved(saved, "emergency", "Shift+F12"));
             Save();
         }
 
@@ -61,21 +59,6 @@ namespace AppStudio
             foreach (int id in actions.Keys) UnregisterHotKey(window, id);
             actions.Clear();
             source.RemoveHook(Hook);
-        }
-
-        public HotkeyRegistration Reassign(string action, string combo)
-        {
-            int id = ActionId(action);
-            if (id == 0) throw new ArgumentException("Unknown hotkey action.", "action");
-            if (actions.ContainsKey(id))
-            {
-                UnregisterHotKey(window, id);
-                actions.Remove(id);
-            }
-            for (int index = registrations.Count - 1; index >= 0; index--) if (registrations[index].Action == action) registrations.RemoveAt(index);
-            RegisterWithFallback(id, action, combo);
-            Save();
-            return registrations[registrations.Count - 1];
         }
 
         private void Register(int id, string action, string combo, uint modifiers, uint key)
@@ -187,8 +170,7 @@ namespace AppStudio
         }
 
         private static string KeyName(uint key) { return "F" + (key - 0x70 + 1); }
-        private static int ActionId(string action) { return action == "toggle" ? 1 : (action == "freeze" ? 2 : (action == "pin" ? 3 : (action == "fullShot" ? 4 : (action == "memo" ? 5 : (action == "emergency" ? 6 : 0))))); }
-        private static string Default(string action) { return action == "toggle" ? "F8" : (action == "freeze" ? "F9" : (action == "pin" ? "F10" : (action == "fullShot" ? "F11" : (action == "memo" ? "F6" : "Shift+F12")))); }
+        private static string Default(string action) { return action == "stop" ? "F9" : "Shift+F12"; }
 
         private IntPtr Hook(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
         {

@@ -1,1 +1,1 @@
-AutomationId を持つ
+AutomationId あり

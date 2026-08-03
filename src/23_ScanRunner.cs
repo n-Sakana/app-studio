@@ -172,14 +172,26 @@ namespace AppStudio
     {
         private readonly object sync = new object();
         private readonly string baseDir;
+        private readonly bool persistent;
         private AcquisitionWorkerProcess worker;
         private bool cancelled;
         private bool disposed;
         private int sequence;
 
         public ScanRunner(string baseDirectory)
+            : this(baseDirectory, false)
+        {
+        }
+
+        // A recording acquires a window every time the operator moves to one,
+        // and starting a worker process costs seconds. A persistent runner keeps
+        // one worker across acquisitions so that cost is paid once. A worker
+        // that stops answering is still terminated; the next acquisition starts
+        // a fresh one rather than reusing a dead handle.
+        public ScanRunner(string baseDirectory, bool persistentWorker)
         {
             baseDir = baseDirectory;
+            persistent = persistentWorker;
         }
 
         public void Cancel()
@@ -202,7 +214,16 @@ namespace AppStudio
 
         public ScanResult Run(int processId, long preferredHwnd, ScanLimits limits, Action<ScanProgress> progress)
         {
+            return RunWindows(WindowTools.ListProcessWindows(processId, preferredHwnd), processId, limits, progress);
+        }
+
+        // Walks exactly the windows it is handed. The chooser gives one window,
+        // so acquisition stays on what the operator pointed at instead of
+        // wandering into every other window the same process happens to own.
+        public ScanResult RunWindows(TargetWindowInfo[] windows, int processId, ScanLimits limits, Action<ScanProgress> progress)
+        {
             if (limits == null) limits = new ScanLimits();
+            if (windows == null) windows = new TargetWindowInfo[0];
             lock (sync) { cancelled = false; }
             Stopwatch watch = Stopwatch.StartNew();
             ScanResult result = new ScanResult();
@@ -212,7 +233,6 @@ namespace AppStudio
             result.ProcessId = processId;
             result.ProcessName = ProcessName(processId);
 
-            TargetWindowInfo[] windows = WindowTools.ListProcessWindows(processId, preferredHwnd);
             if (windows.Length == 0)
             {
                 result.AddUnknown("no-visible-window");
@@ -228,7 +248,11 @@ namespace AppStudio
             {
                 try
                 {
-                    current = AcquisitionWorkerProcess.Start(baseDir, 20000);
+                    lock (sync)
+                    {
+                        if (persistent && worker != null) current = worker;
+                    }
+                    if (current == null) current = AcquisitionWorkerProcess.Start(baseDir, 20000);
                     lock (sync)
                     {
                         if (cancelled)
@@ -287,11 +311,14 @@ namespace AppStudio
             }
             finally
             {
-                AcquisitionWorkerProcess finished;
+                AcquisitionWorkerProcess finished = null;
                 lock (sync)
                 {
-                    finished = worker;
-                    worker = null;
+                    if (!persistent || cancelled)
+                    {
+                        finished = worker;
+                        worker = null;
+                    }
                 }
                 if (finished != null) finished.Dispose();
             }
@@ -310,6 +337,19 @@ namespace AppStudio
                 disposed = true;
             }
             Cancel();
+        }
+
+        // Kept between acquisitions only while nothing went wrong with it. A
+        // cancelled or terminated worker is never reused.
+        public void ReleaseWorker()
+        {
+            AcquisitionWorkerProcess finished;
+            lock (sync)
+            {
+                finished = worker;
+                worker = null;
+            }
+            if (finished != null) finished.Dispose();
         }
 
         private ScanWindowResult ScanWindow(AcquisitionWorkerProcess current, TargetWindowInfo target, int processId, ScanLimits limits, ScanResult result, Action<ScanProgress> progress, int windowIndex, int windowCount)

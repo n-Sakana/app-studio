@@ -1,60 +1,87 @@
-$ErrorActionPreference = 'Stop'
-if ($PSVersionTable.PSEdition -eq 'Core') {
-    $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -STA -File $PSCommandPath
-    if ($LASTEXITCODE -ne 0) { throw ('Windows PowerShell test failed: ' + $LASTEXITCODE) }
-    return
+$ErrorActionPreference='Stop'
+if($PSVersionTable.PSEdition-eq'Core'){$ps5=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe';&$ps5 -NoProfile -ExecutionPolicy Bypass -STA -File $PSCommandPath;if($LASTEXITCODE-ne0){throw ('Windows PowerShell test failed: '+$LASTEXITCODE)};return}
+$root=(Resolve-Path (Join-Path $PSScriptRoot '..')).Path;&(Join-Path $root 'app-studio.ps1') -CompileOnly
+
+function New-Rect([int]$x,[int]$y,[int]$w,[int]$h){$r=New-Object AppStudio.RectValue;$r.X=$x;$r.Y=$y;$r.Width=$w;$r.Height=$h;return $r}
+function New-Node([string]$automationId,[string]$name,[string]$type,[string]$class,[int]$ctrlId,[string]$path,$rect){
+ $n=New-Object AppStudio.ScanNode;$n.AutomationId=$automationId;$n.Name=$name;$n.ControlType=$type;$n.ClassName=$class;$n.CtrlId=$ctrlId;$n.Path=$path;$n.Rect=$rect;return $n
 }
-$root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-& (Join-Path $root 'app-studio.ps1') -CompileOnly
+function New-List($items){$l=New-Object 'System.Collections.Generic.List[AppStudio.ScanNode]';foreach($i in $items){$l.Add($i)};return $l}
+function Find([object]$items,[string]$strategy){return @($items|Where-Object{$_.Strategy-eq$strategy})}
 
-function New-Rect([int]$x,[int]$y,[int]$w,[int]$h) {
-    $r=New-Object AppStudio.RectValue;$r.X=$x;$r.Y=$y;$r.Width=$w;$r.Height=$h;return $r
+$window=New-Rect 100 100 500 400
+$ok=New-Node 'CustomerCode' 'Customer code' 'Edit' 'Edit' 1002 'Window > Pane > Edit "Customer code"' (New-Rect 120 130 100 20)
+$siblings=New-List @($ok,(New-Node 'Other' 'Other' 'Edit' 'Edit' 1003 'Window > Pane > Edit "Other"' (New-Rect 120 160 100 20)))
+$all=[AppStudio.LocatorBuilder]::Build($ok,$window,$siblings)
+foreach($strategy in @('uia.automationId','uia.nameControlType','uia.treePath','win32.ctrlId','win32.classIndex','window.relative')){
+ if((Find $all $strategy).Count-ne1){throw ('locator missing: '+$strategy)}
 }
-function New-Base([string]$automationId,[string]$name,[int]$ctrlId) {
-    $snapshot=New-Object AppStudio.Snapshot
-    $snapshot.Uia=New-Object AppStudio.UiaInfo
-    $snapshot.Uia.AutomationId=$automationId;$snapshot.Uia.Name=$name;$snapshot.Uia.ControlType='Edit';$snapshot.Uia.BoundingRect=New-Rect 120 130 100 20
-    $snapshot.Win32=New-Object AppStudio.Win32Info
-    $snapshot.Win32.ClassName='Edit';$snapshot.Win32.CtrlId=$ctrlId;$snapshot.Win32.ZIndex=2;$snapshot.Win32.WindowRect=New-Rect 120 130 100 20;$snapshot.Win32.ClientRect=New-Rect 120 130 100 20
-    $ancestor=New-Object AppStudio.Win32Ancestor;$ancestor.ClassName='#32770';$ancestor.Caption='Order entry';$snapshot.Win32.Ancestors.Add($ancestor)
-    return $snapshot
+if((Find $all 'uia.automationId')[0].Confidence-ne'high'){throw 'stable AutomationId was not high'}
+if((Find $all 'window.relative')[0].Confidence-ne'low'){throw 'a position was not capped at low'}
+if([AppStudio.LocatorBuilder]::BestConfidence($all)-ne'high'){throw 'best confidence mismatch'}
+
+# Numeric-only ids and 0 / -1 control ids carry no meaning and are not offered.
+$numeric=New-Node '12345' '' 'Edit' 'Edit' 0 $null (New-Rect 10 10 20 20)
+$numericAll=[AppStudio.LocatorBuilder]::Build($numeric,$window,(New-List @($numeric)))
+if((Find $numericAll 'uia.automationId').Count-ne0){throw 'numeric-only AutomationId was used'}
+if((Find $numericAll 'win32.ctrlId').Count-ne0){throw 'zero ctrlId was used'}
+if((Find $numericAll 'uia.nameControlType').Count-ne0){throw 'a name locator was invented from an empty name'}
+$numeric.CtrlId=-1
+if((Find ([AppStudio.LocatorBuilder]::Build($numeric,$window,(New-List @($numeric)))) 'win32.ctrlId').Count-ne0){throw '-1 ctrlId was used'}
+
+# Nothing but a rectangle: exactly one locator, and it is a description.
+$bare=New-Node $null $null $null $null 0 $null (New-Rect 140 160 30 30)
+$bareAll=[AppStudio.LocatorBuilder]::Build($bare,$window,(New-List @($bare)))
+if($bareAll.Count-ne1-or$bareAll[0].Strategy-ne'window.relative'){throw ('bare element invented material: '+(($bareAll|ForEach-Object{$_.Strategy})-join','))}
+if([AppStudio.LocatorBuilder]::BestConfidence($bareAll)-ne'low'){throw 'bare element was not low confidence'}
+
+# A duplicated name is stated as medium, not sold as unique.
+$twinA=New-Node $null 'OK' 'Button' 'Button' 0 'W > Button "OK"' (New-Rect 10 10 40 20)
+$twinB=New-Node $null 'OK' 'Button' 'Button' 0 'W > Button "OK" 2' (New-Rect 60 10 40 20)
+$twinAll=[AppStudio.LocatorBuilder]::Build($twinA,$window,(New-List @($twinA,$twinB)))
+if((Find $twinAll 'uia.nameControlType')[0].Confidence-ne'medium'){throw 'a duplicated name was not reduced to medium'}
+
+# No locator may ever carry a handle, a RuntimeId or a field value.
+foreach($locator in @($all)+@($numericAll)+@($bareAll)+@($twinAll)){
+ if($locator.Reasons.Count-lt1){throw ('no reason given for '+$locator.Strategy)}
+ $json=[AppStudio.JsonWriter]::Write($locator.ToJson())
+ foreach($forbidden in @('hwnd','runtimeId','liveValue','value')){
+  if($json-match ('"'+$forbidden+'"')){throw ($forbidden+' reached a locator: '+$locator.Strategy)}
+ }
 }
-function New-Target {
-    $target=New-Object AppStudio.TargetInfo;$target.TargetRunId='run-1';$target.ProcessName='Fixture';$target.TopLevelClass='#32770';$target.TopLevelCaption='Order entry';$target.ClientRect=New-Rect 100 100 500 400;return $target
+
+# Resolution: unique wins, ambiguous refuses, missing refuses, and a position is
+# never used to break a tie.
+$fresh=New-List @((New-Node 'CustomerCode' 'Customer code' 'Edit' 'Edit' 1002 'Window > Pane > Edit "Customer code"' (New-Rect 120 130 100 20)))
+$resolved=[AppStudio.LocatorResolver]::Resolve($all,$fresh)
+if(-not$resolved.Resolved-or$resolved.UsedLocator.Strategy-ne'uia.automationId'){throw ('unique resolution failed: '+$resolved.State)}
+
+$twinLocators=[AppStudio.LocatorBuilder]::Build($twinA,$window,(New-List @($twinA,$twinB)))
+$twinFresh=New-List @((New-Node $null 'OK' 'Button' 'Button' 0 'x' (New-Rect 10 10 40 20)),(New-Node $null 'OK' 'Button' 'Button' 0 'y' (New-Rect 60 10 40 20)))
+$ambiguous=[AppStudio.LocatorResolver]::Resolve($twinLocators,$twinFresh)
+if($ambiguous.Resolved-or$ambiguous.State-ne'ambiguous'){throw ('ambiguity was not refused: '+$ambiguous.State)}
+if($ambiguous.Reason-notmatch 'guess'){throw 'the ambiguity refusal did not say why'}
+
+$missing=[AppStudio.LocatorResolver]::Resolve($all,(New-List @((New-Node 'Somethingelse' 'x' 'Edit' 'Edit' 9 'z' (New-Rect 0 0 5 5)))))
+if($missing.Resolved-or$missing.State-ne'not-found'){throw ('a missing element was not refused: '+$missing.State)}
+
+$positionOnly=[AppStudio.LocatorResolver]::Resolve($bareAll,$fresh)
+if($positionOnly.Resolved-or$positionOnly.State-ne'no-locator'){throw ('a position was used as an address: '+$positionOnly.State)}
+if(($positionOnly.Trace-join' ')-notmatch 'never used to decide'){throw 'the position locator was not reported as unusable'}
+# The same holds for the structural index: it describes, it does not identify.
+$indexOnly=New-Node $null $null $null 'Edit' 0 $null (New-Rect 120 130 100 20)
+$indexLocators=[AppStudio.LocatorBuilder]::Build($indexOnly,$window,(New-List @($indexOnly)))
+if((Find $indexLocators 'win32.classIndex').Count-ne1){throw 'the class index locator was not recorded'}
+$indexResolve=[AppStudio.LocatorResolver]::Resolve($indexLocators,$fresh)
+if($indexResolve.Resolved-or$indexResolve.State-ne'no-locator'){throw ('a structural index was used as an address: '+$indexResolve.State)}
+foreach($strategy in @('uia.automationId','uia.nameControlType','uia.treePath','win32.ctrlId')){
+ if(-not [AppStudio.LocatorResolver]::Identifies($strategy)){throw ($strategy+' stopped counting as an identification')}
 }
-function Find-Strategy($items,[string]$strategy) { return @($items|Where-Object{$_.Strategy-eq$strategy}) }
-
-$stable=New-Base 'CustomerCode' 'Customer code' 1002
-$stable.Uia.TreePath=@()
-$stableLocators=[AppStudio.LocatorBuilder]::Build($stable,(New-Target))
-if ((Find-Strategy $stableLocators 'uia.automationId').Count-ne1) { throw 'stable AutomationId candidate missing' }
-if ((Find-Strategy $stableLocators 'uia.nameControlType').Count-ne1) { throw 'Name+ControlType candidate missing' }
-if ((Find-Strategy $stableLocators 'win32.ctrlId').Count-ne1) { throw 'valid ctrlId candidate missing' }
-if ((Find-Strategy $stableLocators 'win32.classPath').Count-ne1) { throw 'Win32 class path candidate missing' }
-if ((Find-Strategy $stableLocators 'screen.relative').Count-ne1) { throw 'relative coordinate candidate missing' }
-
-$numeric=New-Base '12345' 'Updated 2026-08-01 12:34 99%' 0
-$numeric.Uia.TreePath=@()
-$numericLocators=[AppStudio.LocatorBuilder]::Build($numeric,(New-Target))
-if ((Find-Strategy $numericLocators 'uia.automationId').Count-ne0) { throw 'numeric-only AutomationId was used' }
-if ((Find-Strategy $numericLocators 'win32.ctrlId').Count-ne0) { throw 'zero ctrlId was used' }
-$numeric.Win32.CtrlId=-1
-if ((Find-Strategy ([AppStudio.LocatorBuilder]::Build($numeric,(New-Target))) 'win32.ctrlId').Count-ne0) { throw '-1 ctrlId was used' }
-
-$indexOnly=New-Base '' '' 0
-$pathNode=New-Object AppStudio.UiaNode;$pathNode.ControlType='Edit';$pathNode.IndexAmongSameType=2;$pathNode.SiblingCount=4;$indexOnly.Uia.TreePath=@($pathNode)
-$indexLocators=[AppStudio.LocatorBuilder]::Build($indexOnly,(New-Target))
-if ((Find-Strategy $indexLocators 'uia.path').Count-ne1) { throw 'captured index path candidate missing' }
-if ((Find-Strategy $indexLocators 'uia.nameControlType').Count-ne0) { throw 'Name candidate was invented from empty material' }
-
-$coordinateOnly=New-Object AppStudio.Snapshot;$coordinateOnly.Win32=New-Object AppStudio.Win32Info;$coordinateOnly.Win32.WindowRect=New-Rect 140 160 30 30;$coordinateOnly.Win32.ClientRect=$coordinateOnly.Win32.WindowRect
-$coordinateLocators=[AppStudio.LocatorBuilder]::Build($coordinateOnly,(New-Target))
-if ($coordinateLocators.Count-ne1-or$coordinateLocators[0].Strategy-ne'screen.relative') { throw 'UIA-unavailable coordinate-only boundary produced invented material' }
-
-foreach($locator in @($stableLocators)+@($numericLocators)+@($indexLocators)+@($coordinateLocators)) {
-    if ([AppStudio.LocatorBuilder]::ContainsForbiddenPersistentMaterial($locator)) { throw ('forbidden persistent material in '+$locator.Strategy) }
-    $json=[AppStudio.JsonWriter]::Write([AppStudio.LocatorJson]::Build($locator))
-    if ($json-match 'secret-value|runtimeId|hwnd|liveValue|recordedValue') { throw ('forbidden value or ephemeral identity in '+$locator.Strategy) }
+foreach($strategy in @('win32.classIndex','window.relative')){
+ if([AppStudio.LocatorResolver]::Identifies($strategy)){throw ($strategy+' was promoted to an identification')}
 }
-Write-Output ('PASS test-locator stableCandidates='+$stableLocators.Count+' numericAutoId=excluded invalidCtrlId=excluded indexPath=kept coordinateOnly=1 forbiddenMaterial=0')
+
+$empty=[AppStudio.LocatorResolver]::Resolve($all,(New-List @()))
+if($empty.State-ne'no-elements'){throw ('an empty candidate list was not reported: '+$empty.State)}
+
+Write-Output ('PASS test-locator strategies=6 numericAutoId=excluded invalidCtrlId=excluded bareElement=position-only duplicateName=medium forbiddenMaterial=0 resolve=unique/ambiguous/not-found/no-elements positionAndIndexNeverResolve=1')

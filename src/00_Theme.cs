@@ -48,13 +48,9 @@ namespace AppStudio
         public const double NumSize = 22;
         public const double BodyLine = 1.55;
 
-        // ---- fixed shell metrics ----
+        // ---- fixed window metrics ----
         public const double TopbarHeight = 46;
         public const double ProgressTrackHeight = 4;
-        public const double ScreenHeaderHeight = 50;
-        public const double ActionBarHeight = 62;
-        public const double ProgressMarkSize = 20;
-        public const double RowHeight = 34;
 
         private static readonly Dictionary<string, SolidColorBrush> Brushes = new Dictionary<string, SolidColorBrush>(StringComparer.Ordinal);
         private static readonly List<ResourceDictionary> Installed = new List<ResourceDictionary>();

@@ -5,9 +5,9 @@
 - Windows PowerShell 5.1
 - .NET Framework 4.x と `csc.exe`
 - WPF、Windows Forms、UIAutomationClient/UIAutomationTypes
-- 開発試験用fixtureを表示できるinteractive desktop
+- 開発試験用 fixture を表示できる interactive desktop
 
-外部package restoreやnetwork accessは不要である。fixtureのEXEは `tests/.build` に開発時だけ生成し、持込み配布物には含めない。
+外部 package restore や network access は不要である。fixture の EXE は `tests/.build` に開発時だけ生成し、持込み配布物には含めない。
 
 ## 起動
 
@@ -17,19 +17,19 @@
 wscript.exe .\launch.vbs
 ```
 
-consoleを見ながら起動:
+console を見ながら起動:
 
 ```powershell
 .\launch.bat
 ```
 
-compileだけを確認:
+compile だけを確認:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -CompileOnly
 ```
 
-headless環境診断:
+headless 環境診断:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -Headless -DiagnosticsPath .\runtime\headless-diagnostics.json
@@ -37,46 +37,54 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 
 ## 実装規約
 
-- `src/*.cs` はC# 5.0構文かつASCIIだけを使う。文字列補間、`nameof`、pattern matching、tuple、null条件演算子などを使わない。
-- 日本語UI文言は `assets/messages/*.txt` に置く。
-- `launch.vbs` はASCIIを保つ。
-- PowerShellは5.1互換にし、三項演算子やPowerShell 7専用構文を使わない。
-- UI threadは対象へ直接問い合わせない。UIA取得・UIA操作は構成C workerへ値渡しする。
-- WinEvent callbackはqueueへ積むだけにし、UI timerがdrainする。
-- `LiveValue` をSession、locator、event、diagnostics、reportへ渡さない。永続経路は`RecordedValue`だけを使う。
-- timeout、partial、fallback、worker restart、request dropを握り潰さない。
-- 既存の期待値を緩める、assertionを削る、skipを追加することで試験を緑にしない。
+- `src/*.cs` は C# 5.0 構文かつ ASCII だけを使う。文字列補間、`nameof`、pattern matching、tuple、null 条件演算子などを使わない。
+- 日本語 UI 文言は `assets/messages/*.txt` に置く。記号（`●` など）も文言である。
+- `launch.vbs` は ASCII を保つ。
+- PowerShell は 5.1 互換にし、三項演算子や PowerShell 7 専用構文を使わない。
+- UI thread は対象へ直接問い合わせない。UIA 取得・UIA 操作は worker へ値渡しする。
+- **WPF のオブジェクトは、それを作った thread からしか触らない。** 録画は専用 thread で走るので、枠と録画コントロールへの操作は必ず dispatcher 経由にする。撮影前の「消す」は待ち合わせる（`Invoke`）、時計や枠の追従は待たない（`BeginInvoke`）。
+- WinEvent callback は queue へ積むだけにし、UI timer が drain する。
+- 値は `Privacy` を通してしか step に入らない。他の場所で「これは秘密か」を判断しない。
+- timeout、partial、fallback、worker restart、request drop を握り潰さない。
+- 既存の期待値を緩める、assertion を削る、skip を追加することで試験を緑にしない。
 
 ## Source map
 
 | file | 責務 |
 |---|---|
-| `00_Theme` | 共通design system準拠のcolor token・spacing・型スケールと、Button/TextBox/List/Expander/CheckBox/ComboBox/ScrollBarのControlTemplate。light/darkの切替と`runtime/settings/theme.txt`への保存 |
+| `00_Theme` | 共通 design system 準拠の color token・spacing・型スケールと ControlTemplate。light/dark の切替と `runtime/settings/theme.txt` への保存 |
 | `01_App` | 起動、DPI、fatal error |
-| `02_Shell` | 段階UI（対象→目的→実行）、hover表示、記録、操作、出力 |
-| `03_Overlay` | passive overlay |
-| `04_Hotkeys` | RegisterHotKey、代替、設定保存 |
-| `05_Native` | Win32宣言、DPI/monitor/input/window helper |
-| `06_Win32Probe` | bounded Win32取得 |
-| `07_UiaProbe` | UIA snapshotとpattern操作 |
-| `08_Snapshot` | layer contractとworker入口 |
-| `09_WinEvents` | OUTOFCONTEXT event queue |
-| `10_Locator` | 純logicのlocator生成・初期確度 |
-| `11_Resolver` | 実解決とverification |
-| `12_Probe` | 操作試験、guard、fallback、undo |
+| `02_Studio` | 主画面（スナップ／録画／セッション一覧／セッション詳細／詳細設定）、カウントダウン、秘密入力の問い合わせ |
+| `04_Hotkeys` | RegisterHotKey（stop / emergency）、代替、設定保存 |
+| `05_Native` | Win32 宣言、DPI/monitor/input/window helper、重なり順の列挙、検証つき前面化 |
+| `06_Win32Probe` | bounded Win32 取得 |
+| `07_UiaProbe` | UIA snapshot と pattern 操作 |
+| `08_Snapshot` | layer contract と worker 入口 |
+| `10_Locator` | ScanNode からのロケータ生成と確度 |
+| `11_Resolver` | 取り直した一覧に対する解決。何が identification で何が description かを決める |
+| `12_Probe` | 操作の実行、guard、経路の繰り上がり、試行列、undo |
 | `13_Capture` | BitBlt/PrintWindow、mask、hash |
-| `14_Session` | session、RecordedValue、live isolation |
-| `15_PackWriter` | schema、pack、manifest、diagnostics.log |
-| `16_Report` | 単一self-contained HTML generator |
-| `17_Diagnostics` | environment採取 |
-| `18_Json` | 順序安定JSON writer |
+| `14_Privacy` | 何を書き残してよいかの唯一の規則 |
+| `15_Store` | session model と JSONL 保存・読み戻し |
+| `16_Report` | 自己完結 HTML |
+| `17_Diagnostics` | environment 採取 |
+| `18_Json` | 順序安定 JSON writer |
 | `19_Worker` | active+warm spare process、JSONL、watchdog、scan streaming |
-| `20_SessionLog` | 明示保存なしの逐次追記log（JSONL＋要約）|
-| `21_Scan` | 自動調査のmodelとWin32 child列挙、provider統合 |
-| `22_ScanProviders` | UIA/MSAA treeのwalkと座標sampling（worker側）|
-| `23_ScanRunner` | 専用worker、進捗、打切り理由、人向け要約 |
+| `20_SessionLog` | 書き手と同居したまま記録を読み戻す |
+| `21_Scan` | 取得の model と Win32 child 列挙、provider 統合 |
+| `22_ScanProviders` | UIA/MSAA tree の walk と座標 sampling（worker 側）|
+| `23_ScanRunner` | 専用 worker、進捗、打切り理由、人向け要約。録画用に worker を使い回す持続 mode を持つ |
 | `24_Messages` | `assets/messages` の日本語文言読み出し |
-| `25_Observation` | 手動観察の集約記録とmouse button監視 |
+| `25_Recorder` | アプリ横断の記録。前面追跡、押下と chord の検出、入力欄の値読み戻し |
+| `26_JsonReader` | JSON 読み取り |
+| `27_Picker` | 全画面の選択オーバーレイ |
+| `28_RecordHud` | 録画中の枠と停止コントロール。撮影前に画面から消えたことを自分で確かめる |
+| `29_Replay` | 再生。ウィンドウ確認、解決、実行、試行列 |
+| `30_SessionMd` | AI へ渡す `session.md` |
+| `31_Screens` | 画面台帳と撮影 |
+| `32_Pdf` | 依存なしの PDF writer（無劣化 Flate と写真 DCT） |
+| `33_ScreensPdf` | AI へ渡す `screens.pdf` と容量予算 |
+| `34_Acquire` | 取得と撮影の共通処理、秘密欄の黒塗り、出力の書き出し口 |
 
 ## 試験
 
@@ -86,81 +94,74 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\run-all.ps1
 ```
 
-runnerは相互のWPF/COM/static状態を持ち越さないよう、各testを新品のPS5.1 STA processで順次実行する。所要時間はrunner数と実行環境に比例するため、実測値は各自の環境で取ること。
+runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test を新品の PS5.1 STA process で順次実行する。
 
-主要runner:
+主要 runner:
 
-- `test-compile`: 全source、ASCII/C#5、起動終了
-- `test-hang-recovery`: 恒久hang 20回、直後正常取得、resource/orphan/queue/UI
-- `test-live-basic`: Win32/WPF、pin、tree、crop
-- `test-live-move`: 物理座標、別monitor、overlay
-- `test-live-events`: menu/focus/window eventと再入
-- `test-live-restart`: 全locatorのrestart verification
-- `test-live-probe`: 10 kind、5 outcome、method、guard、undo（前後でカーソル位置を保存・復元する）
-- `test-input-probe`: 実clickと実キーが**専用の受信アプリへ実際に届いたか**、覆われた点が `policy.covered` でblockedされ誤送信が0であること、カーソルが元位置へ戻ること
-- `test-live-canvas`: child HWNDなし、UIA-EMPTYTREE、座標fallback、一連動線
-- `test-live-value-isolation`: session/report/log/event/locator/clipboard横断
-- `test-scan`: UIA/MSAA/Win32/座標samplingの統合、HWND無し要素、独自描画時のsampling起動、要素logの値漏れ0
-- `test-observe`: 要素遷移・滞在・click前後差分・対象外の非記録・一時停止、およびsourceにkey入力捕捉APIが存在しないことの固定
-- `test-autosave`: 強制終了しても記録が残ること、書けない時に理由を出すこと、実行中でもlogが読めること
-- `test-ui-flow`: 実GUIをUI Automationで駆動し、対象選択→自動調査→結果→操作試験(読取)→手動観察まで通す
-- `test-gui-e2e`: **実マウス・実キー**でメモ帳と電卓を対象に、対象選択→自動調査→手動観察の自動記録→AI依頼文生成→回答取込→実行→履歴→テーマ切替まで通す。回答は正答・散文・存在しない部品・途中で切れたJSONの4種を投入し、実行可否の判定を固定する
-- `test-handoff`: Screen台帳とComponent IDが添付2点の両方で同じものを指すこと、PDFのxrefが実オブジェクトを指すこと、格納画像をinflateして元PNGと画素一致（無劣化）すること、画面や部品が動くと `premiseHash` が変わること
-- `test-packaged-target`: **実アプリ**（電卓）で、frame windowを持つpackaged applicationが自分自身に覆われたと判定されないこと、window全体への `focus` が経路を使い切って失敗しないこと。frameとcontentが分かれていない環境では通ったふりをせず SKIP する
-- `test-ai-calculator-e2e`: **実アプリ**。AI経路の縦切りを2段で回す driver（`-Phase request` / `-Phase answer`）。回答は外部で書かれるため `run-all.ps1` には入れず、手で回す
-- `test-schema / test-manifest / test-report / test-mask / test-diagnostics`: 純logicと出力
+- `test-compile`: 全 source、ASCII/C#5、起動終了
+- `test-docs`: 文書に載っている path と語彙が実在すること
+- `test-locator`: ロケータ生成の規則、禁止材料の不在、解決の一意／曖昧／不在、**位置と兄弟順が住所として使われないこと**
+- `test-privacy`: **キー捕捉 API がソースに存在しないこと**、監視キー表、秘密判定の3規則、値方針3種、秘密が出力へ出ないこと
+- `test-session-store`: 逐次追記の耐久性、実行中の読み戻し、round trip、一覧、壊れたフォルダの報告
+- `test-outputs`: 3出力の生成、**AI 添付がちょうど2ファイル**、PDF の xref 健全性、`session.md` の9節と base64 不在、HTML の外部参照0とエスケープ、容量予算（悪化する縮小段を採らないこと、効く場合は採ること、省略の明記）
+- `test-replay`: 経路 mode の意味、拒否の試行列、存在しないウィンドウ、許可なしの拒否、住所を持たない要素の拒否
+- `test-diagnostics` / `test-acq-diagnostics`: 診断 code が全投影へ届くこと、画像0のとき PDF 不在の理由が出ること
+- `test-hang-recovery`: 恒久 hang 20回、直後正常取得、resource/orphan/queue/UI
+- `test-live-basic`: Win32/WPF、deep tree、画像と黒塗り表明
+- `test-live-move`: 物理座標、別 monitor、録画枠が取得矩形に一致すること、**撮影前に画面から消え、あとで戻ること**
+- `test-live-restart`: 再起動後も住所が生き残ること、消えた要素が `not-found` になること
+- `test-capture-policy`: password 矩形が実際に黒いこと、全景撮影の明示要求、値漏れ0
+- `test-live-canvas`: child HWND なし、UIA-EMPTYTREE、**構造を公開しないことが両出力に明記されること**
+- `test-scan`: 4経路の統合、HWND 無し要素、独自描画時の sampling 起動、値漏れ0
+- `test-autosave`: **製品が実際に書く `SessionStore.Append` 経路で**、強制終了しても記録と索引が残ること、書けない時に `STORE-WRITE` の理由を出して別の場所へ勝手に出さないこと
+- `test-ui-flow`: 実 GUI を UI Automation で駆動し、主画面が3つの主役だけを出すこと、詳細設定が折り畳まれていること、再生許可が既定で切であること、MSAA が経路として出ないこと
+- `test-gui-e2e`: **実マウス・実キー**で2つの実アプリを相手に、選択→取得→出力、アプリ横断の録画、秘密欄の非保存、キーフレームの黒塗り、自分のウィンドウが証拠へ混入しないこと、再生と試行列、秘密ステップでの操作者への問い合わせまで通す
 
-fixtureだけをbuild:
+fixture だけを build:
 
 ```powershell
 .\tests\build-fixtures.ps1
 ```
 
-`FixtureWinForms`、`FixtureWin32`、`FixtureWpf`、`FixtureCanvas`を `tests/.build` に生成する。`FixtureWpf`は正常・一時停止・恒久停止を兼ねる。
+`FixtureWinForms`、`FixtureWin32`、`FixtureWpf`、`FixtureCanvas`、`FixtureInputTarget` を `tests/.build` に生成する。
 
-`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-case-real-input`、`test-gui-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
+`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-gui-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
 
-`test-packaged-target` と `test-ai-calculator-e2e` は自分で起動した電卓だけを操作し、自分で閉じる。起動前から画面にあった電卓のwindowは触らない。`test-ai-calculator-e2e` は回答を書く相手が外部にいるため2段に分かれており、`-Phase request` が App Studio と電卓を起動したまま状態fileを残し、`-Phase answer` がその同じprocessへ接続して回答を投入する。
+`test-gui-e2e` は自分で起動した fixture だけを操作する。全 click は押す直前に `WindowTools.ProcessIdAt` で対象プロセスのものだと確認し、違えば一度だけ対象を前面に出して確認し直し、それでも違えば例外にして何も押さない。再生の前には、記録した各ウィンドウ記述に一致する窓がちょうど1つであることを確かめ、複数あれば再生を行わずその事実を出力する。
 
-```powershell
-$env:APPSTUDIO_ALLOW_REAL_INPUT = '1'
-.\tests\test-ai-calculator-e2e.ps1 -Phase request -Goal '7 に 8 を足した答えを電卓の画面に出す' -Evidence .\artifacts\ai-e2e\run1
-# <case>/handoff/ の2fileをAIへ渡し、返ってきた本文をそのままfileへ保存する
-.\tests\test-ai-calculator-e2e.ps1 -Phase answer -Evidence .\artifacts\ai-e2e\run1 -AnswerFile <返答file>
-```
+`test-packaged-target` は自分で起動した電卓だけを操作し、自分で閉じる。起動前から画面にあった電卓の window は触らない。
 
-`test-input-probe` は `FixtureInputTarget`（クリックとキーの到達だけを記録し、押された文字そのものは保存しない窓）を**現在のカーソル位置の真下へ移してから**実入力を出し、最後にカーソルを元へ戻す。`test-live-probe` も同じく復元する。
+`test-ui-flow` は実 GUI を起動し、**物理カーソルを動かさず UI Automation の pattern でボタンを押す**。App Studio 窓の画像が要るときだけ `APPSTUDIO_UI_SHOTS=1` を立てる（画像には利用者の窓一覧が写るため既定では撮らない）。
 
-`test-ui-flow` は実GUIを起動し、**物理カーソルを動かさずUI Automationのpatternでボタンを押す**。App Studio窓の画像が要るときだけ `APPSTUDIO_UI_SHOTS=1` を立てる（画像には利用者の窓一覧が写るため既定では撮らない）。`test-live-probe` は fallbackで `SetCursorPos`＋`SendInput` を出す唯一のtestであり、他人がdesktopを使っている間は流さない。
+## 出力を目で確かめる
 
-`test-gui-e2e` は自分で起動したメモ帳と電卓だけを操作する。全clickは押す直前に `WindowTools.ProcessIdAt` で対象processのものだと確認し、違えば例外にして何も押さない。メモ帳は保存せずに閉じる。
+自動試験は `report.html` の外部参照0や `screens.pdf` の xref 健全性までは固定するが、**読めるかどうかは実際に開かないと分からない**。受け入れの前に、生成された `runtime/sessions/<id>/out/` の3ファイルを実ブラウザと実 PDF 表示で開き、表・画像・ページ番号・黒塗りを目で確認すること。
 
-## UI規約
+## schema 変更
 
-画面の見た目と操作導線は、共通のdesign systemに揃える。
+`meta.json` の `schema` は `app-studio/session/2`。既存 key の意味を変える破壊的変更では版を上げる。key の追加だけでも reader が未知 key/type を捨てずに素通しできることを維持する。`steps.jsonl` は同じ stepId が複数行現れる前提であり、読み手は最後の行を採る。
 
-- 色・余白・角丸・型スケールは `src/00_Theme.cs` のtokenだけを使う。`Color.FromRgb` や `Brushes.White` をUIコードへ直接書かない。
-- 画面は上から topbar(46) / progress track(4) / screen header / status badge / workspace / action bar(62) の6帯。この並びを画面ごとに変えない。
-- 運転を前へ進める操作は action bar に置く。カード内には「そのカードの中身に対する補助操作」だけを compact button で置く。
-- 補足・詳細・上級者向け追跡情報は `Accordion(...)` へ入れる。**閉じた状態で中身の量や状態が分かる要約を必ず付ける**。要約が空になる実装にしない。
-- 同じ意味には同じ部品を使う。許可の可否は必ず `PermissionSwitch` + `PermissionBox`、状態の一言は `Badge`、結果の一段落は `Callout`、件数は `StatCard`。
-- 成功・失敗・拒否は色で区別する（`Success` / `Danger` / `Caution`）。灰色一色の段落にしない。
-- 一文が入る行は折り返す。ListBoxへ文字列を入れるなら `AppWrapRow` を `ItemTemplate` に付ける。
-
-worker protocolのdebugが要るときは `APPSTUDIO_WORKER_TRACE=<path>` を立てる。workerが受け取った要求行の長さと先頭だけをその file へ追記する。
-
-## schema変更
-
-`session.json` の既存keyの意味を変える破壊的変更では `schemaVersion` を上げる。keyの追加だけでもreaderが未知key/typeを捨てずに素通しできることを維持する。key順、ID、時刻、RecordedValue、events.sourceは `test-schema.ps1` で固定する。
-
-## WP-S再測定
+## WP-S 再測定
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\tests\wp-s\run-wp-s.ps1
 ```
 
-WP-S成果5点は `artifacts/wp-s/<run>/` に出る。現在の採用は構成C。hover 1,500ms、pin 3,000ms、操作5,000msが推奨値である。WP-S文書の数値と製品回帰の数値を混同しない。
+WP-S 成果は `artifacts/wp-s/<run>/` に出る。WP-S 文書の数値と製品回帰の数値を混同しない。
 
-## 配布folderの確認
+## UI 規約
 
-持込み対象は `launch.vbs / launch.bat / app-studio*.ps1 / src / assets / docs`。`tests/.build`、`runtime`、開発時の調査packは除外する。未署名EXEやSDK interop DLLを加えない。
+画面の見た目と操作導線は、共通の design system に揃える。
+
+- 色・余白・角丸・型スケールは `src/00_Theme.cs` の token だけを使う。`Color.FromRgb` や `Brushes.White` を UI コードへ直接書かない。
+- 主画面は topbar(46) / progress track(4) / 本体（左レール＋詳細）/ status bar の4帯。
+- **主役は「スナップ」「録画」の2ボタンと、その下のセッション一覧だけ。** 再生・レポート・AI 向け出力・書き出しはセッションを選んだときの従属操作。経路選択・値方針・容量予算・診断は［詳細設定］の折り畳みの中。
+- 補足・詳細・上級者向け追跡情報は Accordion へ入れる。**閉じた状態で中身の量や状態が分かる要約を必ず付ける。**
+- 許可の可否は必ず tick box と警告枠、状態の一言は Badge、件数は StatCard。
+- 成功・失敗・拒否は色で区別する（`Success` / `Danger` / `Caution`）。灰色一色の段落にしない。
+
+worker protocol の debug が要るときは `APPSTUDIO_WORKER_TRACE=<path>` を立てる。
+
+## 配布 folder の確認
+
+持込み対象は `launch.vbs / launch.bat / app-studio*.ps1 / src / assets / docs`。`tests/.build`、`runtime`、`artifacts` は除外する。未署名 EXE や SDK interop DLL を加えない。

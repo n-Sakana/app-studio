@@ -3,406 +3,244 @@ namespace AppStudio
     using System;
     using System.Collections.Generic;
     using System.Globalization;
-    using System.Text.RegularExpressions;
+    using System.Text;
 
-    public sealed class TargetInfo
+    // A way of finding one element again later, written only from material the
+    // acquisition actually returned. Window handles, UI Automation RuntimeIds
+    // and field contents never appear in one: the first two do not survive a
+    // restart and the third is the user's data, not an address.
+    public sealed class ElementLocator
     {
-        public string TargetRunId;
-        public string ProcessName;
-        public string TopLevelClass;
-        public string TopLevelCaption;
-        public RectValue ClientRect;
+        public const string StrategyAutomationId = "uia.automationId";
+        public const string StrategyNameType = "uia.nameControlType";
+        public const string StrategyTreePath = "uia.treePath";
+        public const string StrategyCtrlId = "win32.ctrlId";
+        public const string StrategyClassIndex = "win32.classIndex";
+        public const string StrategyWindowRelative = "window.relative";
 
-        public static TargetInfo FromSnapshot(Snapshot snapshot, string targetRunId)
-        {
-            TargetInfo target = new TargetInfo();
-            target.TargetRunId = targetRunId;
-            if (snapshot != null && snapshot.Win32 != null)
-            {
-                target.ProcessName = "pid-" + snapshot.Win32.ProcessId.ToString(CultureInfo.InvariantCulture);
-                target.ClientRect = snapshot.Win32.ClientRect;
-                if (snapshot.Win32.Ancestors != null && snapshot.Win32.Ancestors.Count != 0)
-                {
-                    Win32Ancestor top = snapshot.Win32.Ancestors[snapshot.Win32.Ancestors.Count - 1];
-                    target.TopLevelClass = top.ClassName;
-                    target.TopLevelCaption = top.Caption;
-                }
-                else
-                {
-                    target.TopLevelClass = snapshot.Win32.ClassName;
-                    target.TopLevelCaption = snapshot.Win32.Caption;
-                }
-            }
-            return target;
-        }
-    }
-
-    public sealed class LocatorScope
-    {
-        public string Kind;
-        public string ProcessName;
-        public string TopLevelClass;
-        public string TopLevelCaption;
-    }
-
-    public sealed class LocatorExpression
-    {
+        public string Strategy;
         public string AutomationId;
         public string Name;
         public string ControlType;
-        public string ParentClass;
-        public string ParentCaption;
-        public bool HasCtrlId;
+        public string ClassName;
+        public string TreePath;
         public int CtrlId;
-        public string[] Win32ClassPath;
-        public int? ClassIndex;
-        public UiaNode[] UiaPath;
-        public double? RelativeX;
-        public double? RelativeY;
-        public int? OffsetX;
-        public int? OffsetY;
-        public int? Width;
-        public int? Height;
-    }
-
-    public sealed class LocatorConfidence
-    {
-        public string Level;
-        public int Score;
+        public int ClassIndex = -1;
+        public double RelativeX = -1;
+        public double RelativeY = -1;
+        public string Confidence = "low";
         public List<string> Reasons = new List<string>();
-    }
 
-    public sealed class Verification
-    {
-        public DateTimeOffset At;
-        public string Context;
-        public string TargetRunId;
-        public int MatchCount;
-        public bool SameElement;
-        public int DurationMs;
-        public string Note;
-    }
+        public string Display
+        {
+            get
+            {
+                StringBuilder text = new StringBuilder();
+                text.Append(Strategy).Append(" { ");
+                if (!String.IsNullOrEmpty(AutomationId)) text.Append("AutomationId=").Append(AutomationId).Append(' ');
+                if (!String.IsNullOrEmpty(Name)) text.Append("Name=").Append(Name).Append(' ');
+                if (!String.IsNullOrEmpty(ControlType)) text.Append("ControlType=").Append(ControlType).Append(' ');
+                if (!String.IsNullOrEmpty(ClassName)) text.Append("class=").Append(ClassName).Append(' ');
+                if (CtrlId != 0) text.Append("ctrlId=").Append(CtrlId.ToString(CultureInfo.InvariantCulture)).Append(' ');
+                if (ClassIndex >= 0) text.Append("index=").Append(ClassIndex.ToString(CultureInfo.InvariantCulture)).Append(' ');
+                if (!String.IsNullOrEmpty(TreePath)) text.Append("path=").Append(TreePath).Append(' ');
+                if (RelativeX >= 0) text.Append("rel=").Append(RelativeX.ToString("0.###", CultureInfo.InvariantCulture)).Append(',').Append(RelativeY.ToString("0.###", CultureInfo.InvariantCulture)).Append(' ');
+                text.Append('}');
+                return text.ToString();
+            }
+        }
 
-    public sealed class Locator
-    {
-        public string LocatorId;
-        public string Strategy;
-        public LocatorScope Scope;
-        public LocatorExpression Expression;
-        public LocatorConfidence Confidence;
-        public List<Verification> Verifications = new List<Verification>();
+        public JsonObject ToJson()
+        {
+            return new JsonObject()
+                .Add("strategy", Strategy)
+                .Add("automationId", AutomationId)
+                .Add("name", Name)
+                .Add("controlType", ControlType)
+                .Add("className", ClassName)
+                .Add("treePath", TreePath)
+                .Add("ctrlId", CtrlId)
+                .Add("classIndex", ClassIndex < 0 ? null : (object)ClassIndex)
+                .Add("relativeX", RelativeX < 0 ? null : (object)RelativeX)
+                .Add("relativeY", RelativeY < 0 ? null : (object)RelativeY)
+                .Add("confidence", Confidence)
+                .Add("reasons", Reasons.ToArray());
+        }
+
+        public static ElementLocator FromJson(Dictionary<string, object> item)
+        {
+            ElementLocator locator = new ElementLocator();
+            locator.Strategy = JsonReader.Text(item, "strategy");
+            locator.AutomationId = JsonReader.Text(item, "automationId");
+            locator.Name = JsonReader.Text(item, "name");
+            locator.ControlType = JsonReader.Text(item, "controlType");
+            locator.ClassName = JsonReader.Text(item, "className");
+            locator.TreePath = JsonReader.Text(item, "treePath");
+            locator.CtrlId = JsonReader.Number(item, "ctrlId", 0);
+            locator.ClassIndex = JsonReader.Number(item, "classIndex", -1);
+            locator.Confidence = JsonReader.Text(item, "confidence") ?? "low";
+            object relativeX;
+            if (item != null && item.TryGetValue("relativeX", out relativeX) && relativeX != null)
+            {
+                try { locator.RelativeX = Convert.ToDouble(relativeX, CultureInfo.InvariantCulture); }
+                catch { locator.RelativeX = -1; }
+            }
+            object relativeY;
+            if (item != null && item.TryGetValue("relativeY", out relativeY) && relativeY != null)
+            {
+                try { locator.RelativeY = Convert.ToDouble(relativeY, CultureInfo.InvariantCulture); }
+                catch { locator.RelativeY = -1; }
+            }
+            object[] reasons = JsonReader.Items(item, "reasons");
+            if (reasons != null) for (int index = 0; index < reasons.Length; index++) locator.Reasons.Add(Convert.ToString(reasons[index], CultureInfo.InvariantCulture));
+            return locator;
+        }
     }
 
     public static class LocatorBuilder
     {
-        public static Locator[] Build(Snapshot snapshot, TargetInfo target)
+        // Every locator that the material supports, strongest first. A weak one
+        // is still produced and kept, because a stated weak address is worth
+        // more than a silent absence, and the resolver refuses to act on an
+        // ambiguous one anyway.
+        public static List<ElementLocator> Build(ScanNode node, RectValue windowRect, List<ScanNode> siblingsOfSameWindow)
         {
-            List<Locator> locators = new List<Locator>();
-            if (snapshot == null) return locators.ToArray();
-            int sequence = 0;
-            UiaInfo uia = snapshot.Uia;
-            Win32Info win32 = snapshot.Win32;
+            List<ElementLocator> locators = new List<ElementLocator>();
+            if (node == null) return locators;
 
-            if (uia != null && IsStableAutomationId(uia.AutomationId))
+            if (IsStableAutomationId(node.AutomationId))
             {
-                LocatorExpression expression = new LocatorExpression();
-                expression.AutomationId = uia.AutomationId;
-                expression.ControlType = EmptyToNull(uia.ControlType);
-                locators.Add(Create(++sequence, "uia.automationId", target, expression));
+                ElementLocator locator = new ElementLocator();
+                locator.Strategy = ElementLocator.StrategyAutomationId;
+                locator.AutomationId = node.AutomationId;
+                locator.ControlType = node.ControlType;
+                locator.Confidence = "high";
+                locator.Reasons.Add("AutomationId is set, is not purely numeric, and is the identifier the application chose.");
+                locators.Add(locator);
             }
-            if (uia != null && !String.IsNullOrWhiteSpace(uia.Name) && !String.IsNullOrWhiteSpace(uia.ControlType))
+            if (!String.IsNullOrWhiteSpace(node.Name) && !String.IsNullOrWhiteSpace(node.ControlType))
             {
-                LocatorExpression expression = new LocatorExpression();
-                expression.Name = uia.Name;
-                expression.ControlType = uia.ControlType;
-                locators.Add(Create(++sequence, "uia.nameControlType", target, expression));
+                ElementLocator locator = new ElementLocator();
+                locator.Strategy = ElementLocator.StrategyNameType;
+                locator.Name = node.Name;
+                locator.ControlType = node.ControlType;
+                locator.Confidence = CountByNameType(siblingsOfSameWindow, node) == 1 ? "high" : "medium";
+                locator.Reasons.Add(CountByNameType(siblingsOfSameWindow, node) == 1
+                    ? "The name and control type pair was unique inside this window at record time."
+                    : "The name and control type pair matched more than one element inside this window at record time.");
+                locators.Add(locator);
             }
-            if (uia != null && !HasReason(uia.Status, "UIA-EMPTYTREE") && HasUsablePath(uia.TreePath))
+            if (!String.IsNullOrWhiteSpace(node.Path))
             {
-                LocatorExpression expression = new LocatorExpression();
-                expression.UiaPath = ClonePath(uia.TreePath);
-                locators.Add(Create(++sequence, "uia.path", target, expression));
+                ElementLocator locator = new ElementLocator();
+                locator.Strategy = ElementLocator.StrategyTreePath;
+                locator.TreePath = node.Path;
+                locator.ControlType = node.ControlType;
+                locator.Confidence = "medium";
+                locator.Reasons.Add("The hierarchy path holds while the application keeps the same layout; it moves when the layout does.");
+                locators.Add(locator);
             }
-            if (win32 != null && win32.CtrlId != 0 && win32.CtrlId != -1)
+            if (node.CtrlId != 0 && node.CtrlId != -1 && !String.IsNullOrWhiteSpace(node.ClassName))
             {
-                string parentClass = ImmediateParentClass(win32, target);
-                if (!String.IsNullOrWhiteSpace(parentClass))
+                ElementLocator locator = new ElementLocator();
+                locator.Strategy = ElementLocator.StrategyCtrlId;
+                locator.CtrlId = node.CtrlId;
+                locator.ClassName = StableClassName(node.ClassName);
+                locator.Confidence = "medium";
+                locator.Reasons.Add("The control id belongs to the dialog template, so it survives a restart unless the application generates its classes.");
+                locators.Add(locator);
+            }
+            if (!String.IsNullOrWhiteSpace(node.ClassName))
+            {
+                int index = ClassIndexOf(siblingsOfSameWindow, node);
+                if (index >= 0)
                 {
-                    LocatorExpression expression = new LocatorExpression();
-                    expression.HasCtrlId = true;
-                    expression.CtrlId = win32.CtrlId;
-                    expression.ParentClass = parentClass;
-                    expression.ParentCaption = ImmediateParentCaption(win32, target);
-                    expression.ControlType = EmptyToNull(StableClassName(win32.ClassName));
-                    locators.Add(Create(++sequence, "win32.ctrlId", target, expression));
+                    ElementLocator locator = new ElementLocator();
+                    locator.Strategy = ElementLocator.StrategyClassIndex;
+                    locator.ClassName = StableClassName(node.ClassName);
+                    locator.ClassIndex = index;
+                    locator.Confidence = "low";
+                    locator.Reasons.Add("Position among the elements of the same window class. It moves as soon as the application adds or hides one.");
+                    locators.Add(locator);
                 }
             }
-            if (win32 != null && !String.IsNullOrWhiteSpace(win32.ClassName) && win32.Ancestors != null && win32.Ancestors.Count != 0 && win32.ZIndex >= 0)
+            if (windowRect != null && windowRect.Width > 0 && windowRect.Height > 0 && node.Rect != null && node.Rect.Width > 0)
             {
-                LocatorExpression expression = new LocatorExpression();
-                List<string> classes = new List<string>();
-                for (int index = win32.Ancestors.Count - 1; index >= 0; index--)
-                {
-                    if (!String.IsNullOrWhiteSpace(win32.Ancestors[index].ClassName)) classes.Add(StableClassName(win32.Ancestors[index].ClassName));
-                }
-                classes.Add(StableClassName(win32.ClassName));
-                expression.Win32ClassPath = classes.ToArray();
-                expression.ClassIndex = win32.ZIndex;
-                locators.Add(Create(++sequence, "win32.classPath", target, expression));
+                ElementLocator locator = new ElementLocator();
+                locator.Strategy = ElementLocator.StrategyWindowRelative;
+                locator.RelativeX = (node.Rect.X + node.Rect.Width / 2.0 - windowRect.X) / windowRect.Width;
+                locator.RelativeY = (node.Rect.Y + node.Rect.Height / 2.0 - windowRect.Y) / windowRect.Height;
+                locator.Confidence = "low";
+                locator.Reasons.Add("A position inside the window. It is never treated as an identification, only as a description.");
+                locators.Add(locator);
             }
-            RectValue itemRect = uia != null && uia.BoundingRect != null ? uia.BoundingRect : (win32 == null ? null : win32.WindowRect);
-            if (itemRect != null && target != null && target.ClientRect != null && target.ClientRect.Width > 0 && target.ClientRect.Height > 0)
-            {
-                LocatorExpression expression = new LocatorExpression();
-                int centerX = itemRect.X + itemRect.Width / 2;
-                int centerY = itemRect.Y + itemRect.Height / 2;
-                expression.RelativeX = (double)(centerX - target.ClientRect.X) / target.ClientRect.Width;
-                expression.RelativeY = (double)(centerY - target.ClientRect.Y) / target.ClientRect.Height;
-                expression.OffsetX = centerX - target.ClientRect.X;
-                expression.OffsetY = centerY - target.ClientRect.Y;
-                expression.Width = itemRect.Width;
-                expression.Height = itemRect.Height;
-                locators.Add(Create(++sequence, "screen.relative", target, expression));
-            }
-            return locators.ToArray();
+            return locators;
         }
 
-        public static bool ContainsForbiddenPersistentMaterial(Locator locator)
+        public static string BestConfidence(List<ElementLocator> locators)
         {
-            if (locator == null || locator.Expression == null) return false;
-            string text = JsonWriter.Write(LocatorJson.Build(locator));
-            return text.IndexOf("hwnd", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                text.IndexOf("runtimeId", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                text.IndexOf("liveValue", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                text.IndexOf("recordedValue", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (locators == null || locators.Count == 0) return "none";
+            bool medium = false;
+            for (int index = 0; index < locators.Count; index++)
+            {
+                if (locators[index].Confidence == "high") return "high";
+                if (locators[index].Confidence == "medium") medium = true;
+            }
+            return medium ? "medium" : "low";
         }
 
-        internal static LocatorConfidence BaseConfidence(Locator locator)
+        public static bool IsStableAutomationId(string value)
         {
-            LocatorConfidence confidence = new LocatorConfidence();
-            int score = 45;
-            LocatorExpression expression = locator.Expression;
-            if (IsStableAutomationId(expression.AutomationId))
+            if (String.IsNullOrWhiteSpace(value)) return false;
+            bool digitsOnly = true;
+            for (int index = 0; index < value.Length; index++)
             {
-                score += 25;
-                AddReason(confidence, "AutomationId is non-empty and is not numeric-only.");
+                if (!Char.IsDigit(value[index])) { digitsOnly = false; break; }
             }
-            if (!String.IsNullOrWhiteSpace(expression.ControlType))
-            {
-                score += 10;
-                AddReason(confidence, "ControlType narrows the candidate set.");
-            }
-            if (expression.HasCtrlId && expression.CtrlId != 0 && expression.CtrlId != -1)
-            {
-                score += 25;
-                AddReason(confidence, "The non-default control ID is scoped by its parent class.");
-            }
-            if (!String.IsNullOrWhiteSpace(expression.Name))
-            {
-                if (LooksDynamic(expression.Name))
-                {
-                    score -= 25;
-                    AddReason(confidence, "Name contains changing numeric, date, currency, count, or percent-like text.");
-                }
-                else
-                {
-                    score += 5;
-                    AddReason(confidence, "Name supplies a readable selector component.");
-                }
-            }
-            if (expression.UiaPath != null)
-            {
-                bool indexDependent = false;
-                for (int index = 0; index < expression.UiaPath.Length; index++)
-                {
-                    if (expression.UiaPath[index].SiblingCount > 1 && String.IsNullOrWhiteSpace(expression.UiaPath[index].AutomationId)) indexDependent = true;
-                }
-                if (indexDependent)
-                {
-                    score -= 15;
-                    AddReason(confidence, "The UI Automation path depends on a sibling index.");
-                }
-                else
-                {
-                    score += 5;
-                    AddReason(confidence, "The UI Automation path contains named or identified steps.");
-                }
-            }
-            if (locator.Scope != null && locator.Scope.Kind == "process")
-            {
-                score -= 10;
-                AddReason(confidence, "Process-wide scope can include unrelated matching elements.");
-            }
-            if (locator.Strategy == "screen.relative")
-            {
-                score = Math.Min(score, 35);
-                AddReason(confidence, "Relative screen position is capped at low confidence.");
-            }
-            confidence.Score = Clamp(score);
-            confidence.Level = Level(confidence.Score, locator.Strategy == "screen.relative");
-            if (confidence.Reasons.Count == 0) AddReason(confidence, "Only the captured material available for this strategy was used.");
-            return confidence;
+            return !digitsOnly;
         }
 
-        internal static bool LooksDynamic(string name)
+        // Windows Forms and several toolkits append a per process number to the
+        // window class. The number changes on every launch, so the volatile tail
+        // is dropped rather than being stored as if it were stable.
+        public static string StableClassName(string value)
         {
-            if (String.IsNullOrEmpty(name)) return false;
-            return Regex.IsMatch(name, "[0-9]|[$%]|\\b(?:items?|records?)\\b", RegexOptions.IgnoreCase);
-        }
-
-        internal static string Level(int score, bool forceLow)
-        {
-            if (forceLow) return "low";
-            if (score >= 75) return "high";
-            if (score >= 45) return "medium";
-            return "low";
-        }
-
-        internal static void AddReason(LocatorConfidence confidence, string reason)
-        {
-            if (!String.IsNullOrWhiteSpace(reason) && reason.IndexOf('\n') < 0 && reason.IndexOf('\r') < 0) confidence.Reasons.Add(reason);
-        }
-
-        internal static int Clamp(int score)
-        {
-            return Math.Max(0, Math.Min(100, score));
-        }
-
-        internal static string StableClassName(string value)
-        {
-            if (String.IsNullOrWhiteSpace(value)) return value;
+            if (String.IsNullOrEmpty(value)) return value;
             int marker = value.IndexOf(".app.", StringComparison.OrdinalIgnoreCase);
-            if (value.StartsWith("WindowsForms10.", StringComparison.OrdinalIgnoreCase) && marker > 0)
+            if (marker > 0) return value.Substring(0, marker);
+            marker = value.IndexOf("WindowsForms10.", StringComparison.OrdinalIgnoreCase);
+            if (marker == 0)
             {
-                return value.Substring(0, marker + 4);
+                int separator = value.IndexOf('.', "WindowsForms10.".Length);
+                if (separator > 0) return value.Substring(0, separator);
             }
             return value;
         }
 
-        private static Locator Create(int sequence, string strategy, TargetInfo target, LocatorExpression expression)
+        private static int CountByNameType(List<ScanNode> nodes, ScanNode node)
         {
-            Locator locator = new Locator();
-            locator.LocatorId = "loc-" + sequence.ToString("0000", CultureInfo.InvariantCulture);
-            locator.Strategy = strategy;
-            locator.Scope = new LocatorScope();
-            locator.Scope.Kind = String.IsNullOrWhiteSpace(target == null ? null : target.TopLevelClass) ? "process" : "topLevelWindow";
-            locator.Scope.ProcessName = target == null ? null : target.ProcessName;
-            locator.Scope.TopLevelClass = target == null ? null : target.TopLevelClass;
-            locator.Scope.TopLevelCaption = target == null ? null : target.TopLevelCaption;
-            locator.Expression = expression;
-            locator.Confidence = BaseConfidence(locator);
-            return locator;
-        }
-
-        private static bool IsStableAutomationId(string value)
-        {
-            if (String.IsNullOrWhiteSpace(value)) return false;
-            return !Regex.IsMatch(value, "^[0-9]+\\z");
-        }
-
-        private static bool HasUsablePath(UiaNode[] path)
-        {
-            if (path == null || path.Length == 0) return false;
-            for (int index = 0; index < path.Length; index++)
+            if (nodes == null) return 1;
+            int count = 0;
+            for (int index = 0; index < nodes.Count; index++)
             {
-                if (!String.IsNullOrWhiteSpace(path[index].ControlType) || !String.IsNullOrWhiteSpace(path[index].AutomationId) || !String.IsNullOrWhiteSpace(path[index].Name)) return true;
+                if (String.Equals(nodes[index].Name, node.Name, StringComparison.Ordinal) &&
+                    String.Equals(nodes[index].ControlType, node.ControlType, StringComparison.Ordinal)) count++;
             }
-            return false;
+            return count == 0 ? 1 : count;
         }
 
-        private static bool HasReason(ProbeStatus status, string code)
+        private static int ClassIndexOf(List<ScanNode> nodes, ScanNode node)
         {
-            if (status == null) return false;
-            for (int index = 0; index < status.Reasons.Count; index++) if (status.Reasons[index].Code == code) return true;
-            return false;
-        }
-
-        private static UiaNode[] ClonePath(UiaNode[] path)
-        {
-            UiaNode[] result = new UiaNode[path.Length];
-            for (int index = 0; index < path.Length; index++)
+            if (nodes == null) return -1;
+            string wanted = StableClassName(node.ClassName);
+            int seen = 0;
+            for (int index = 0; index < nodes.Count; index++)
             {
-                result[index] = new UiaNode();
-                result[index].ControlType = path[index].ControlType;
-                result[index].Name = path[index].Name;
-                result[index].AutomationId = path[index].AutomationId;
-                result[index].IndexAmongSameType = path[index].IndexAmongSameType;
-                result[index].SiblingCount = path[index].SiblingCount;
+                if (!String.Equals(StableClassName(nodes[index].ClassName), wanted, StringComparison.Ordinal)) continue;
+                if (ReferenceEquals(nodes[index], node)) return seen;
+                seen++;
             }
-            return result;
-        }
-
-        private static string ImmediateParentClass(Win32Info info, TargetInfo target)
-        {
-            if (info.Ancestors != null && info.Ancestors.Count != 0) return StableClassName(info.Ancestors[0].ClassName);
-            return target == null ? null : StableClassName(target.TopLevelClass);
-        }
-
-        private static string ImmediateParentCaption(Win32Info info, TargetInfo target)
-        {
-            if (info.Ancestors != null && info.Ancestors.Count != 0) return info.Ancestors[0].Caption;
-            return target == null ? null : target.TopLevelCaption;
-        }
-
-        private static string EmptyToNull(string value)
-        {
-            return String.IsNullOrWhiteSpace(value) ? null : value;
-        }
-    }
-
-    public static class LocatorJson
-    {
-        public static JsonObject Build(Locator locator)
-        {
-            List<object> reasons = new List<object>();
-            for (int index = 0; index < locator.Confidence.Reasons.Count; index++) reasons.Add(locator.Confidence.Reasons[index]);
-            List<object> verifications = new List<object>();
-            for (int index = 0; index < locator.Verifications.Count; index++)
-            {
-                Verification verification = locator.Verifications[index];
-                verifications.Add(new JsonObject().Add("at", verification.At).Add("context", verification.Context).Add("targetRunId", verification.TargetRunId).Add("matchCount", verification.MatchCount).Add("sameElement", verification.SameElement).Add("durationMs", verification.DurationMs).Add("note", verification.Note));
-            }
-            return new JsonObject()
-                .Add("locatorId", locator.LocatorId)
-                .Add("strategy", locator.Strategy)
-                .Add("scope", Scope(locator.Scope))
-                .Add("expression", Expression(locator.Expression))
-                .Add("confidence", new JsonObject().Add("level", locator.Confidence.Level).Add("score", locator.Confidence.Score).Add("reasons", reasons.ToArray()))
-                .Add("verifications", verifications.ToArray());
-        }
-
-        private static JsonObject Scope(LocatorScope scope)
-        {
-            return new JsonObject().Add("kind", scope.Kind).Add("processName", scope.ProcessName).Add("topLevelClass", scope.TopLevelClass).Add("topLevelCaption", scope.TopLevelCaption);
-        }
-
-        private static JsonObject Expression(LocatorExpression expression)
-        {
-            List<object> path = new List<object>();
-            if (expression.UiaPath != null)
-            {
-                for (int index = 0; index < expression.UiaPath.Length; index++)
-                {
-                    UiaNode node = expression.UiaPath[index];
-                    path.Add(new JsonObject().Add("controlType", node.ControlType).Add("name", node.Name).Add("automationId", node.AutomationId).Add("indexAmongSameType", node.IndexAmongSameType).Add("siblingCount", node.SiblingCount));
-                }
-            }
-            return new JsonObject()
-                .Add("automationId", expression.AutomationId)
-                .Add("name", expression.Name)
-                .Add("controlType", expression.ControlType)
-                .Add("parentClass", expression.ParentClass)
-                .Add("parentCaption", expression.ParentCaption)
-                .Add("ctrlId", expression.HasCtrlId ? (object)expression.CtrlId : null)
-                .Add("win32ClassPath", expression.Win32ClassPath)
-                .Add("classIndex", expression.ClassIndex)
-                .Add("uiaPath", path.ToArray())
-                .Add("relativeX", expression.RelativeX)
-                .Add("relativeY", expression.RelativeY)
-                .Add("offsetX", expression.OffsetX)
-                .Add("offsetY", expression.OffsetY)
-                .Add("width", expression.Width)
-                .Add("height", expression.Height);
+            return -1;
         }
     }
 }

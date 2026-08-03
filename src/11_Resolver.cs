@@ -2,204 +2,157 @@ namespace AppStudio
 {
     using System;
     using System.Collections.Generic;
-    using System.Diagnostics;
+    using System.Globalization;
 
-    public sealed class ResolveContext
+    public sealed class ResolveResult
     {
-        public string Context;
-        public string TargetRunId;
-        public Snapshot Original;
-        public Snapshot[] Candidates;
-        public RectValue TargetClientRect;
+        public ScanNode Node;
+        public ElementLocator UsedLocator;
+        public int MatchCount;
+        public string State;
+        public string Reason;
+        public List<string> Trace = new List<string>();
+
+        public bool Resolved { get { return String.Equals(State, "resolved", StringComparison.Ordinal); } }
     }
 
-    public static class Resolver
+    // Finds a recorded element again in a freshly acquired list. Ambiguity is
+    // never resolved by falling back to the coordinates the element happened to
+    // have when it was recorded: an address that matches two things is not an
+    // address, and acting on the first of them would be a guess presented as a
+    // fact.
+    public static class LocatorResolver
     {
-        public static Verification Resolve(Locator locator, ResolveContext context)
+        public static ResolveResult Resolve(List<ElementLocator> locators, List<ScanNode> candidates)
         {
-            if (locator == null) throw new ArgumentNullException("locator");
-            if (context == null) throw new ArgumentNullException("context");
-            Stopwatch watch = Stopwatch.StartNew();
-            List<Snapshot> matches = new List<Snapshot>();
-            Snapshot[] candidates = context.Candidates == null ? new Snapshot[0] : context.Candidates;
-            for (int index = 0; index < candidates.Length; index++)
+            ResolveResult result = new ResolveResult();
+            if (locators == null || locators.Count == 0)
             {
-                if (Matches(locator, candidates[index], context.TargetClientRect)) matches.Add(candidates[index]);
+                result.State = "no-locator";
+                result.Reason = "This step carries no locator, so there is nothing to look for.";
+                return result;
             }
-            watch.Stop();
-            Verification verification = new Verification();
-            verification.At = DateTimeOffset.Now;
-            verification.Context = String.IsNullOrWhiteSpace(context.Context) ? "immediate" : context.Context;
-            verification.TargetRunId = context.TargetRunId;
-            verification.MatchCount = matches.Count;
-            verification.SameElement = matches.Count == 1 && SameElement(context.Original, matches[0], locator);
-            verification.DurationMs = (int)watch.ElapsedMilliseconds;
-            verification.Note = Note(verification);
-            locator.Verifications.Add(verification);
-            ApplyVerification(locator, verification);
-            return verification;
-        }
-
-        public static bool Matches(Locator locator, Snapshot snapshot, RectValue targetClientRect)
-        {
-            if (locator == null || snapshot == null || locator.Expression == null) return false;
-            LocatorExpression expression = locator.Expression;
-            UiaInfo uia = snapshot.Uia;
-            Win32Info win32 = snapshot.Win32;
-            if (locator.Strategy == "uia.automationId")
+            if (candidates == null || candidates.Count == 0)
             {
-                return uia != null && Equal(expression.AutomationId, uia.AutomationId) && OptionalEqual(expression.ControlType, uia.ControlType);
+                result.State = "no-elements";
+                result.Reason = "The window exposed no elements at all when it was re-acquired, so nothing could be matched.";
+                return result;
             }
-            if (locator.Strategy == "uia.nameControlType")
+            string ambiguous = null;
+            int identifying = 0;
+            for (int index = 0; index < locators.Count; index++)
             {
-                return uia != null && Equal(expression.Name, uia.Name) && Equal(expression.ControlType, uia.ControlType);
-            }
-            if (locator.Strategy == "uia.path")
-            {
-                return uia != null && PathEqual(expression.UiaPath, uia.TreePath);
-            }
-            if (locator.Strategy == "win32.ctrlId")
-            {
-                return win32 != null && expression.HasCtrlId && win32.CtrlId == expression.CtrlId && Equal(expression.ParentClass, ImmediateParentClass(win32));
-            }
-            if (locator.Strategy == "win32.classPath")
-            {
-                return win32 != null && ClassPathEqual(expression.Win32ClassPath, win32) && (!expression.ClassIndex.HasValue || expression.ClassIndex.Value == win32.ZIndex);
-            }
-            if (locator.Strategy == "screen.relative")
-            {
-                RectValue item = uia != null && uia.BoundingRect != null ? uia.BoundingRect : (win32 == null ? null : win32.WindowRect);
-                if (item == null || targetClientRect == null || !expression.RelativeX.HasValue || !expression.RelativeY.HasValue) return false;
-                int x = targetClientRect.X + (int)Math.Round(targetClientRect.Width * expression.RelativeX.Value);
-                int y = targetClientRect.Y + (int)Math.Round(targetClientRect.Height * expression.RelativeY.Value);
-                return x >= item.X && x < item.X + item.Width && y >= item.Y && y < item.Y + item.Height;
-            }
-            return false;
-        }
-
-        public static void ApplyVerification(Locator locator, Verification verification)
-        {
-            LocatorConfidence confidence = LocatorBuilder.BaseConfidence(locator);
-            int score = confidence.Score;
-            if (verification.MatchCount == 0)
-            {
-                score = Math.Min(score, 20);
-                LocatorBuilder.AddReason(confidence, "Verification found no matching element.");
-                confidence.Level = "low";
-            }
-            else if (verification.MatchCount == 1)
-            {
-                if (verification.SameElement)
+                ElementLocator locator = locators[index];
+                // Only a locator that says *which* element this is may decide
+                // what gets acted on. Where an element sits - its position in
+                // the window, its place among the siblings of its class - is a
+                // description of the recording, not an identification of the
+                // thing. Both are written down and both are shown to the
+                // reader, because they are useful material for whoever writes
+                // the automation afterwards; neither is ever allowed to answer
+                // "act here". Otherwise a changed layout would be replayed as
+                // "the first button of that class", which is a guess wearing an
+                // answer's clothes.
+                if (!Identifies(locator.Strategy))
                 {
-                    score += 20;
-                    LocatorBuilder.AddReason(confidence, "Verification found one match and it represents the same element.");
+                    result.Trace.Add(locator.Strategy + ": recorded as a description, never used to decide what to act on");
+                    continue;
                 }
-                else
+                identifying++;
+                List<ScanNode> matches = Match(locator, candidates);
+                result.Trace.Add(locator.Strategy + ": " + matches.Count.ToString(CultureInfo.InvariantCulture) + " match(es)");
+                if (matches.Count == 1)
                 {
-                    score = Math.Min(score, 40);
-                    LocatorBuilder.AddReason(confidence, "Verification found one match but it did not represent the expected element.");
+                    result.Node = matches[0];
+                    result.UsedLocator = locator;
+                    result.MatchCount = 1;
+                    result.State = "resolved";
+                    result.Reason = "Resolved by " + locator.Strategy + ".";
+                    return result;
                 }
-                confidence.Level = LocatorBuilder.Level(LocatorBuilder.Clamp(score), locator.Strategy == "screen.relative");
-            }
-            else
-            {
-                score = Math.Min(score, 60);
-                LocatorBuilder.AddReason(confidence, "Verification found " + verification.MatchCount + " matches, so the selector is not unique.");
-                confidence.Level = locator.Strategy == "screen.relative" ? "low" : "medium";
-            }
-            if (verification.DurationMs > 1000)
-            {
-                score -= 15;
-                LocatorBuilder.AddReason(confidence, "Resolution took longer than one second.");
-                if (confidence.Level == "high") confidence.Level = "medium";
-            }
-            confidence.Score = LocatorBuilder.Clamp(score);
-            if (locator.Strategy == "screen.relative") confidence.Level = "low";
-            locator.Confidence = confidence;
-        }
-
-        private static bool SameElement(Snapshot expected, Snapshot actual, Locator locator)
-        {
-            if (expected == null || actual == null) return false;
-            if (locator.Strategy.IndexOf("uia.", StringComparison.Ordinal) == 0)
-            {
-                if (expected.Uia == null || actual.Uia == null) return false;
-                if (!String.IsNullOrWhiteSpace(expected.Uia.AutomationId)) return Equal(expected.Uia.AutomationId, actual.Uia.AutomationId) && OptionalEqual(expected.Uia.ControlType, actual.Uia.ControlType);
-                return Equal(expected.Uia.Name, actual.Uia.Name) && OptionalEqual(expected.Uia.ControlType, actual.Uia.ControlType);
-            }
-            if (locator.Strategy.IndexOf("win32.", StringComparison.Ordinal) == 0)
-            {
-                return expected.Win32 != null && actual.Win32 != null && expected.Win32.CtrlId == actual.Win32.CtrlId && Equal(LocatorBuilder.StableClassName(expected.Win32.ClassName), LocatorBuilder.StableClassName(actual.Win32.ClassName));
-            }
-            RectValue first = ExpectedRect(expected);
-            RectValue second = ExpectedRect(actual);
-            return first != null && second != null && Math.Abs((first.X + first.Width / 2) - (second.X + second.Width / 2)) <= Math.Max(2, first.Width) && Math.Abs((first.Y + first.Height / 2) - (second.Y + second.Height / 2)) <= Math.Max(2, first.Height);
-        }
-
-        private static RectValue ExpectedRect(Snapshot snapshot)
-        {
-            return snapshot.Uia != null && snapshot.Uia.BoundingRect != null ? snapshot.Uia.BoundingRect : (snapshot.Win32 == null ? null : snapshot.Win32.WindowRect);
-        }
-
-        private static string Note(Verification verification)
-        {
-            if (verification.MatchCount == 0) return "No match was found.";
-            if (verification.MatchCount > 1) return verification.MatchCount + " matching elements were found.";
-            return verification.SameElement ? "One matching element was found and verified as the same element." : "One matching element was found but identity could not be confirmed.";
-        }
-
-        private static bool PathEqual(UiaNode[] expected, UiaNode[] actual)
-        {
-            if (expected == null || actual == null || expected.Length != actual.Length) return false;
-            for (int index = 0; index < expected.Length; index++)
-            {
-                if (!OptionalEqual(expected[index].ControlType, actual[index].ControlType)) return false;
-                if (!String.IsNullOrWhiteSpace(expected[index].AutomationId))
+                if (matches.Count > 1 && ambiguous == null)
                 {
-                    if (!Equal(expected[index].AutomationId, actual[index].AutomationId)) return false;
-                }
-                else if (!String.IsNullOrWhiteSpace(expected[index].Name))
-                {
-                    if (!Equal(expected[index].Name, actual[index].Name)) return false;
-                }
-                else if (expected[index].IndexAmongSameType != actual[index].IndexAmongSameType)
-                {
-                    return false;
+                    ambiguous = locator.Strategy + " matched " + matches.Count.ToString(CultureInfo.InvariantCulture) + " elements";
+                    result.MatchCount = matches.Count;
                 }
             }
-            return true;
-        }
-
-        private static bool ClassPathEqual(string[] expected, Win32Info actual)
-        {
-            if (expected == null || actual == null) return false;
-            List<string> classes = new List<string>();
-            if (actual.Ancestors != null)
+            if (ambiguous != null)
             {
-                for (int index = actual.Ancestors.Count - 1; index >= 0; index--)
-                {
-                    if (!String.IsNullOrWhiteSpace(actual.Ancestors[index].ClassName)) classes.Add(LocatorBuilder.StableClassName(actual.Ancestors[index].ClassName));
-                }
+                result.State = "ambiguous";
+                result.Reason = "The recorded element could not be told apart from others: " + ambiguous +
+                    ". Nothing was done, because acting on a position here would be a guess.";
+                return result;
             }
-            classes.Add(LocatorBuilder.StableClassName(actual.ClassName));
-            if (classes.Count != expected.Length) return false;
-            for (int index = 0; index < expected.Length; index++) if (!Equal(expected[index], classes[index])) return false;
-            return true;
+            if (identifying == 0)
+            {
+                result.State = "no-locator";
+                result.Reason = "This element exposed nothing that identifies it - only where it happened to sit. " +
+                    "A position is not an address, so nothing was acted on.";
+                return result;
+            }
+            result.State = "not-found";
+            result.Reason = "None of the recorded identifying locators matched anything in the window as it is now.";
+            return result;
         }
 
-        private static string ImmediateParentClass(Win32Info info)
+        // What may decide which element is acted on. Everything else is kept
+        // and shown, but never resolves.
+        public static bool Identifies(string strategy)
         {
-            return info.Ancestors != null && info.Ancestors.Count != 0 ? LocatorBuilder.StableClassName(info.Ancestors[0].ClassName) : null;
+            return strategy == ElementLocator.StrategyAutomationId ||
+                strategy == ElementLocator.StrategyNameType ||
+                strategy == ElementLocator.StrategyTreePath ||
+                strategy == ElementLocator.StrategyCtrlId;
         }
 
-        private static bool OptionalEqual(string expected, string actual)
+        public static List<ScanNode> Match(ElementLocator locator, List<ScanNode> candidates)
         {
-            return String.IsNullOrWhiteSpace(expected) || Equal(expected, actual);
+            List<ScanNode> matches = new List<ScanNode>();
+            if (locator == null || candidates == null) return matches;
+            int classSeen = 0;
+            for (int index = 0; index < candidates.Count; index++)
+            {
+                ScanNode node = candidates[index];
+                bool hit = false;
+                if (locator.Strategy == ElementLocator.StrategyAutomationId)
+                {
+                    hit = Same(locator.AutomationId, node.AutomationId) && Optional(locator.ControlType, node.ControlType);
+                }
+                else if (locator.Strategy == ElementLocator.StrategyNameType)
+                {
+                    hit = Same(locator.Name, node.Name) && Same(locator.ControlType, node.ControlType);
+                }
+                else if (locator.Strategy == ElementLocator.StrategyTreePath)
+                {
+                    hit = Same(locator.TreePath, node.Path);
+                }
+                else if (locator.Strategy == ElementLocator.StrategyCtrlId)
+                {
+                    hit = locator.CtrlId != 0 && locator.CtrlId == node.CtrlId &&
+                        Same(locator.ClassName, LocatorBuilder.StableClassName(node.ClassName));
+                }
+                else if (locator.Strategy == ElementLocator.StrategyClassIndex)
+                {
+                    if (Same(locator.ClassName, LocatorBuilder.StableClassName(node.ClassName)))
+                    {
+                        hit = classSeen == locator.ClassIndex;
+                        classSeen++;
+                    }
+                }
+                if (hit) matches.Add(node);
+            }
+            return matches;
         }
 
-        private static bool Equal(string first, string second)
+        private static bool Same(string first, string second)
         {
+            if (String.IsNullOrEmpty(first) || String.IsNullOrEmpty(second)) return false;
             return String.Equals(first, second, StringComparison.Ordinal);
+        }
+
+        private static bool Optional(string expected, string actual)
+        {
+            return String.IsNullOrEmpty(expected) || String.Equals(expected, actual, StringComparison.Ordinal);
         }
     }
 }

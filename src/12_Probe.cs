@@ -27,6 +27,33 @@ namespace AppStudio
         public bool WriteEnabled;
         public string Value;
         public int BudgetMs = 5000;
+        // Which carrying-out routes may be used. "auto" is the documented
+        // ladder; the single-route settings exist so an operator can prove which
+        // route an application actually answers. They never widen the ladder,
+        // they only narrow it.
+        public string RouteMode = ProbeRoutes.Auto;
+    }
+
+    public static class ProbeRoutes
+    {
+        public const string Auto = "auto";
+        public const string UiaOnly = "uia";
+        public const string Win32Only = "win32";
+        public const string SendInputOnly = "sendInput";
+
+        public static bool Allows(string mode, string route)
+        {
+            if (String.IsNullOrEmpty(mode) || String.Equals(mode, Auto, StringComparison.Ordinal)) return true;
+            return String.Equals(mode, route, StringComparison.Ordinal);
+        }
+
+        public static bool IsKnown(string mode)
+        {
+            return String.Equals(mode, Auto, StringComparison.Ordinal) ||
+                String.Equals(mode, UiaOnly, StringComparison.Ordinal) ||
+                String.Equals(mode, Win32Only, StringComparison.Ordinal) ||
+                String.Equals(mode, SendInputOnly, StringComparison.Ordinal);
+        }
     }
 
     public sealed class ProbeError
@@ -74,6 +101,26 @@ namespace AppStudio
         public List<ProbeSideEffect> SideEffects = new List<ProbeSideEffect>();
         public ProbeUndo Undo;
         public ElementRef Element;
+        // Every route that was tried, in the order it was tried, with what it
+        // answered. A single "method" cannot say that UI Automation refused
+        // before a window message worked, and that difference is exactly what a
+        // reader needs in order to write the automation later.
+        public List<RouteAttempt> Attempts = new List<RouteAttempt>();
+
+        public string AttemptLine
+        {
+            get
+            {
+                if (Attempts.Count == 0) return Method == null ? "(no route was attempted)" : Method + ":" + Outcome;
+                System.Text.StringBuilder text = new System.Text.StringBuilder();
+                for (int index = 0; index < Attempts.Count; index++)
+                {
+                    if (index != 0) text.Append(" -> ");
+                    text.Append(Attempts[index].Line);
+                }
+                return text.ToString();
+            }
+        }
     }
 
     public static class ProbeRunner
@@ -161,11 +208,11 @@ namespace AppStudio
             string uiaState = beforeSnapshot.UiaStatus == null ? null : beforeSnapshot.UiaStatus.State;
             if (writes && (beforeSnapshot.Uia == null || uiaState != "ok"))
             {
-                // A timeout is not an answer about the element. PlanRunner already
-                // records that the first deep probe after an automatic scan
-                // regularly spends its whole allowance and restarts the worker, so
-                // refusing on that first unclean read refuses every ordinary write
-                // that follows a scan. The warm spare answers in tens of
+                // A timeout is not an answer about the element. The first deep
+                // probe after a whole window has been walked regularly spends its
+                // entire allowance and restarts the worker, so refusing on that
+                // first unclean read would refuse every ordinary write that
+                // follows an acquisition. The warm spare answers in tens of
                 // milliseconds, so the identity is asked for once more and only a
                 // second unclean answer is treated as "cannot be established".
                 int retryBudget = Remaining(watch, args.BudgetMs);
@@ -211,23 +258,41 @@ namespace AppStudio
                 }
             }
             TopWindowState topBefore = TopWindowState.Capture(processId);
-            int actionBudget = Remaining(watch, args.BudgetMs);
-            UiaActionResult uia;
-            if (actionBudget <= 0)
+            List<RouteAttempt> attempts = new List<RouteAttempt>();
+            string routeMode = ProbeRoutes.IsKnown(args.RouteMode) ? args.RouteMode : ProbeRoutes.Auto;
+            string outcome = "notSupported";
+            string method = null;
+            ProbeError error = null;
+            UiaActionResult uia = null;
+
+            if (ProbeRoutes.Allows(routeMode, ProbeRoutes.UiaOnly))
             {
-                uia = new UiaActionResult();
-                uia.Outcome = "failed";
-                uia.Method = "uia.worker";
-                uia.ErrorCode = "UIA-TIMEOUT";
-                uia.ErrorMessage = "The operation probe exhausted its overall " + args.BudgetMs + " ms budget before the action stage.";
+                Stopwatch uiaWatch = Stopwatch.StartNew();
+                int actionBudget = Remaining(watch, args.BudgetMs);
+                if (actionBudget <= 0)
+                {
+                    uia = new UiaActionResult();
+                    uia.Outcome = "failed";
+                    uia.Method = "uia.worker";
+                    uia.ErrorCode = "UIA-TIMEOUT";
+                    uia.ErrorMessage = "The operation probe exhausted its overall " + args.BudgetMs + " ms budget before the action stage.";
+                }
+                else
+                {
+                    uia = Probe.RunUiaOperation(element, KindText(kind), args.Value, actionBudget);
+                }
+                uiaWatch.Stop();
+                outcome = uia.Outcome;
+                method = uia.Method;
+                error = Error(uia.ErrorCode, uia.ErrorHresult, uia.ErrorMessage);
+                attempts.Add(Attempt("uia", uia.Method, uia.Outcome, (int)uiaWatch.ElapsedMilliseconds, uia.ErrorCode, uia.ErrorMessage, null));
             }
             else
             {
-                uia = Probe.RunUiaOperation(element, KindText(kind), args.Value, actionBudget);
+                attempts.Add(Attempt("uia", "uia.pattern", "skipped", 0, "ROUTE-MODE",
+                    "The session is limited to the " + routeMode + " route, so UI Automation was not tried.", null));
             }
-            string outcome = uia.Outcome;
-            string method = uia.Method;
-            ProbeError error = Error(uia.ErrorCode, uia.ErrorHresult, uia.ErrorMessage);
+
             // The routes are tried in the documented order. A route that reported
             // notSupported never acted, so the next one is tried. A route that
             // threw did not act either, but pushing a second route through after
@@ -235,23 +300,64 @@ namespace AppStudio
             // the target, so that widening stops at focus: a setValue that UI
             // Automation refused, on a read-only field for instance, must not be
             // forced through a window message instead.
-            if (outcome == "notSupported" || (kind == ProbeKind.Focus && outcome == "failed"))
+            bool ladder = outcome == "notSupported" || (kind == ProbeKind.Focus && outcome == "failed");
+            if (ladder)
             {
-                FallbackResult fallback = TryWin32(beforeSnapshot, kind, args.Value, Math.Min(Math.Max(1, Remaining(watch, args.BudgetMs)), 500));
-                if (fallback.Performed)
+                bool win32Acted = false;
+                if (ProbeRoutes.Allows(routeMode, ProbeRoutes.Win32Only))
                 {
-                    method = fallback.Method;
-                    outcome = fallback.Failed ? "failed" : "unknown";
-                    error = fallback.Error;
-                }
-                else
-                {
-                    fallback = TryInput(beforeSnapshot, element, kind, args.Value);
+                    Stopwatch win32Watch = Stopwatch.StartNew();
+                    FallbackResult fallback = TryWin32(beforeSnapshot, kind, args.Value, Math.Min(Math.Max(1, Remaining(watch, args.BudgetMs)), 500));
+                    win32Watch.Stop();
                     if (fallback.Performed)
                     {
+                        win32Acted = true;
                         method = fallback.Method;
                         outcome = fallback.Failed ? "failed" : "unknown";
                         error = fallback.Error;
+                        attempts.Add(Attempt("win32", fallback.Method, outcome, (int)win32Watch.ElapsedMilliseconds,
+                            fallback.Error == null ? null : fallback.Error.Code, fallback.Error == null ? null : fallback.Error.Message, null));
+                    }
+                    else
+                    {
+                        attempts.Add(Attempt("win32", "win32.message", "notSupported", (int)win32Watch.ElapsedMilliseconds,
+                            "WIN32-NOROUTE", "No window message carries this operation for this element.", null));
+                    }
+                }
+                else if (routeMode != ProbeRoutes.Auto)
+                {
+                    attempts.Add(Attempt("win32", "win32.message", "skipped", 0, "ROUTE-MODE",
+                        "The session is limited to the " + routeMode + " route, so window messages were not tried.", null));
+                }
+
+                // Only a route that did not act lets the next one be tried. This
+                // is the guard that keeps a state changing operation from being
+                // carried out twice by two different routes.
+                if (!win32Acted)
+                {
+                    if (ProbeRoutes.Allows(routeMode, ProbeRoutes.SendInputOnly))
+                    {
+                        Stopwatch inputWatch = Stopwatch.StartNew();
+                        FallbackResult fallback = TryInput(beforeSnapshot, element, kind, args.Value);
+                        inputWatch.Stop();
+                        if (fallback.Performed)
+                        {
+                            method = fallback.Method;
+                            outcome = fallback.Failed ? "failed" : "unknown";
+                            error = fallback.Error;
+                            attempts.Add(Attempt("sendInput", fallback.Method, outcome, (int)inputWatch.ElapsedMilliseconds,
+                                fallback.Error == null ? null : fallback.Error.Code, fallback.Error == null ? null : fallback.Error.Message, null));
+                        }
+                        else
+                        {
+                            attempts.Add(Attempt("sendInput", "win32.SendInput", "notSupported", (int)inputWatch.ElapsedMilliseconds,
+                                "SENDINPUT-NOROUTE", "Synthetic input does not carry this operation.", null));
+                        }
+                    }
+                    else if (routeMode != ProbeRoutes.Auto)
+                    {
+                        attempts.Add(Attempt("sendInput", "win32.SendInput", "skipped", 0, "ROUTE-MODE",
+                            "The session is limited to the " + routeMode + " route, so synthetic input was not tried.", null));
                     }
                 }
             }
@@ -261,7 +367,8 @@ namespace AppStudio
             Snapshot afterSnapshot = afterBudget > 0 ? Probe.Deep(element, afterBudget) : null;
             ProbeObservation before = Observation(beforeSnapshot, uia, true);
             ProbeObservation after = Observation(afterSnapshot, uia, false);
-            if (outcome == "unknown" && Changed(before, after, kind)) outcome = "success";
+            bool changed = Changed(before, after, kind);
+            if (outcome == "unknown" && changed) outcome = "success";
             TopWindowState topAfter = TopWindowState.Capture(processId);
             watch.Stop();
 
@@ -272,6 +379,18 @@ namespace AppStudio
             result.Error = error;
             result.Before = before;
             result.After = after;
+            result.Attempts = attempts;
+            // The observed change belongs to whichever route actually acted,
+            // which is the last one that did not report notSupported or skipped.
+            for (int index = attempts.Count - 1; index >= 0; index--)
+            {
+                if (attempts[index].Outcome == "notSupported" || attempts[index].Outcome == "skipped") continue;
+                attempts[index].Outcome = NormalizeOutcome(outcome);
+                attempts[index].Effect = kind == ProbeKind.Read
+                    ? "read only, nothing was changed"
+                    : (changed ? DescribeChange(before, after) : "no change was observed before and after");
+                break;
+            }
             AddSideEffects(result, topBefore, topAfter);
             if (kind == ProbeKind.SetValue && result.Outcome == "success" && before != null && before.Value != null)
             {
@@ -381,6 +500,38 @@ namespace AppStudio
                 before.ChildCount != after.ChildCount || !RectEqual(before.Rect, after.Rect);
         }
 
+        private static RouteAttempt Attempt(string route, string method, string outcome, int durationMs, string errorCode, string errorMessage, string effect)
+        {
+            RouteAttempt attempt = new RouteAttempt();
+            attempt.Route = route;
+            attempt.Method = method;
+            attempt.Outcome = outcome;
+            attempt.DurationMs = durationMs;
+            attempt.ErrorCode = errorCode;
+            attempt.ErrorMessage = errorMessage;
+            attempt.Effect = effect;
+            return attempt;
+        }
+
+        private static string DescribeChange(ProbeObservation before, ProbeObservation after)
+        {
+            if (before == null || after == null) return "the state before and after could not be compared";
+            List<string> parts = new List<string>();
+            if (!String.Equals(before.Value, after.Value, StringComparison.Ordinal)) parts.Add("value changed");
+            if (!String.Equals(before.State, after.State, StringComparison.Ordinal)) parts.Add("state changed");
+            if (!String.Equals(before.WindowTitle, after.WindowTitle, StringComparison.Ordinal)) parts.Add("window title changed");
+            if (before.ChildCount != after.ChildCount) parts.Add("child count " + before.ChildCount + " -> " + after.ChildCount);
+            if (!RectEqual(before.Rect, after.Rect)) parts.Add("rectangle changed");
+            if (parts.Count == 0) return "a change was observed";
+            StringBuilder text = new StringBuilder();
+            for (int index = 0; index < parts.Count; index++)
+            {
+                if (index != 0) text.Append(", ");
+                text.Append(parts[index]);
+            }
+            return text.ToString();
+        }
+
         private static bool RectEqual(RectValue first, RectValue second)
         {
             if (first == null || second == null) return first == second;
@@ -393,6 +544,10 @@ namespace AppStudio
             result.Method = code;
             result.Outcome = "blocked";
             result.Error = Error(code, 0, message);
+            // A refusal is also an attempt record: it says a guard stopped the
+            // operation before any route was reached, so the trail never has a
+            // hole where the reason should be.
+            result.Attempts.Add(Attempt("guard", code, "blocked", 0, code, message, "nothing was sent to the target"));
             return result;
         }
 

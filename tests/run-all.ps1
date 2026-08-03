@@ -10,28 +10,22 @@ $tests = @(
     'test-docs.ps1',
     'test-json.ps1',
     'test-locator.ps1',
-    'test-confidence.ps1',
-    'test-schema.ps1',
-    'test-mask.ps1',
-    'test-manifest.ps1',
-    'test-report.ps1',
+    'test-privacy.ps1',
+    'test-session-store.ps1',
+    'test-outputs.ps1',
+    'test-replay.ps1',
     'test-diagnostics.ps1',
     'test-acq-diagnostics.ps1',
-    'test-live-value-isolation.ps1',
     'test-win32-bound.ps1',
     'test-degraded.ps1',
     'test-live-basic.ps1',
     'test-live-move.ps1',
-    'test-live-events.ps1',
     'test-live-restart.ps1',
     'test-capture-policy.ps1',
     'test-live-canvas.ps1',
     'test-autosave.ps1',
     'test-scan.ps1',
-    'test-handoff.ps1',
-    'test-observe.ps1',
     'test-ui-flow.ps1',
-    'test-case-flow.ps1',
     'test-hang-recovery.ps1'
 )
 # These move the real pointer and send real keystrokes, so they disturb whoever
@@ -41,7 +35,6 @@ $realInputTests = @(
     'test-live-probe.ps1',
     'test-input-probe.ps1',
     'test-packaged-target.ps1',
-    'test-case-real-input.ps1',
     'test-gui-e2e.ps1'
 )
 if ($env:APPSTUDIO_ALLOW_REAL_INPUT -eq '1') {

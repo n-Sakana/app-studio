@@ -20,7 +20,7 @@ namespace AppStudio
                 Probe.Configure(baseDir, false);
                 Application application = new Application();
                 application.ShutdownMode = ShutdownMode.OnMainWindowClose;
-                ShellWindow window = new ShellWindow(baseDir, diagnostics, autoCloseMs);
+                StudioWindow window = new StudioWindow(baseDir, diagnostics, autoCloseMs);
                 application.Run(window);
                 Probe.Shutdown();
             }

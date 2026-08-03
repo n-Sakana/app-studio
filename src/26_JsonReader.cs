@@ -5,8 +5,8 @@ namespace AppStudio
     using System.Globalization;
     using System.Web.Script.Serialization;
 
-    // Only two things are ever read back as JSON: the case index this program
-    // wrote itself, and the answer the assistant returns. JavaScriptSerializer
+    // The only JSON ever read back is what this program wrote itself: the index
+    // of a session and the records appended beside it. JavaScriptSerializer
     // ships with the .NET Framework and the launcher already references
     // System.Web.Extensions, so no parser is carried onto the target machine.
     public static class JsonReader

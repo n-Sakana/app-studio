@@ -43,14 +43,32 @@ try {
     $wpfSnapshot = [AppStudio.Probe]::At([int]$wpfMap.x, [int]$wpfMap.y, 1500)
     if ($wpfSnapshot.Uia.AutomationId -ne 'TargetText') { throw ('Expected TargetText, got ' + $wpfSnapshot.Uia.AutomationId) }
     if ($wpfSnapshot.UiaStatus.State -ne 'ok') { throw ('WPF UIA status was ' + $wpfSnapshot.UiaStatus.State) }
-    $session = New-Object AppStudio.SessionRecorder((Join-Path $tempDir 'shots'))
-    $record = $session.Pin($wpfSnapshot, 'WPF target', 'fixture note')
-    if ($record.Notes.Count -ne 1 -or $record.Shots.Count -ne 1 -or -not (Test-Path -LiteralPath $record.Shots[0].File)) { throw 'Pin record/crop/note failed.' }
-    if ($null -eq $record.Uia.TreePath -or $record.Uia.TreePath.Count -lt 1) { throw 'Deep UIA tree path missing.' }
+    $wpfReference = New-Object AppStudio.ElementRef
+    $wpfReference.X = [int]$wpfMap.x
+    $wpfReference.Y = [int]$wpfMap.y
+    $wpfReference.Hwnd = $wpfSnapshot.Win32.Hwnd
+    $wpfDeep = [AppStudio.Probe]::Deep($wpfReference, 3000)
+    if ($null -eq $wpfDeep.Uia.TreePath -or $wpfDeep.Uia.TreePath.Count -lt 1) { throw 'Deep UIA tree path missing.' }
+    if ($null -eq $wpfDeep.Uia.SupportedPatterns) { throw 'Deep UIA patterns missing.' }
+    # The picture of the window has to be written to the session folder, and it
+    # has to say whether anything in it was blacked out.
+    $session = [AppStudio.SessionStore]::Create($tempDir, 'snap', 'live basic')
+    $screen = New-Object AppStudio.ScreenRecord
+    $screen.ScanId = 'sc-live'
+    $screen.ScreenId = 'S1'
+    $screen.Hwnd = $wpfSnapshot.Win32.TopHwnd
+    $screen.Title = 'FixtureWpf'
+    $screen.ClassName = $wpfSnapshot.Win32.TopClass
+    $screen.Rect = [AppStudio.WindowTools]::GetPhysicalRect([IntPtr][int64]$wpfSnapshot.Win32.TopHwnd)
+    $session.Screens.Screens.Add($screen)
+    [AppStudio.Acquire]::Shoot($session, $screen, (New-Object AppStudio.Acquire+NullGuard), 250)
+    if (-not $screen.HasShot) { throw ('The window picture failed: ' + $screen.ShotProblem) }
+    if ([string]::IsNullOrEmpty($screen.Note)) { throw 'The picture does not say whether anything was blacked out.' }
+    if ($screen.Sha256.Length -ne 64) { throw 'The picture has no content hash.' }
 } finally {
     [AppStudio.Probe]::Shutdown()
     if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     if ($null -ne $wpfProcess -and -not $wpfProcess.HasExited) { $wpfProcess.Kill(); $wpfProcess.WaitForExit() }
     Remove-Item -LiteralPath $tempDir -Recurse -Force
 }
-Write-Output 'PASS test-live-basic fixtures=FixtureWin32,FixtureWpf win32=ok uia=ok deepTree=ok pin=1 crop=1 note=1 workerWarmup=active+spare'
+Write-Output 'PASS test-live-basic fixtures=FixtureWin32,FixtureWpf win32=ok uia=ok deepTree=ok picture=1 maskingStated=1 workerWarmup=active+spare'

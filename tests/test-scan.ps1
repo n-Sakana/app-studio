@@ -15,7 +15,6 @@ New-Item -ItemType Directory -Path $tempDir | Out-Null
 $process = $null
 $canvas = $null
 $runner = $null
-$log = $null
 try {
     $ready = Join-Path $tempDir 'ready.json'
     $process = Start-Process -FilePath $build.FixtureWinForms -ArgumentList @('--ready', $ready) -PassThru
@@ -95,24 +94,23 @@ try {
     if ($hitCoverage.Reasons.Count -lt 1) { throw 'Coordinate sampling did not report its grid limits.' }
     if ($canvasResult.Nodes.Count -lt 1) { throw 'Owner drawn window produced no element at all.' }
 
-    # The machine readable log has to be written without any save action.
-    $log = New-Object AppStudio.SessionLog((Join-Path $tempDir 'log'))
-    if (-not $log.Enabled) { throw ('SessionLog could not be created: ' + $log.Status.DisabledReason) }
-    foreach ($node in $result.Nodes) { $null = $log.Append('elements', [AppStudio.ScanJson]::Node($node, $result.ScanId, 0)) }
-    $null = $log.Append('events', [AppStudio.ScanJson]::Summary($result))
+    # The machine readable record has to be written without any save action,
+    # through the same call the product uses.
+    $session = [AppStudio.SessionStore]::Create($tempDir, 'snap', 'scan fixture')
+    foreach ($node in $result.Nodes) {
+        if (-not [AppStudio.SessionStore]::Append($session, 'elements', [AppStudio.ScanJson]::Node($node, $result.ScanId, 0))) { throw 'An element record was refused.' }
+    }
+    if (-not [AppStudio.SessionStore]::Append($session, 'events', [AppStudio.ScanJson]::Summary($result))) { throw 'The summary record was refused.' }
     $summaryText = [AppStudio.ScanSummary]::Build($result)
-    if (-not $log.WriteText('summary.md', $summaryText)) { throw 'Summary could not be written.' }
-    $log.FlushDurable()
-    $elementsPath = $log.PathFor('elements')
-    $lines = @(Get-Content -LiteralPath $elementsPath -Encoding UTF8)
+    $elementsPath = Join-Path $session.Folder 'elements.jsonl'
+    $lines = @([AppStudio.SessionLog]::ReadAllLines($elementsPath))
     if ($lines.Count -ne $result.Nodes.Count) { throw ('Element log line count ' + $lines.Count + ' does not match ' + $result.Nodes.Count) }
     foreach ($line in $lines) { $null = ConvertFrom-Json $line }
     $first = ConvertFrom-Json $lines[0]
-    foreach ($field in @('seq', 'at', 'kind', 'scanId', 'nodeId', 'sources', 'rect', 'controlType', 'hasHwnd')) {
+    foreach ($field in @('kind', 'scanId', 'screenId', 'componentId', 'nodeId', 'sources', 'rect', 'controlType', 'hasHwnd')) {
         if (-not ($first.PSObject.Properties.Name -contains $field)) { throw ('Element record is missing the field ' + $field) }
     }
-    $rawSummary = Get-Content -LiteralPath (Join-Path $log.Folder 'summary.md') -Raw -Encoding UTF8
-    if ($rawSummary -notmatch 'secret-value-42' -and $rawSummary -notmatch 'P@ssword123') { } else { throw 'The summary leaked a live value.' }
+    if ($summaryText -match 'secret-value-42' -or $summaryText -match 'P@ssword123') { throw 'The summary leaked a live value.' }
     $joined = ($lines -join "`n")
     if ($joined -match 'secret-value-42' -or $joined -match 'P@ssword123') { throw 'The element log leaked a live value.' }
 
@@ -122,7 +120,6 @@ try {
         ' patterns=' + $patterned + ' canvasElements=' + $canvasResult.Nodes.Count + ' canvasHitTest=' + $hitCoverage.State + '/' + $hitCoverage.NodeCount +
         ' logLines=' + $lines.Count + ' valueLeak=0')
 } finally {
-    if ($null -ne $log) { $log.Dispose() }
     if ($null -ne $runner) { $runner.Dispose() }
     if ($null -ne $process -and -not $process.HasExited) { $process.Kill(); $process.WaitForExit() }
     if ($null -ne $canvas -and -not $canvas.HasExited) { $canvas.Kill(); $canvas.WaitForExit() }

@@ -18,6 +18,40 @@ namespace AppStudio
         public List<string> Caption = new List<string>();
     }
 
+    // How much the pictures may be reduced. The default is the lossless one, so
+    // nothing is degraded unless a caller asks for it, and when a caller does
+    // ask, the page says so in its own caption.
+    public sealed class PdfOptions
+    {
+        public int MaxPixels = 2000;
+        // 0 keeps the picture lossless. Anything from 1 to 100 stores it as a
+        // photographic encoding at that quality, which is smaller and lossy.
+        public int JpegQuality;
+
+        public static PdfOptions Lossless(int maxPixels)
+        {
+            PdfOptions options = new PdfOptions();
+            options.MaxPixels = maxPixels;
+            return options;
+        }
+
+        public static PdfOptions Compressed(int maxPixels, int quality)
+        {
+            PdfOptions options = new PdfOptions();
+            options.MaxPixels = maxPixels;
+            options.JpegQuality = quality;
+            return options;
+        }
+
+        public string Describe()
+        {
+            return JpegQuality <= 0
+                ? "lossless, at most " + MaxPixels.ToString(CultureInfo.InvariantCulture) + " px on the long side"
+                : "photographic quality " + JpegQuality.ToString(CultureInfo.InvariantCulture) + " (lossy), at most " +
+                  MaxPixels.ToString(CultureInfo.InvariantCulture) + " px on the long side";
+        }
+    }
+
     // A picture document with no libraries beyond what the framework already
     // carries. Only the parts of the format these pages need are written: one
     // page per picture, a caption in a font every reader has, and the picture
@@ -38,6 +72,12 @@ namespace AppStudio
 
         public static void Write(string path, PdfPage[] pages)
         {
+            Write(path, pages, null);
+        }
+
+        public static void Write(string path, PdfPage[] pages, PdfOptions options)
+        {
+            if (options == null) options = PdfOptions.Lossless(MaxPixels);
             if (String.IsNullOrWhiteSpace(path)) throw new ArgumentException("A path is required.", "path");
             if (pages == null || pages.Length == 0) throw new ArgumentException("A document needs at least one page.", "pages");
             string full = Path.GetFullPath(path);
@@ -52,7 +92,7 @@ namespace AppStudio
             for (int index = 0; index < pages.Length; index++)
             {
                 PdfPage page = pages[index];
-                PdfImage image = LoadImage(page.ImagePath);
+                PdfImage image = LoadImage(page.ImagePath, options);
                 int imageNumber = 0;
                 if (image != null)
                 {
@@ -119,7 +159,9 @@ namespace AppStudio
             public byte[] Data;
             public int SourceWidth;
             public int SourceHeight;
+            public int JpegQuality;
             public bool Scaled { get { return Width != SourceWidth || Height != SourceHeight; } }
+            public bool Lossy { get { return JpegQuality > 0; } }
         }
 
         private static string ContentStream(PdfPage page, PdfImage image, bool hasImage)
@@ -132,6 +174,11 @@ namespace AppStudio
             {
                 caption.Add("picture stored at " + image.Width + "x" + image.Height +
                     " (reduced from " + image.SourceWidth + "x" + image.SourceHeight + ")");
+            }
+            if (image != null && image.Lossy)
+            {
+                caption.Add("picture re-encoded at quality " + image.JpegQuality +
+                    " to fit the attachment budget - fine detail is lost, the original PNG is in the session folder");
             }
             if (!hasImage) caption.Add("no picture for this screen - see the text attachment for the reason");
             text.Append("BT /F1 ").Append(Number(CaptionSize)).Append(" Tf ").Append(Number(CaptionLead)).Append(" TL 1 0 0 1 ")
@@ -162,12 +209,19 @@ namespace AppStudio
 
         private static byte[] ImageObject(PdfImage image)
         {
-            byte[] compressed = Deflate(image.Data);
             StringBuilder header = new StringBuilder();
             header.Append("<< /Type /XObject /Subtype /Image /Width ").Append(image.Width)
                 .Append(" /Height ").Append(image.Height)
-                .Append(" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode");
-            return Stream(header, compressed);
+                .Append(" /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter ");
+            if (image.Lossy)
+            {
+                // The photographic encoding is already a compressed stream the
+                // format understands, so it is stored as it is.
+                header.Append("/DCTDecode");
+                return Stream(header, image.Data);
+            }
+            header.Append("/FlateDecode");
+            return Stream(header, Deflate(image.Data));
         }
 
         private static byte[] Stream(StringBuilder header, byte[] payload)
@@ -184,9 +238,11 @@ namespace AppStudio
             return result;
         }
 
-        private static PdfImage LoadImage(string path)
+        private static PdfImage LoadImage(string path, PdfOptions options)
         {
             if (String.IsNullOrWhiteSpace(path) || !File.Exists(path)) return null;
+            int limit = options == null || options.MaxPixels <= 0 ? MaxPixels : options.MaxPixels;
+            int quality = options == null ? 0 : options.JpegQuality;
             using (Bitmap source = new Bitmap(path))
             {
                 PdfImage image = new PdfImage();
@@ -195,16 +251,53 @@ namespace AppStudio
                 int width = source.Width;
                 int height = source.Height;
                 if (width <= 0 || height <= 0) return null;
-                if (width > MaxPixels || height > MaxPixels)
+                if (width > limit || height > limit)
                 {
-                    double factor = Math.Min(MaxPixels / (double)width, MaxPixels / (double)height);
+                    double factor = Math.Min(limit / (double)width, limit / (double)height);
                     width = Math.Max(1, (int)Math.Round(width * factor));
                     height = Math.Max(1, (int)Math.Round(height * factor));
                 }
                 image.Width = width;
                 image.Height = height;
-                image.Data = Rgb(source, width, height);
+                if (quality > 0)
+                {
+                    image.JpegQuality = quality;
+                    image.Data = Jpeg(source, width, height, quality);
+                }
+                else
+                {
+                    image.Data = Rgb(source, width, height);
+                }
                 return image;
+            }
+        }
+
+        private static byte[] Jpeg(Bitmap source, int width, int height, int quality)
+        {
+            using (Bitmap copy = new Bitmap(width, height, PixelFormat.Format24bppRgb))
+            {
+                using (Graphics graphics = Graphics.FromImage(copy))
+                {
+                    graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    graphics.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                    graphics.DrawImage(source, new Rectangle(0, 0, width, height));
+                }
+                ImageCodecInfo codec = null;
+                ImageCodecInfo[] codecs = ImageCodecInfo.GetImageEncoders();
+                for (int index = 0; index < codecs.Length; index++)
+                {
+                    if (codecs[index].MimeType == "image/jpeg") codec = codecs[index];
+                }
+                if (codec == null) throw new InvalidOperationException("No JPEG encoder is available on this machine.");
+                using (EncoderParameters parameters = new EncoderParameters(1))
+                {
+                    parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)Math.Max(1, Math.Min(100, quality)));
+                    using (MemoryStream output = new MemoryStream())
+                    {
+                        copy.Save(output, codec, parameters);
+                        return output.ToArray();
+                    }
+                }
             }
         }
 

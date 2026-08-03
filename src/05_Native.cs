@@ -175,6 +175,20 @@ namespace AppStudio
         [DllImport("user32.dll")]
         internal static extern IntPtr GetForegroundWindow();
 
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern bool AttachThreadInput(uint attachTo, uint attachFrom, bool attach);
+
+        [DllImport("kernel32.dll")]
+        internal static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
+        internal static extern bool BringWindowToTop(IntPtr window);
+
+        [DllImport("user32.dll")]
+        internal static extern bool IsIconic(IntPtr window);
+
+        internal const int SW_RESTORE = 9;
+
         [DllImport("user32.dll")]
         internal static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
 
@@ -256,6 +270,45 @@ namespace AppStudio
             inputs[1].type = NativeMethods.INPUT_MOUSE;
             inputs[1].data.mouse.flags = NativeMethods.MOUSEEVENTF_LEFTUP;
             return NativeMethods.SendInput(2, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT))) == 2;
+        }
+
+        // A shortcut is sent as the keys that make it: the modifiers go down,
+        // the key goes down and up, the modifiers come up. Nothing about the
+        // key is guessed - the caller has already turned a written chord back
+        // into virtual key codes or refused it.
+        internal static bool SendChord(int[] modifiers, int key)
+        {
+            if (key == 0) return false;
+            int count = (modifiers == null ? 0 : modifiers.Length) * 2 + 2;
+            NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[count];
+            int cursor = 0;
+            if (modifiers != null)
+            {
+                for (int index = 0; index < modifiers.Length; index++)
+                {
+                    inputs[cursor].type = NativeMethods.INPUT_KEYBOARD;
+                    inputs[cursor].data.keyboard.virtualKey = (ushort)modifiers[index];
+                    cursor++;
+                }
+            }
+            inputs[cursor].type = NativeMethods.INPUT_KEYBOARD;
+            inputs[cursor].data.keyboard.virtualKey = (ushort)key;
+            cursor++;
+            inputs[cursor].type = NativeMethods.INPUT_KEYBOARD;
+            inputs[cursor].data.keyboard.virtualKey = (ushort)key;
+            inputs[cursor].data.keyboard.flags = NativeMethods.KEYEVENTF_KEYUP;
+            cursor++;
+            if (modifiers != null)
+            {
+                for (int index = modifiers.Length - 1; index >= 0; index--)
+                {
+                    inputs[cursor].type = NativeMethods.INPUT_KEYBOARD;
+                    inputs[cursor].data.keyboard.virtualKey = (ushort)modifiers[index];
+                    inputs[cursor].data.keyboard.flags = NativeMethods.KEYEVENTF_KEYUP;
+                    cursor++;
+                }
+            }
+            return NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT))) == inputs.Length;
         }
 
         internal static bool SendUnicode(string text)
@@ -397,6 +450,16 @@ namespace AppStudio
             return found.ToArray();
         }
 
+        // Whether a window is actually on the display. Hiding a window leaves its
+        // rectangle intact, so a rectangle is no evidence that something was
+        // taken off the screen; this is.
+        public static bool IsVisible(long hwnd)
+        {
+            if (hwnd == 0) return false;
+            IntPtr window = new IntPtr(hwnd);
+            return NativeMethods.IsWindowVisible(window) && !IsCloaked(window);
+        }
+
         public static bool IsCloaked(IntPtr window)
         {
             try
@@ -446,6 +509,166 @@ namespace AppStudio
                 return rightArea.CompareTo(leftArea);
             });
             return result.ToArray();
+        }
+
+        // Top level windows in the order the desktop stacks them, front first.
+        // The picker draws over the whole screen, so WindowFromPoint would only
+        // ever return the picker; the stack order is what answers "which window
+        // is the operator pointing at" without any window having to be made
+        // click-through.
+        public static TargetWindowInfo[] ListStackOrder(long[] excludedHwnds, int excludedProcessId)
+        {
+            List<TargetWindowInfo> result = new List<TargetWindowInfo>();
+            NativeMethods.EnumWindows(delegate(IntPtr window, IntPtr parameter)
+            {
+                long handle = window.ToInt64();
+                if (excludedHwnds != null)
+                {
+                    for (int index = 0; index < excludedHwnds.Length; index++) if (excludedHwnds[index] == handle) return true;
+                }
+                if (!NativeMethods.IsWindowVisible(window)) return true;
+                uint pid;
+                NativeMethods.GetWindowThreadProcessId(window, out pid);
+                int processId = unchecked((int)pid);
+                if (excludedProcessId != 0 && processId == excludedProcessId) return true;
+                if (IsCloaked(window)) return true;
+                RectValue rect = GetPhysicalRect(window);
+                if (rect == null || rect.Width <= 1 || rect.Height <= 1) return true;
+                long style = NativeMethods.GetWindowLongValue(window, NativeMethods.GWL_STYLE);
+                long exStyle = NativeMethods.GetWindowLongValue(window, NativeMethods.GWL_EXSTYLE);
+                // A child of another window is not a top level surface, and a
+                // transparent layered window is something drawn over the desktop
+                // rather than an application the operator can point at.
+                if ((style & 0x40000000L) != 0) return true;
+                if ((exStyle & 0x00000020L) != 0) return true;
+                StringBuilder title = new StringBuilder(1024);
+                NativeMethods.GetWindowText(window, title, title.Capacity);
+                StringBuilder className = new StringBuilder(512);
+                NativeMethods.GetClassName(window, className, className.Capacity);
+                TargetWindowInfo item = new TargetWindowInfo();
+                item.Hwnd = handle;
+                item.ProcessId = processId;
+                item.Title = title.ToString();
+                item.ClassName = className.ToString();
+                item.Rect = rect;
+                result.Add(item);
+                return true;
+            }, IntPtr.Zero);
+            FillProcessNames(result);
+            return result.ToArray();
+        }
+
+        public static TargetWindowInfo WindowAt(TargetWindowInfo[] stack, int x, int y)
+        {
+            if (stack == null) return null;
+            for (int index = 0; index < stack.Length; index++)
+            {
+                RectValue rect = stack[index].Rect;
+                if (rect == null) continue;
+                if (x >= rect.X && y >= rect.Y && x < rect.X + rect.Width && y < rect.Y + rect.Height) return stack[index];
+            }
+            return null;
+        }
+
+        // The window a foreground change points at, reduced to its top level
+        // root so a focus change inside an application is not read as a switch
+        // to a different one.
+        public static TargetWindowInfo DescribeTopLevel(IntPtr window)
+        {
+            if (window == IntPtr.Zero) return null;
+            IntPtr top = NativeMethods.GetAncestor(window, NativeMethods.GA_ROOT);
+            if (top == IntPtr.Zero) top = window;
+            uint pid;
+            NativeMethods.GetWindowThreadProcessId(top, out pid);
+            StringBuilder title = new StringBuilder(1024);
+            NativeMethods.GetWindowText(top, title, title.Capacity);
+            StringBuilder className = new StringBuilder(512);
+            NativeMethods.GetClassName(top, className, className.Capacity);
+            TargetWindowInfo item = new TargetWindowInfo();
+            item.Hwnd = top.ToInt64();
+            item.ProcessId = unchecked((int)pid);
+            item.Title = title.ToString();
+            item.ClassName = className.ToString();
+            item.Rect = GetPhysicalRect(top);
+            try
+            {
+                using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(item.ProcessId)) item.ProcessName = process.ProcessName;
+            }
+            catch
+            {
+                item.ProcessName = null;
+            }
+            return item;
+        }
+
+        public static TargetWindowInfo Foreground()
+        {
+            return DescribeTopLevel(NativeMethods.GetForegroundWindow());
+        }
+
+        // Windows refuses SetForegroundWindow to a process that is not itself in
+        // front, which is exactly the situation during a replay: this window is
+        // hidden so it does not cover the target. Sharing the input queue with
+        // the thread that currently owns the foreground lifts that refusal for
+        // the moment it takes to hand the front over, and the attachment is
+        // always undone.
+        //
+        // The result is never assumed. The caller is told whether the window is
+        // actually in front now, because "asked politely" is not the same fact
+        // as "is in front", and a step carried out against a window that never
+        // came forward would be carried out against whatever did.
+        public static bool BringToFront(long hwnd)
+        {
+            if (hwnd == 0) return false;
+            IntPtr window = new IntPtr(hwnd);
+            if (NativeMethods.GetForegroundWindow() == window) return true;
+            if (NativeMethods.IsIconic(window)) NativeMethods.ShowWindow(window, NativeMethods.SW_RESTORE);
+            NativeMethods.SetForegroundWindow(window);
+            if (NativeMethods.GetForegroundWindow() == window) return true;
+
+            IntPtr front = NativeMethods.GetForegroundWindow();
+            uint frontThread = front == IntPtr.Zero ? 0 : NativeMethods.GetWindowThreadProcessId(front, out Discard);
+            uint targetThread = NativeMethods.GetWindowThreadProcessId(window, out Discard);
+            uint ownThread = NativeMethods.GetCurrentThreadId();
+            bool attachedFront = false;
+            bool attachedTarget = false;
+            try
+            {
+                if (frontThread != 0 && frontThread != ownThread) attachedFront = NativeMethods.AttachThreadInput(ownThread, frontThread, true);
+                if (targetThread != 0 && targetThread != ownThread) attachedTarget = NativeMethods.AttachThreadInput(ownThread, targetThread, true);
+                NativeMethods.BringWindowToTop(window);
+                NativeMethods.SetForegroundWindow(window);
+            }
+            finally
+            {
+                if (attachedTarget) NativeMethods.AttachThreadInput(ownThread, targetThread, false);
+                if (attachedFront) NativeMethods.AttachThreadInput(ownThread, frontThread, false);
+            }
+            return NativeMethods.GetForegroundWindow() == window;
+        }
+
+        private static uint Discard;
+
+        private static void FillProcessNames(List<TargetWindowInfo> result)
+        {
+            Dictionary<int, string> names = new Dictionary<int, string>();
+            for (int index = 0; index < result.Count; index++)
+            {
+                string name;
+                if (!names.TryGetValue(result[index].ProcessId, out name))
+                {
+                    try
+                    {
+                        using (System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(result[index].ProcessId)) name = process.ProcessName;
+                    }
+                    catch
+                    {
+                        name = null;
+                    }
+                    names[result[index].ProcessId] = name;
+                }
+                result[index].ProcessName = name;
+            }
         }
 
         public static TargetWindowInfo[] ListTopLevelWindows()

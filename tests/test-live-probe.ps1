@@ -32,6 +32,21 @@ try{
  $null=[AppStudio.ProbeRunner]::Run($normal,[AppStudio.ProbeKind]::Focus,(WriteArgs ''));$keys=[AppStudio.ProbeRunner]::Run($normal,[AppStudio.ProbeKind]::Keys,(WriteArgs 'Z'));Check $keys 'keys';if($keys.Method-ne'win32.SendInput.keys'){throw ('keys did not use SendInput: '+$keys.Method)}
  $rateFirst=[AppStudio.ProbeRunner]::Run($choice,[AppStudio.ProbeKind]::Click,(WriteArgs ''));Check $rateFirst 'rateFirst';$rate=[AppStudio.ProbeRunner]::Run($choice,[AppStudio.ProbeKind]::Click,(WriteArgs ''));if($rate.Outcome-ne'blocked'-or$rate.Method-ne'policy.rateLimit'){throw ('one-second rate limit missing: '+$rate.Outcome+' '+$rate.Method)}
  [AppStudio.Probe]::Shutdown();$failed=[AppStudio.ProbeRunner]::Run($normal,[AppStudio.ProbeKind]::Read,(New-Object AppStudio.ProbeArgs));Check $failed 'failed';if($failed.Outcome-ne'failed'){throw ('failed outcome was not retained: '+$failed.Outcome)};[AppStudio.Probe]::Configure($root,$false)
- $snapshot=[AppStudio.Probe]::Deep($normal,3000);$session=New-Object AppStudio.SessionRecorder((Join-Path $temp 'shots'));$record=$session.Pin($snapshot,'probe target','');foreach($result in @($read,$readOnly,$passwordWrite,$set,$undo,$focus,$invoke,$unknown,$toggleResult,$expand,$select,$scroll,$click,$keys,$rateFirst,$rate,$failed)){$session.AddProbe($record,$result)};$preview=Join-Path $temp 'session.json';$session.WritePreview($preview);$json=Get-Content $preview -Raw;if($json-notmatch '"method"'-or$json-notmatch '"outcome"'-or$json-match 'secret-value-42|P@ssword123|changed-value'){throw 'probe serialization missing fields or leaked values'}
+ # Every operation leaves a trail of the routes it tried, and no field value
+ # ever reaches it.
+ $trail=New-Object 'System.Collections.Generic.List[AppStudio.RouteAttempt]'
+ foreach($result in @($read,$readOnly,$passwordWrite,$set,$undo,$focus,$invoke,$unknown,$toggleResult,$expand,$select,$scroll,$click,$keys,$rateFirst,$rate,$failed)){
+  if($result.Attempts.Count-lt1){throw ('an operation left no route trail: '+$result.Kind+' '+$result.Outcome)}
+  if([string]::IsNullOrWhiteSpace($result.AttemptLine)){throw 'the route trail has no text'}
+  foreach($attempt in $result.Attempts){$trail.Add($attempt)}
+ }
+ $routes=@($trail|ForEach-Object{$_.Route}|Sort-Object -Unique)
+ foreach($needed in @('uia','guard')){if($routes-notcontains$needed){throw ('a route never appeared in any trail: '+$needed)}}
+ $blockedTrail=@($passwordWrite.Attempts|Where-Object{$_.Route-eq'guard'})
+ if($blockedTrail.Count-lt1-or$blockedTrail[0].Effect-notmatch 'nothing was sent'){throw 'the password refusal did not record that nothing was sent'}
+ $json=''
+ foreach($attempt in $trail){$json=$json+[AppStudio.JsonWriter]::WriteCompact($attempt.ToJson())}
+ if($json-notmatch '"method"'-or$json-notmatch '"outcome"'){throw 'the route trail lost its fields'}
+ if($json-match 'secret-value-42|P@ssword123|changed-value'){throw 'a field value leaked into the route trail'}
  $results=@($read,$readOnly,$passwordWrite,$set,$undo,$focus,$invoke,$unknown,$toggleResult,$expand,$select,$scroll,$click,$keys,$rateFirst,$rate,$failed);$methods=@($results|ForEach-Object{$_.Method}|Sort-Object -Unique);$outcomes=@($results|ForEach-Object{$_.Outcome}|Sort-Object -Unique);if($outcomes.Count-ne5){throw ('not all five outcomes were exercised: '+($outcomes-join','))};Write-Output ('PASS test-live-probe kinds=10 outcomes='+($outcomes-join',')+' methods='+($methods-join',')+' noEffect=unknown password=blocked readOnly=blocked rateLimit=blocked undo=success valueLeak=0')
 }finally{[AppStudio.Probe]::Shutdown();if($null-ne$process-and-not$process.HasExited){$process.Kill();$process.WaitForExit()};if($null-ne$startCursor){$null=[PuiTest.Cursor]::SetCursorPos($startCursor.X,$startCursor.Y)};Remove-Item $temp -Recurse -Force}

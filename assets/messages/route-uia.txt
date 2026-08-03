@@ -1,1 +1,1 @@
-支援技術情報 (UIA)
+UI Automation のみ
