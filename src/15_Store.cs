@@ -462,7 +462,10 @@ namespace AppStudio
         public static StudioSession Create(string baseDir, string kind, string title)
         {
             StudioSession session = new StudioSession();
-            session.Id = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 4);
+            // The listing is ordered by folder name, so the name has to order by
+            // time. Two sessions started inside the same second used to fall back
+            // to the order of their random tail, which is no order at all.
+            session.Id = DateTime.Now.ToString("yyyyMMdd-HHmmss-fff", CultureInfo.InvariantCulture) + "-" + Guid.NewGuid().ToString("N").Substring(0, 4);
             session.Kind = kind;
             session.StartedAt = DateTimeOffset.Now;
             session.Title = title;
@@ -482,6 +485,8 @@ namespace AppStudio
             string root = Root(baseDir);
             if (!Directory.Exists(root)) return new string[0];
             string[] folders = Directory.GetDirectories(root);
+            // Newest first. The name carries the time down to the millisecond, so
+            // ordering by name is ordering by when the session was started.
             Array.Sort(folders, StringComparer.OrdinalIgnoreCase);
             Array.Reverse(folders);
             return folders;

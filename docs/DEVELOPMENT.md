@@ -54,7 +54,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 |---|---|
 | `00_Theme` | 共通 design system 準拠の color token・spacing・型スケールと ControlTemplate。light/dark の切替と `runtime/settings/theme.txt` への保存 |
 | `01_App` | 起動、DPI、fatal error |
-| `02_Studio` | 主画面（スナップ／録画／セッション一覧／セッション詳細／詳細設定）、カウントダウン、秘密入力の問い合わせ |
+| `02_Studio` | 小さなランチャと結果画面の2形態、カウントダウン、秘密入力と再生許可の問い合わせ |
 | `04_Hotkeys` | RegisterHotKey（stop / emergency）、代替、設定保存 |
 | `05_Native` | Win32 宣言、DPI/monitor/input/window helper、重なり順の列挙、検証つき前面化 |
 | `06_Win32Probe` | bounded Win32 取得 |
@@ -75,7 +75,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `22_ScanProviders` | UIA/MSAA tree の walk と座標 sampling（worker 側）|
 | `23_ScanRunner` | 専用 worker、進捗、打切り理由、人向け要約。録画用に worker を使い回す持続 mode を持つ |
 | `24_Messages` | `assets/messages` の日本語文言読み出し |
-| `25_Recorder` | アプリ横断の記録。前面追跡、押下と chord の検出、入力欄の値読み戻し |
+| `25_Recorder` | アプリ横断の記録。押下監視スレッドと記述スレッドの分離、前面追跡、入力欄の値読み戻し |
 | `26_JsonReader` | JSON 読み取り |
 | `27_Picker` | 全画面の選択オーバーレイ |
 | `28_RecordHud` | 録画中の枠と停止コントロール。撮影前に画面から消えたことを自分で確かめる |
@@ -115,6 +115,7 @@ runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test 
 - `test-scan`: 4経路の統合、HWND 無し要素、独自描画時の sampling 起動、値漏れ0
 - `test-autosave`: **製品が実際に書く `SessionStore.Append` 経路で**、強制終了しても記録と索引が残ること、書けない時に `STORE-WRITE` の理由を出して別の場所へ勝手に出さないこと
 - `test-ui-flow`: 実 GUI を UI Automation で駆動し、主画面が3つの主役だけを出すこと、詳細設定が折り畳まれていること、再生許可が既定で切であること、MSAA が経路として出ないこと
+- `test-calculator-e2e`: **実マウス**で Windows 標準の電卓を相手に、ランチャの大きさ、スナップ後にフォーカスが戻ること、複数系列の押下が1つも欠けずに記録されること、再生が許可を尋ねること、そして**電卓の表示が実際に期待値へ変わること**を確認する。再生が呼ばれたことではなく、対象アプリが変わったことを合格条件にする
 - `test-gui-e2e`: **実マウス・実キー**で2つの実アプリを相手に、選択→取得→出力、アプリ横断の録画、秘密欄の非保存、キーフレームの黒塗り、自分のウィンドウが証拠へ混入しないこと、再生と試行列、秘密ステップでの操作者への問い合わせまで通す
 
 fixture だけを build:
@@ -125,7 +126,7 @@ fixture だけを build:
 
 `FixtureWinForms`、`FixtureWin32`、`FixtureWpf`、`FixtureCanvas`、`FixtureInputTarget` を `tests/.build` に生成する。
 
-`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-gui-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
+`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-gui-e2e`、`test-calculator-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
 
 `test-gui-e2e` は自分で起動した fixture だけを操作する。全 click は押す直前に `WindowTools.ProcessIdAt` で対象プロセスのものだと確認し、違えば一度だけ対象を前面に出して確認し直し、それでも違えば例外にして何も押さない。再生の前には、記録した各ウィンドウ記述に一致する窓がちょうど1つであることを確かめ、複数あれば再生を行わずその事実を出力する。
 
@@ -154,7 +155,10 @@ WP-S 成果は `artifacts/wp-s/<run>/` に出る。WP-S 文書の数値と製品
 画面の見た目と操作導線は、共通の design system に揃える。
 
 - 色・余白・角丸・型スケールは `src/00_Theme.cs` の token だけを使う。`Color.FromRgb` や `Brushes.White` を UI コードへ直接書かない。
-- 主画面は topbar(46) / progress track(4) / 本体（左レール＋詳細）/ status bar の4帯。
+- 画面は2形態。**ランチャ 660 x 356**（メニューと設定だけ、結果領域を持たない）と、**結果画面 1120 x 840**（左レール＋詳細）。どちらも topbar / progress track / 本体 / status bar の4帯。
+- 結果領域を起動時から抱えない。読むものが無いうちに大きな窓を出さない。
+- **共有しているコントロール（status / progress / 一覧 / 詳細 / 主ボタン）は、形態を切り替える前に必ず親から外す。** WPF は同じ要素に2つ目の親を許さず、これを怠ると再構築が例外になる。
+- 録画中の停止操作は大きく取る。見失って押せないことがあってはならない。
 - **主役は「スナップ」「録画」の2ボタンと、その下のセッション一覧だけ。** 再生・レポート・AI 向け出力・書き出しはセッションを選んだときの従属操作。経路選択・値方針・容量予算・診断は［詳細設定］の折り畳みの中。
 - 補足・詳細・上級者向け追跡情報は Accordion へ入れる。**閉じた状態で中身の量や状態が分かる要約を必ず付ける。**
 - 許可の可否は必ず tick box と警告枠、状態の一言は Badge、件数は StatCard。

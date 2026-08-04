@@ -37,20 +37,24 @@ namespace AppStudio
         private readonly System.Windows.Threading.Dispatcher dispatcher;
         private readonly int ownProcessId;
         private readonly ScanLimits limits;
-        private readonly Dictionary<int, bool> keyDown = new Dictionary<int, bool>();
         private readonly Dictionary<long, string> screenByWindow = new Dictionary<long, string>();
         private readonly Dictionary<long, DateTime> lastKeyframe = new Dictionary<long, DateTime>();
 
         private Thread worker;
+        private Thread sampler;
         private ScanRunner runner;
         private volatile bool running;
         private DateTime startedUtc;
         private long[] excludedHandles = new long[0];
+        // What the sampler saw, waiting for the worker to describe it. The two
+        // are separate threads on purpose: see StartSampler.
+        private readonly System.Collections.Concurrent.ConcurrentQueue<InputMoment> pending =
+            new System.Collections.Concurrent.ConcurrentQueue<InputMoment>();
+        private int droppedByBacklog;
 
         private TargetWindowInfo currentWindow;
         private string currentScreenId;
         private List<ScanNode> currentNodes = new List<ScanNode>();
-        private bool lastLeftDown;
 
         private ScanNode pendingField;
         private ElementRef pendingFieldRef;
@@ -99,17 +103,122 @@ namespace AppStudio
             worker.SetApartmentState(ApartmentState.STA);
             worker.Name = "app-studio-recorder";
             worker.Start();
+            sampler = new Thread(SampleLoop);
+            sampler.IsBackground = true;
+            sampler.Name = "app-studio-recorder-input";
+            sampler.Priority = ThreadPriority.AboveNormal;
+            sampler.Start();
+        }
+
+        // Watching the buttons and describing what was pressed have to be two
+        // different threads.
+        //
+        // Describing one press costs hundreds of milliseconds - a UI Automation
+        // probe, and sometimes a whole window acquisition - and the only thing
+        // the operating system will tell us afterwards is "a press happened
+        // since you last asked", not how many. So a single thread that describes
+        // a press while the operator carries on clicking swallows every press it
+        // was too busy to see, and the recording quietly loses steps.
+        //
+        // This loop therefore does nothing but read the button and the pointer,
+        // which costs microseconds, and hands each moment to the worker. Order is
+        // preserved because there is exactly one reader of the queue.
+        private void SampleLoop()
+        {
+            const int SampleMs = 12;
+            bool wasDown = false;
+            Dictionary<int, bool> keys = new Dictionary<int, bool>();
+            while (running)
+            {
+                try
+                {
+                    short state = NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON);
+                    bool down = (state & 0x8000) != 0;
+                    bool pressedSince = (state & 0x0001) != 0;
+                    if (!wasDown && (down || pressedSince))
+                    {
+                        PointValue cursor = WindowTools.CursorPosition();
+                        if (cursor != null)
+                        {
+                            InputMoment moment = new InputMoment();
+                            moment.Kind = InputMoment.ClickKind;
+                            moment.X = cursor.X;
+                            moment.Y = cursor.Y;
+                            moment.AtUtc = DateTime.UtcNow;
+                            moment.Foreground = NativeMethods.GetForegroundWindow().ToInt64();
+                            Enqueue(moment);
+                        }
+                    }
+                    wasDown = down;
+                    SampleKeys(keys);
+                }
+                catch
+                {
+                    // A sampling tick that throws must not stop the watch; the
+                    // worker records anything that actually goes wrong.
+                }
+                Thread.Sleep(SampleMs);
+            }
+        }
+
+        private void SampleKeys(Dictionary<int, bool> keys)
+        {
+            bool ctrl = IsDown(0x11);
+            bool alt = IsDown(0x12);
+            bool shift = IsDown(0x10);
+            bool win = IsDown(0x5B) || IsDown(0x5C);
+            bool command = ctrl || alt || win;
+            int[] watched = KeyTable.Watched;
+            for (int index = 0; index < watched.Length; index++)
+            {
+                int key = watched[index];
+                if (KeyTable.IsModifier(key)) continue;
+                short state = NativeMethods.GetAsyncKeyState(key);
+                bool down = (state & 0x8000) != 0;
+                bool pressedSince = (state & 0x0001) != 0;
+                bool was;
+                keys.TryGetValue(key, out was);
+                keys[key] = down;
+                if (was) continue;
+                if (!down && !pressedSince) continue;
+                if (!KeyTable.IsAlwaysSemantic(key) && !command) continue;
+                InputMoment moment = new InputMoment();
+                moment.Kind = InputMoment.ChordKind;
+                moment.Chord = KeyTable.Chord(ctrl, alt, shift, win, key);
+                moment.AtUtc = DateTime.UtcNow;
+                moment.Foreground = NativeMethods.GetForegroundWindow().ToInt64();
+                Enqueue(moment);
+            }
+        }
+
+        // The queue is bounded so a wedged worker cannot grow it without limit.
+        // Reaching the bound is a lost step, so it is counted and stated rather
+        // than passed over.
+        private void Enqueue(InputMoment moment)
+        {
+            if (pending.Count >= 512)
+            {
+                System.Threading.Interlocked.Increment(ref droppedByBacklog);
+                return;
+            }
+            pending.Enqueue(moment);
         }
 
         public void Stop()
         {
             if (!running) return;
             running = false;
+            Thread watching = sampler;
+            sampler = null;
+            if (watching != null && !watching.Join(2000))
+            {
+                session.AddDiagnostic("RECORD-STOP: the input watch did not finish within two seconds.");
+            }
             Thread finishing = worker;
             worker = null;
-            if (finishing != null && !finishing.Join(6000))
+            if (finishing != null && !finishing.Join(20000))
             {
-                session.AddDiagnostic("RECORD-STOP: the recording thread did not finish within six seconds.");
+                session.AddDiagnostic("RECORD-STOP: the recording thread did not finish within twenty seconds.");
             }
             if (runner != null)
             {
@@ -147,12 +256,15 @@ namespace AppStudio
             {
                 try
                 {
+                    // Everything the operator did is taken from the queue, in
+                    // order, so a slow description never loses the next press.
+                    InputMoment moment;
+                    while (running && pending.TryDequeue(out moment)) Handle(moment);
+
                     TargetWindowInfo front = WindowTools.Foreground();
                     if (IsForeign(front) && (currentWindow == null || front.Hwnd != currentWindow.Hwnd)) SwitchTo(front, false);
                     else if (IsForeign(front) && currentWindow != null && !String.Equals(front.Title, currentWindow.Title, StringComparison.Ordinal)) TitleChanged(front);
                     else if (IsForeign(front)) currentWindow.Rect = front.Rect;
-                    PollMouse();
-                    PollKeys();
                     ReportTick();
                 }
                 catch (Exception exception)
@@ -161,7 +273,29 @@ namespace AppStudio
                 }
                 Thread.Sleep(PollMs);
             }
+            // Whatever the operator did just before pressing stop is still in
+            // the queue and is part of the recording.
+            InputMoment last;
+            while (pending.TryDequeue(out last))
+            {
+                try { Handle(last); }
+                catch (Exception exception) { session.AddDiagnostic("RECORD-DRAIN: " + exception.GetType().Name + ": " + exception.Message); }
+            }
             FlushPendingField("recording stopped", false);
+            int lost = droppedByBacklog;
+            if (lost > 0)
+            {
+                session.AddLimit(lost + " input event(s) were dropped because the description could not keep up with the operator. " +
+                    "Those actions are missing from this recording.");
+            }
+        }
+
+        private void Handle(InputMoment moment)
+        {
+            if (moment == null) return;
+            int lagMs = (int)(DateTime.UtcNow - moment.AtUtc).TotalMilliseconds;
+            if (moment.Kind == InputMoment.ClickKind) OnClick(moment.X, moment.Y, moment.AtUtc, lagMs);
+            else KeyChord(moment.Chord, moment.AtUtc, lagMs);
         }
 
         private bool IsForeign(TargetWindowInfo window)
@@ -274,24 +408,7 @@ namespace AppStudio
             SessionStore.Append(session, "screens", screen.ToJson());
         }
 
-        // Only the transition matters. Asking whether the button is down right
-        // now misses a press that began and ended inside one polling interval,
-        // which is what a trackpad tap looks like, so the "pressed since the
-        // last call" bit is read as well.
-        private void PollMouse()
-        {
-            short state = NativeMethods.GetAsyncKeyState(NativeMethods.VK_LBUTTON);
-            bool down = (state & 0x8000) != 0;
-            bool pressedSince = (state & 0x0001) != 0;
-            bool press = (down && !lastLeftDown) || (!down && pressedSince && !lastLeftDown);
-            lastLeftDown = down;
-            if (!press) return;
-            PointValue cursor = WindowTools.CursorPosition();
-            if (cursor == null) return;
-            OnClick(cursor.X, cursor.Y);
-        }
-
-        private void OnClick(int x, int y)
+        private void OnClick(int x, int y, DateTime atUtc, int lagMs)
         {
             int owner = WindowTools.ProcessIdAt(x, y);
             if (owner == ownProcessId)
@@ -306,7 +423,8 @@ namespace AppStudio
             FlushPendingField("the pointer moved to another element", false);
 
             AppRef app = session.Register(front.ProcessId);
-            StepRecord step = NewStep(StepRecord.KindClick, front, app);
+            StepRecord step = NewStep(StepRecord.KindClick, front, app, atUtc);
+            NoteLag(step, lagMs);
             step.Point = new PointValue();
             step.Point.X = x;
             step.Point.Y = y;
@@ -350,37 +468,6 @@ namespace AppStudio
             }
         }
 
-        // Command keys only. A letter on its own is text and never reaches this
-        // list; a letter with Control or Alt held is a shortcut and does.
-        private void PollKeys()
-        {
-            bool ctrl = IsDown(0x11);
-            bool alt = IsDown(0x12);
-            bool shift = IsDown(0x10);
-            bool win = IsDown(0x5B) || IsDown(0x5C);
-            bool command = ctrl || alt || win;
-            int[] keys = KeyTable.Watched;
-            for (int index = 0; index < keys.Length; index++)
-            {
-                int key = keys[index];
-                if (KeyTable.IsModifier(key)) continue;
-                short state = NativeMethods.GetAsyncKeyState(key);
-                bool down = (state & 0x8000) != 0;
-                // As with the pointer, asking only whether the key is down right
-                // now misses a press that began and ended inside one polling
-                // interval. The "pressed since the last call" bit catches those.
-                bool pressedSince = (state & 0x0001) != 0;
-                bool was;
-                keyDown.TryGetValue(key, out was);
-                keyDown[key] = down;
-                if (was) continue;
-                if (!down && !pressedSince) continue;
-                bool alwaysSemantic = KeyTable.IsAlwaysSemantic(key);
-                if (!alwaysSemantic && !command) continue;
-                KeyChord(KeyTable.Chord(ctrl, alt, shift, win, key));
-            }
-        }
-
         private void Emit(StepRecord step)
         {
             if (step == null) return;
@@ -400,7 +487,7 @@ namespace AppStudio
             SessionStore.Append(session, "steps", step.ToJson());
         }
 
-        private void KeyChord(string chord)
+        private void KeyChord(string chord, DateTime atUtc, int lagMs)
         {
             // A shortcut does not move the focus out of the field: Ctrl+A selects
             // what is in it and the operator carries on typing. So the field is
@@ -411,7 +498,8 @@ namespace AppStudio
             TargetWindowInfo front = WindowTools.Foreground();
             if (!IsForeign(front)) return;
             AppRef app = session.Register(front.ProcessId);
-            StepRecord step = NewStep(StepRecord.KindKeyChord, front, app);
+            StepRecord step = NewStep(StepRecord.KindKeyChord, front, app, atUtc);
+            NoteLag(step, lagMs);
             step.KeyChord = chord;
             step.ScreenBefore = currentScreenId;
             step.EffectSummary = "a command key was pressed; what it does is the application's business";
@@ -510,6 +598,15 @@ namespace AppStudio
             Emit(step);
         }
 
+        // How far behind the operator the description ran. A large value means
+        // the element was looked at after the application had already moved on,
+        // so the reader is told rather than left to assume it was instantaneous.
+        private static void NoteLag(StepRecord step, int lagMs)
+        {
+            if (step == null || lagMs < 400) return;
+            step.Diagnostics.Add("described " + lagMs + " ms after it happened; the element was read at that later moment");
+        }
+
         private string ReadValue(ElementRef reference)
         {
             if (reference == null) return null;
@@ -528,10 +625,17 @@ namespace AppStudio
 
         private StepRecord NewStep(string kind, TargetWindowInfo window, AppRef app)
         {
+            return NewStep(kind, window, app, DateTime.UtcNow);
+        }
+
+        // The time written down is when the operator acted, not when this thread
+        // got round to describing it.
+        private StepRecord NewStep(string kind, TargetWindowInfo window, AppRef app, DateTime atUtc)
+        {
             StepRecord step = new StepRecord();
             step.Index = session.Steps.Count + 1;
-            step.At = DateTimeOffset.Now;
-            step.OffsetMs = (int)(DateTime.UtcNow - startedUtc).TotalMilliseconds;
+            step.At = new DateTimeOffset(atUtc.ToLocalTime());
+            step.OffsetMs = (int)(atUtc - startedUtc).TotalMilliseconds;
             step.Kind = kind;
             if (window != null)
             {
@@ -724,6 +828,22 @@ namespace AppStudio
         {
             return String.IsNullOrEmpty(value) ? "(no title)" : value;
         }
+    }
+
+    // One thing the operator did, as the sampler saw it. It carries the moment
+    // it happened so the record shows when the operator acted, not when this
+    // program got round to looking at it.
+    public sealed class InputMoment
+    {
+        public const string ClickKind = "click";
+        public const string ChordKind = "chord";
+
+        public string Kind;
+        public int X;
+        public int Y;
+        public string Chord;
+        public DateTime AtUtc;
+        public long Foreground;
     }
 
     // The fixed list of keys whose state is ever looked at, and the names they

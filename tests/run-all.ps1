@@ -35,7 +35,8 @@ $realInputTests = @(
     'test-live-probe.ps1',
     'test-input-probe.ps1',
     'test-packaged-target.ps1',
-    'test-gui-e2e.ps1'
+    'test-gui-e2e.ps1',
+    'test-calculator-e2e.ps1'
 )
 if ($env:APPSTUDIO_ALLOW_REAL_INPUT -eq '1') {
     $tests += $realInputTests

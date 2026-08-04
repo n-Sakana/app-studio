@@ -8,6 +8,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 # Drives the real product window through UI Automation. The physical pointer is
 # never moved and no key is ever sent to anything on the desktop, so this test is
 # safe to run while somebody is using the machine.
+Add-Type -AssemblyName System.Windows.Forms
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 & (Join-Path $root 'app-studio.ps1') -CompileOnly
 [AppStudio.DpiAwareness]::Enable()
@@ -65,19 +66,28 @@ try {
     Start-Sleep -Milliseconds 1500
     $null = Shoot $window 'home'
 
-    # --- 1. the first screen offers the three things and nothing else -------
+    # --- 1. the launcher is small and offers only what starts a job -------
     $snapLabel = Message 'home-snap.txt' 'Snap'
     $recordLabel = Message 'home-record.txt' 'Record'
     $snap = Wait-Named $window ([System.Windows.Automation.ControlType]::Button) $snapLabel 15000
-    if ($null -eq $snap) { throw 'The snap button is not on the first screen.' }
+    if ($null -eq $snap) { throw 'The snap button is not on the launcher.' }
     $record = Find-Named $window ([System.Windows.Automation.ControlType]::Button) $recordLabel
-    if ($null -eq $record) { throw 'The record button is not on the first screen.' }
+    if ($null -eq $record) { throw 'The record button is not on the launcher.' }
     if ($snap.Current.IsOffscreen -or $record.Current.IsOffscreen) { throw 'A main action is not actually on screen.' }
-    foreach ($main in @($snap, $record)) {
-        $null = $main.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+    foreach ($main in @($snap, $record)) { $null = $main.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern) }
+
+    $handle = [IntPtr][int64]$window.Current.NativeWindowHandle
+    $rect = [AppStudio.WindowTools]::GetPhysicalRect($handle)
+    $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    if ($rect.Width -gt ($work.Width * 0.65) -or $rect.Height -gt ($work.Height * 0.65)) {
+        throw ('The launcher is too large for a starting screen: ' + $rect.Width + 'x' + $rect.Height)
+    }
+    # A launcher carries no result area: no session list, no element table.
+    if ((All-Of $window ([System.Windows.Automation.ControlType]::List)).Count -ne 0) {
+        throw 'The launcher is carrying a result list before anything has been acquired.'
     }
 
-    # Nothing from the old stepwise product may still be reachable.
+    # Nothing from the withdrawn assistant workflow may still be reachable.
     $buttons = @()
     foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::Button)) { $buttons += $item.Current.Name }
     foreach ($gone in @('AI', 'Plan', 'Case', 'Import', 'Answer')) {
@@ -88,33 +98,38 @@ try {
         }
     }
 
-    # --- 2. the session list exists and says so when it is empty -----------
-    $lists = All-Of $window ([System.Windows.Automation.ControlType]::List)
-    if ($lists.Count -lt 1) { throw 'There is no session list.' }
+    # --- 2. the settings are a dialog, not a permanent panel --------------
+    $optionsLabel = Message 'compact-options.txt' 'Settings'
+    $options = Find-Named $window ([System.Windows.Automation.ControlType]::Button) $optionsLabel
+    if ($null -eq $options) { throw 'The launcher has no way to reach the settings.' }
+    $options.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 1200
+    # An owned dialog is not listed among the desktop's children, so it is found
+    # by its window handle instead of by walking the automation tree.
+    $dialog = $null
+    $limit = [DateTime]::UtcNow.AddSeconds(12)
+    $wanted = Message 'settings-title.txt' 'Detailed settings'
+    while ($null -eq $dialog -and [DateTime]::UtcNow -lt $limit) {
+        foreach ($w in [AppStudio.WindowTools]::ListStackOrder((New-Object 'long[]' 0), 0)) {
+            if ($w.ProcessId -ne $app.Id) { continue }
+            if ($w.Title -ne $wanted) { continue }
+            $dialog = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$w.Hwnd)
+        }
+        if ($null -eq $dialog) { Start-Sleep -Milliseconds 300 }
+    }
+    if ($null -eq $dialog) { throw 'The settings dialog did not open.' }
+    $dialogRect = [AppStudio.WindowTools]::GetPhysicalRect([IntPtr][int64]$dialog.Current.NativeWindowHandle)
+    if ($dialogRect.Height -gt ($work.Height * 0.9)) { throw ('The settings dialog is taller than the desktop: ' + $dialogRect.Height) }
+    $null = Shoot $dialog 'settings'
 
-    # --- 3. the detailed settings are folded away, with a live summary -----
-    $settingsLabel = Message 'settings-fold.txt' 'Detailed settings'
-    $fold = Wait-Named $window ([System.Windows.Automation.ControlType]::Group) $settingsLabel 8000
-    if ($null -eq $fold) { throw 'The detailed settings fold is missing.' }
-    $expand = $fold.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
-    if ($expand.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Collapsed) { throw 'The detailed settings are not folded away by default.' }
-    $expand.Expand()
-    Start-Sleep -Milliseconds 500
-    $null = Shoot $window 'settings'
-
-    # The permission that lets replay touch a real application must be a real
-    # tick box, and it must start off.
     $writeLabel = Message 'settings-write.txt' 'Let replay act on the real application'
-    $permission = Wait-Named $window ([System.Windows.Automation.ControlType]::CheckBox) $writeLabel 6000
+    $permission = Find-Named $dialog ([System.Windows.Automation.ControlType]::CheckBox) $writeLabel
     if ($null -eq $permission) { throw 'The replay permission switch is missing.' }
     $toggle = $permission.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
     if ($toggle.Current.ToggleState -ne [System.Windows.Automation.ToggleState]::Off) { throw 'The replay permission is on before anyone asked for it.' }
 
-    # The route choice offers the three carrying-out routes and never MSAA.
-    $combos = All-Of $window ([System.Windows.Automation.ControlType]::ComboBox)
-    if ($combos.Count -lt 2) { throw 'The route and value choices are not both present.' }
     $routeNames = @()
-    foreach ($combo in $combos) {
+    foreach ($combo in All-Of $dialog ([System.Windows.Automation.ControlType]::ComboBox)) {
         $expandCombo = $combo.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
         $expandCombo.Expand()
         Start-Sleep -Milliseconds 250
@@ -127,18 +142,41 @@ try {
         if ($joined.IndexOf($needed, [StringComparison]::OrdinalIgnoreCase) -lt 0) { throw ('A route is missing from the settings: ' + $needed) }
     }
     if ($joined -match '(?i)\bMSAA\b') { throw 'MSAA is offered as a way to carry an operation out.' }
+    $close = Find-Named $dialog ([System.Windows.Automation.ControlType]::Button) (Message 'settings-close.txt' 'Close')
+    if ($null -eq $close) { throw 'The settings dialog cannot be closed.' }
+    $close.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 700
 
-    $expand.Collapse()
-    Start-Sleep -Milliseconds 300
+    # --- 3. the result screen is a different, larger shape ----------------
+    $results = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'compact-results.txt' 'Results')
+    if ($null -eq $results) { throw 'The launcher has no way to reach the records.' }
+    $results.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 1500
+    $resultRect = [AppStudio.WindowTools]::GetPhysicalRect($handle)
+    if ($resultRect.Width -le $rect.Width -or $resultRect.Height -le $rect.Height) {
+        throw ('The result screen did not grow: launcher ' + $rect.Width + 'x' + $rect.Height + ' result ' + $resultRect.Width + 'x' + $resultRect.Height)
+    }
+    if ((All-Of $window ([System.Windows.Automation.ControlType]::List)).Count -lt 1) { throw 'The result screen has no session list.' }
+    $null = Shoot $window 'result'
 
-    # --- 4. the window survives being driven and still reports its state ---
+    # --- 4. and it can go back --------------------------------------------
+    $back = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'topbar-back.txt' 'Back')
+    if ($null -eq $back) { throw 'The result screen offers no way back to the launcher.' }
+    $back.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+    Start-Sleep -Milliseconds 1200
+    $backRect = [AppStudio.WindowTools]::GetPhysicalRect($handle)
+    if ($backRect.Width -ne $rect.Width -or $backRect.Height -ne $rect.Height) {
+        throw ('Going back did not restore the launcher size: ' + $backRect.Width + 'x' + $backRect.Height)
+    }
+
+    # --- 5. the window still reports its state ----------------------------
     $status = $null
     foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::Text)) {
         if ($item.Current.Name -and $item.Current.Name.Length -gt 6) { $status = $item.Current.Name }
     }
     if ($null -eq $status) { throw 'The window shows no status line at all.' }
 
-    Write-Output ('PASS test-ui-flow mainActions=snap+record sessionList=1 settingsFolded=1 replayPermission=off routes=uia+win32+sendInput msaaOffered=0 withdrawnControls=0')
+    Write-Output ('PASS test-ui-flow launcher=' + $rect.Width + 'x' + $rect.Height + ' noResultAreaOnLaunch=1 settings=dialog replayPermission=off routes=uia+win32+sendInput msaaOffered=0 result=' + $resultRect.Width + 'x' + $resultRect.Height + ' back=restored withdrawnControls=0')
 } finally {
     if ($null -ne $app -and -not $app.HasExited) { $app.Kill(); $app.WaitForExit() }
     if ($null -ne $app) { $app.Dispose() }

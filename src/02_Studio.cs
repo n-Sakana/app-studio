@@ -23,6 +23,7 @@ namespace AppStudio
         private readonly ListBox sessionList = new ListBox();
         private readonly StackPanel detail = new StackPanel();
         private readonly TextBlock status = new TextBlock();
+        private readonly TextBlock compactHint = new TextBlock();
         private readonly TextBlock healthLabel = new TextBlock();
         private readonly Border healthBadge;
         private readonly Button snapButton = new Button();
@@ -40,7 +41,21 @@ namespace AppStudio
         private string busyLabel;
         private bool busy;
 
+        private const string ModeCompact = "compact";
+        private const string ModeResult = "result";
+
+        // The launcher is deliberately about the size of the one Windows itself
+        // uses for the same kind of job; the result window is sized to be read.
+        private const int CompactWidth = 660;
+        private const int CompactHeight = 356;
+        private const int ResultWidth = 1120;
+        private const int ResultHeight = 840;
+
+        private string mode = ModeCompact;
         private string hotkeyNotice;
+        // Held on the window, not on a control, so rebuilding a view can never
+        // silently drop a permission the operator granted.
+        private bool writeEnabled;
         private string routeMode = ProbeRoutes.Auto;
         private string valuePolicy = Privacy.PolicyRecordText;
         private int pdfBudgetKb = ScreensPdf.DefaultBudgetBytes / 1024;
@@ -55,25 +70,18 @@ namespace AppStudio
             Theme.Install(Resources);
 
             Title = Text("app-title.txt", "App Studio");
-            Width = 1180;
-            Height = 760;
-            MinWidth = 900;
-            MinHeight = 600;
+            // Two shapes, not one. On launch this is a small form that offers the
+            // three things and the settings and nothing else; a result is a
+            // different job and gets a window sized for reading. Carrying a large
+            // empty result area around from the first moment is what made the
+            // ordinary window feel oversized.
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
             Background = Theme.SurfaceCanvas;
             FontFamily = Theme.UiFont;
             FontSize = Theme.BodySize;
 
-            Grid root = new Grid();
-            root.RowDefinitions.Add(Row(new GridLength(Theme.TopbarHeight)));
-            root.RowDefinitions.Add(Row(new GridLength(Theme.ProgressTrackHeight)));
-            root.RowDefinitions.Add(Row(new GridLength(1, GridUnitType.Star)));
-            root.RowDefinitions.Add(Row(GridLength.Auto));
-
             healthLabel.VerticalAlignment = VerticalAlignment.Center;
             healthBadge = Badge(healthLabel, "-", "Accent");
-            root.Children.Add(TopBar());
-
             progress.Height = Theme.ProgressTrackHeight;
             progress.Minimum = 0;
             progress.Maximum = 100;
@@ -82,26 +90,7 @@ namespace AppStudio
             progress.Foreground = Theme.Accent;
             progress.Background = Theme.SurfaceSunken;
             progress.BorderThickness = new Thickness(0);
-            Grid.SetRow(progress, 1);
-            root.Children.Add(progress);
-
-            Grid body = new Grid();
-            body.ColumnDefinitions.Add(Column(new GridLength(348)));
-            body.ColumnDefinitions.Add(Column(new GridLength(1, GridUnitType.Star)));
-            body.Children.Add(LeftRail());
-            ScrollViewer scroll = new ScrollViewer();
-            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-            scroll.Padding = new Thickness(Theme.Space6, Theme.Space5, Theme.Space6, Theme.Space6);
-            detail.Margin = new Thickness(0);
-            scroll.Content = detail;
-            Grid.SetColumn(scroll, 1);
-            body.Children.Add(scroll);
-            Grid.SetRow(body, 2);
-            root.Children.Add(body);
-
-            root.Children.Add(StatusBar());
-            Content = root;
+            ApplyMode(ModeCompact);
 
             Loaded += OnLoaded;
             Closed += OnClosed;
@@ -120,6 +109,221 @@ namespace AppStudio
             }
         }
 
+        // ---------- window shape ----------
+
+        // The status line, the progress track, the health badge, the session list
+        // and the detail panel are one instance each and are carried between the
+        // two window shapes. WPF refuses to give an element a second parent, so
+        // each one is taken out of the tree it is in before the new tree is
+        // built. Without this the rebuild throws, and it throws inside the
+        // callback that finishes an acquisition, which is how a snap could end
+        // with its records on disk but no outputs written.
+        private static void Orphan(UIElement child)
+        {
+            if (child == null) return;
+            DependencyObject parent = System.Windows.LogicalTreeHelper.GetParent(child);
+            Panel panel = parent as Panel;
+            if (panel != null)
+            {
+                panel.Children.Remove(child);
+                return;
+            }
+            Decorator decorator = parent as Decorator;
+            if (decorator != null)
+            {
+                decorator.Child = null;
+                return;
+            }
+            ContentControl holder = parent as ContentControl;
+            if (holder != null) holder.Content = null;
+        }
+
+        private void DetachShared()
+        {
+            Orphan(progress);
+            Orphan(detail);
+            Orphan(status);
+            Orphan(healthBadge);
+            Orphan(sessionList);
+            Orphan(compactHint);
+            Orphan(snapButton);
+            Orphan(recordButton);
+        }
+
+        private void OnSnapClick(object sender, RoutedEventArgs args) { StartSnap(); }
+        private void OnRecordClick(object sender, RoutedEventArgs args) { StartRecord(); }
+
+        private void ApplyMode(string next)
+        {
+            mode = next;
+            DetachShared();
+            bool compact = String.Equals(mode, ModeCompact, StringComparison.Ordinal);
+            // The minimums come first. Shrinking back to the launcher while the
+            // result window's minimum is still in force leaves the window stuck
+            // at that minimum, because the assignment is clamped as it is made.
+            MinWidth = compact ? CompactWidth : 940;
+            MinHeight = compact ? CompactHeight : 620;
+            Width = compact ? CompactWidth : ResultWidth;
+            Height = compact ? CompactHeight : ResultHeight;
+            ResizeMode = compact ? ResizeMode.CanMinimize : ResizeMode.CanResize;
+            Background = Theme.SurfaceCanvas;
+            Content = compact ? BuildCompact() : BuildResult();
+            if (!compact) ShowDetail();
+        }
+
+        private void GoResult()
+        {
+            if (String.Equals(mode, ModeResult, StringComparison.Ordinal))
+            {
+                ShowDetail();
+                return;
+            }
+            ApplyMode(ModeResult);
+            CentreOnScreen();
+        }
+
+        private void GoCompact()
+        {
+            if (String.Equals(mode, ModeCompact, StringComparison.Ordinal)) return;
+            ApplyMode(ModeCompact);
+            CentreOnScreen();
+        }
+
+        private void CentreOnScreen()
+        {
+            System.Drawing.Rectangle work = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;
+            double scale = 1.0;
+            PresentationSource source = PresentationSource.FromVisual(this);
+            if (source != null && source.CompositionTarget != null)
+            {
+                double m11 = source.CompositionTarget.TransformToDevice.M11;
+                if (m11 > 0) scale = m11;
+            }
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Left = (work.Left + (work.Width - Width * scale) / 2) / scale;
+            Top = (work.Top + (work.Height - Height * scale) / 2) / scale;
+        }
+
+        // The launcher: the things this product does, the settings, and one line
+        // of state. There is no result area here at all - that is what made the
+        // ordinary window feel oversized.
+        private UIElement BuildCompact()
+        {
+            Grid root = new Grid();
+            root.RowDefinitions.Add(Row(GridLength.Auto));
+            root.RowDefinitions.Add(Row(new GridLength(Theme.ProgressTrackHeight)));
+            root.RowDefinitions.Add(Row(new GridLength(1, GridUnitType.Star)));
+            root.RowDefinitions.Add(Row(GridLength.Auto));
+            root.Children.Add(TopBar());
+            Grid.SetRow(progress, 1);
+            root.Children.Add(progress);
+
+            StackPanel body = new StackPanel();
+            body.Margin = new Thickness(Theme.Space5, Theme.Space4, Theme.Space5, 0);
+
+            Grid actions = new Grid();
+            actions.ColumnDefinitions.Add(Column(new GridLength(1, GridUnitType.Star)));
+            actions.ColumnDefinitions.Add(Column(new GridLength(Theme.Space3)));
+            actions.ColumnDefinitions.Add(Column(new GridLength(1, GridUnitType.Star)));
+            UIElement snap = CompactAction(snapButton, Text("home-snap.txt", "Snap"), Text("home-snap-short.txt", "Pick a window and take it apart."), StartSnap);
+            UIElement record = CompactAction(recordButton, Text("home-record.txt", "Record"), Text("home-record-short.txt", "Follow what you do across applications."), StartRecord);
+            Grid.SetColumn(snap, 0);
+            Grid.SetColumn(record, 2);
+            actions.Children.Add(snap);
+            actions.Children.Add(record);
+            body.Children.Add(actions);
+
+            WrapPanel row = new WrapPanel();
+            row.Margin = new Thickness(0, Theme.Space4, 0, 0);
+            Button results = new Button();
+            results.Content = Text("compact-results.txt", "Results");
+            results.SetResourceReference(StyleProperty, "AppButtonCompact");
+            results.Margin = new Thickness(0, 0, Theme.Space2, 0);
+            results.Click += delegate { GoResult(); };
+            row.Children.Add(results);
+            Button options = new Button();
+            options.Content = Text("compact-options.txt", "Settings");
+            options.SetResourceReference(StyleProperty, "AppButtonCompact");
+            options.Click += delegate { ShowOptionsDialog(); };
+            row.Children.Add(options);
+            body.Children.Add(row);
+
+            compactHint.Text = SessionSummary();
+            compactHint.FontSize = Theme.MetaSize;
+            compactHint.Foreground = Theme.TextMuted;
+            compactHint.TextWrapping = TextWrapping.Wrap;
+            compactHint.Margin = new Thickness(0, Theme.Space3, 0, 0);
+            body.Children.Add(compactHint);
+
+            Grid.SetRow(body, 2);
+            root.Children.Add(body);
+            root.Children.Add(StatusBar());
+            return root;
+        }
+
+        private Border CompactAction(Button button, string label, string note, Action action)
+        {
+            Orphan(button);
+            button.Content = label;
+            button.SetResourceReference(StyleProperty, "AppButtonPrimary");
+            button.Height = 56;
+            button.FontSize = Theme.TitleSize;
+            button.FontWeight = FontWeights.Bold;
+            button.HorizontalAlignment = HorizontalAlignment.Stretch;
+            // The same instance is rewrapped whenever the window changes shape,
+            // so the handler is replaced rather than added to.
+            if (button == snapButton) { button.Click -= OnSnapClick; button.Click += OnSnapClick; }
+            else { button.Click -= OnRecordClick; button.Click += OnRecordClick; }
+            StackPanel stack = new StackPanel();
+            stack.Children.Add(button);
+            TextBlock text = new TextBlock();
+            text.Text = note;
+            text.FontSize = Theme.MicroSize;
+            text.Foreground = Theme.TextMuted;
+            text.TextWrapping = TextWrapping.Wrap;
+            text.Margin = new Thickness(2, Theme.Space2, 0, 0);
+            text.MinHeight = 32;
+            stack.Children.Add(text);
+            Border box = new Border();
+            box.Child = stack;
+            return box;
+        }
+
+        private UIElement BuildResult()
+        {
+            Grid root = new Grid();
+            root.RowDefinitions.Add(Row(GridLength.Auto));
+            root.RowDefinitions.Add(Row(new GridLength(Theme.ProgressTrackHeight)));
+            root.RowDefinitions.Add(Row(new GridLength(1, GridUnitType.Star)));
+            root.RowDefinitions.Add(Row(GridLength.Auto));
+            root.Children.Add(TopBar());
+            Grid.SetRow(progress, 1);
+            root.Children.Add(progress);
+
+            Grid body = new Grid();
+            body.ColumnDefinitions.Add(Column(new GridLength(320)));
+            body.ColumnDefinitions.Add(Column(new GridLength(1, GridUnitType.Star)));
+            body.Children.Add(LeftRail());
+            ScrollViewer scroll = new ScrollViewer();
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            scroll.Padding = new Thickness(Theme.Space5, Theme.Space4, Theme.Space5, Theme.Space5);
+            detail.Margin = new Thickness(0);
+            scroll.Content = detail;
+            Grid.SetColumn(scroll, 1);
+            body.Children.Add(scroll);
+            Grid.SetRow(body, 2);
+            root.Children.Add(body);
+            root.Children.Add(StatusBar());
+            return root;
+        }
+
+        private string SessionSummary()
+        {
+            if (sessions.Count == 0) return Text("compact-none.txt", "No session yet.");
+            return Text("compact-count.txt", "sessions") + ": " + sessions.Count;
+        }
+
         // ---------- chrome ----------
 
         private UIElement TopBar()
@@ -134,6 +338,13 @@ namespace AppStudio
             right.VerticalAlignment = VerticalAlignment.Center;
             right.Margin = new Thickness(0, 0, Theme.Space4, 0);
             right.Children.Add(healthBadge);
+            Button back = new Button();
+            back.Content = Text("topbar-back.txt", "Back");
+            back.SetResourceReference(StyleProperty, "AppButtonCompact");
+            back.Margin = new Thickness(0, 0, Theme.Space2, 0);
+            back.Visibility = String.Equals(mode, ModeResult, StringComparison.Ordinal) ? Visibility.Visible : Visibility.Collapsed;
+            back.Click += delegate { GoCompact(); };
+            right.Children.Add(back);
             Button theme = new Button();
             theme.Content = Text("topbar-theme.txt", "Theme");
             theme.SetResourceReference(StyleProperty, "AppButtonCompact");
@@ -223,13 +434,15 @@ namespace AppStudio
 
         private Border BigButton(Button button, string label, string note, Action action)
         {
+            Orphan(button);
             button.Content = label;
             button.SetResourceReference(StyleProperty, "AppButtonPrimary");
             button.Height = 46;
             button.FontSize = Theme.SectionSize;
             button.FontWeight = FontWeights.Bold;
             button.HorizontalAlignment = HorizontalAlignment.Stretch;
-            button.Click += delegate { action(); };
+            if (button == snapButton) { button.Click -= OnSnapClick; button.Click += OnSnapClick; }
+            else { button.Click -= OnRecordClick; button.Click += OnRecordClick; }
             StackPanel stack = new StackPanel();
             stack.Children.Add(button);
             TextBlock text = new TextBlock();
@@ -331,6 +544,7 @@ namespace AppStudio
                 sessionList.Items.Add(item);
             }
             if (unreadable > 0) Say(Text("sessions-unreadable.txt", "Some session folders could not be read") + ": " + unreadable, "Caution");
+            compactHint.Text = SessionSummary();
         }
 
         private ListBoxItem SessionItem(StudioSession session)
@@ -380,6 +594,7 @@ namespace AppStudio
 
         private void ShowWelcome()
         {
+            if (String.Equals(mode, ModeCompact, StringComparison.Ordinal)) return;
             detail.Children.Clear();
             StackPanel card = new StackPanel();
             card.Children.Add(Heading(Text("welcome-title.txt", "Three things")));
@@ -391,6 +606,7 @@ namespace AppStudio
 
         private void ShowDetail()
         {
+            if (String.Equals(mode, ModeCompact, StringComparison.Ordinal)) return;
             detail.Children.Clear();
             if (current == null)
             {
@@ -531,6 +747,18 @@ namespace AppStudio
 
         private UIElement Settings()
         {
+            TextBlock summary;
+            StackPanel outer = new StackPanel();
+            outer.Children.Add(Heading(Text("settings-title.txt", "Detailed settings")));
+            Expander fold = Accordion(Text("settings-fold.txt", "Routes, privacy, budget and diagnostics"), SettingsBody(), out summary);
+            summary.Text = routeMode + " / " + (valuePolicy == Privacy.PolicyLengthOnly ? Text("value-length-short.txt", "length only") : Text("value-record-short.txt", "text recorded")) +
+                " / " + pdfBudgetKb + " KB";
+            outer.Children.Add(fold);
+            return Card(outer);
+        }
+
+        private UIElement SettingsBody()
+        {
             StackPanel body = new StackPanel();
 
             body.Children.Add(FieldLabel(Text("settings-route.txt", "Route used when replaying")));
@@ -579,6 +807,12 @@ namespace AppStudio
 
             writeSwitch = PermissionSwitch(Text("settings-write.txt", "Let replay act on the real application"),
                 Text("settings-write-note.txt", "Replay presses buttons and types into the applications on this machine."));
+            // The answer lives on the window. Rebuilding this view used to make a
+            // fresh unticked box, which silently withdrew a permission the
+            // operator had already given.
+            writeSwitch.IsChecked = writeEnabled;
+            writeSwitch.Checked += delegate { writeEnabled = true; };
+            writeSwitch.Unchecked += delegate { writeEnabled = false; };
             body.Children.Add(PermissionBox(writeSwitch, Text("settings-write-note.txt", "Replay presses buttons and types into the applications on this machine.")));
 
             if (!String.IsNullOrEmpty(hotkeyNotice))
@@ -599,14 +833,39 @@ namespace AppStudio
             diag.Text = diagnostics == null ? "-" : JsonWriter.Write(diagnostics);
             body.Children.Add(diag);
 
-            TextBlock summary;
-            StackPanel outer = new StackPanel();
-            outer.Children.Add(Heading(Text("settings-title.txt", "Detailed settings")));
-            Expander fold = Accordion(Text("settings-fold.txt", "Routes, privacy, budget and diagnostics"), body, out summary);
-            summary.Text = routeMode + " / " + (valuePolicy == Privacy.PolicyLengthOnly ? Text("value-length-short.txt", "length only") : Text("value-record-short.txt", "text recorded")) +
-                " / " + pdfBudgetKb + " KB";
-            outer.Children.Add(fold);
-            return Card(outer);
+            return body;
+        }
+
+        // The same settings the result window folds away, shown as a dialog so
+        // the small launcher does not have to carry them.
+        private void ShowOptionsDialog()
+        {
+            Window dialog = new Window();
+            dialog.Title = Text("settings-title.txt", "Detailed settings");
+            dialog.Owner = this;
+            dialog.Width = 620;
+            dialog.SizeToContent = SizeToContent.Height;
+            dialog.MaxHeight = 560;
+            dialog.WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            dialog.ResizeMode = ResizeMode.NoResize;
+            dialog.Background = Theme.Surface;
+            dialog.FontFamily = Theme.UiFont;
+            Theme.Install(dialog.Resources);
+            ScrollViewer scroll = new ScrollViewer();
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.Margin = new Thickness(Theme.Space5);
+            StackPanel stack = new StackPanel();
+            stack.Children.Add(SettingsBody());
+            Button close = new Button();
+            close.Content = Text("settings-close.txt", "Close");
+            close.SetResourceReference(StyleProperty, "AppButtonPrimary");
+            close.HorizontalAlignment = HorizontalAlignment.Right;
+            close.Margin = new Thickness(0, Theme.Space5, 0, 0);
+            close.Click += delegate { dialog.Close(); };
+            stack.Children.Add(close);
+            scroll.Content = stack;
+            dialog.Content = scroll;
+            dialog.ShowDialog();
         }
 
         private static void AddRoute(ComboBox box, string mode, string label)
@@ -646,8 +905,7 @@ namespace AppStudio
             {
                 picked = picker.Pick(Text("pick-hint.txt", "Point at a window and click. Escape leaves."));
             }
-            Show();
-            Activate();
+            FocusSelf();
             if (picked == null || picked.Cancelled)
             {
                 Say(picked != null && picked.Problem != null ? picked.Problem : Text("pick-cancelled.txt", "Nothing was taken."), "Caution");
@@ -693,6 +951,12 @@ namespace AppStudio
                 {
                     Idle();
                     if (failure != null) Say(Text("snap-failed.txt", "The acquisition failed") + ": " + failure, "Danger");
+                    // The acquisition raised the target to photograph it, so the
+                    // front window is somebody else's. Take it back before the
+                    // result appears, and show the result in the window shape
+                    // meant for reading it.
+                    GoResult();
+                    FocusSelf();
                     BuildOutputs(session, false);
                     LoadSessions();
                     SelectById(session.Id);
@@ -769,8 +1033,7 @@ namespace AppStudio
                 hud = null;
             }
             busy = false;
-            Show();
-            Activate();
+            FocusSelf();
             if (session == null) return;
             session.EndedAt = DateTimeOffset.Now;
             if (session.Steps.Count == 0) session.AddLimit("Nothing was recorded: no action was observed between start and stop.");
@@ -781,6 +1044,8 @@ namespace AppStudio
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     Idle();
+                    GoResult();
+                    FocusSelf();
                     ReportOutputs(outputs);
                     LoadSessions();
                     SelectById(session.Id);
@@ -801,10 +1066,24 @@ namespace AppStudio
                 Say(Text("replay-nosteps.txt", "This session has no recorded action to play back."), "Caution");
                 return;
             }
-            if (writeSwitch == null || writeSwitch.IsChecked != true)
+            if (!writeEnabled)
             {
-                Say(Text("replay-needwrite.txt", "Replay acts on the real applications. Switch it on under the detailed settings first."), "Caution");
-                return;
+                // A one line note at the bottom of the window is not an answer to
+                // a button press: pressing replay and seeing nothing happen reads
+                // as a broken product. Ask plainly, and let the answer be given
+                // here rather than hunted for in a fold.
+                Confirm prompt = new Confirm(
+                    Text("replay-consent-title.txt", "Replay drives the real application"),
+                    Text("replay-consent-body.txt", "Replay presses buttons and types into the applications on this machine."),
+                    Text("replay-consent-ok.txt", "Allow and replay"),
+                    Text("replay-consent-cancel.txt", "Cancel"));
+                if (!prompt.Ask(this))
+                {
+                    Say(Text("replay-declined.txt", "Replay was not started."), "Caution");
+                    return;
+                }
+                writeEnabled = true;
+                if (writeSwitch != null) writeSwitch.IsChecked = true;
             }
             StudioSession session = current;
             replay = new ReplayEngine(baseDir, session);
@@ -853,8 +1132,8 @@ namespace AppStudio
                     }
                     busy = false;
                     Idle();
-                    Show();
-                    Activate();
+                    GoResult();
+                    FocusSelf();
                     if (failure != null) Say(Text("replay-failed.txt", "The replay stopped with an error") + ": " + failure, "Danger");
                     else if (finished != null)
                     {
@@ -905,7 +1184,11 @@ namespace AppStudio
                 {
                     Idle();
                     ReportOutputs(outputs);
-                    if (interactive) ShowDetail();
+                    // The detail was drawn before these files existed, so it is
+                    // still saying they are missing. Redraw it against what is
+                    // now on disk rather than leaving the two contradicting
+                    // each other on screen.
+                    ShowDetail();
                 }));
             });
             work.IsBackground = true;
@@ -1023,6 +1306,27 @@ namespace AppStudio
                     sessionList.SelectedIndex = index;
                     return;
                 }
+            }
+        }
+
+        // After a snap, a recording or a replay this window has deliberately been
+        // hidden or pushed behind the target. Coming back is part of the job:
+        // the operator asked this product for something and has to be able to
+        // carry on with it without hunting for the window in the task bar.
+        private void FocusSelf()
+        {
+            if (!IsVisible) Show();
+            if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+            Topmost = true;
+            Activate();
+            Topmost = false;
+            long handle = new System.Windows.Interop.WindowInteropHelper(this).Handle.ToInt64();
+            bool front = WindowTools.BringToFront(handle);
+            Focus();
+            if (snapButton != null && snapButton.IsEnabled) snapButton.Focus();
+            if (!front)
+            {
+                Say(Text("focus-failed.txt", "This window could not be brought to the front. Select it from the task bar."), "Caution");
             }
         }
 
@@ -1305,6 +1609,80 @@ namespace AppStudio
             if (handler != null) button.Click += handler;
             panel.Children.Add(button);
             return button;
+        }
+    }
+
+    // A question the operator cannot walk past. Used where pressing a button
+    // would otherwise appear to do nothing, because the product refused for a
+    // reason the operator never saw.
+    public sealed class Confirm
+    {
+        private readonly string title;
+        private readonly string body;
+        private readonly string okLabel;
+        private readonly string cancelLabel;
+
+        public Confirm(string windowTitle, string explanation, string ok, string cancel)
+        {
+            title = windowTitle;
+            body = explanation;
+            okLabel = ok;
+            cancelLabel = cancel;
+        }
+
+        public bool Ask(Window owner)
+        {
+            Window dialog = new Window();
+            dialog.Title = title;
+            dialog.Owner = owner;
+            dialog.Width = 460;
+            dialog.SizeToContent = SizeToContent.Height;
+            dialog.ResizeMode = ResizeMode.NoResize;
+            dialog.WindowStartupLocation = owner == null ? WindowStartupLocation.CenterScreen : WindowStartupLocation.CenterOwner;
+            dialog.Background = Theme.Surface;
+            dialog.FontFamily = Theme.UiFont;
+            Theme.Install(dialog.Resources);
+
+            StackPanel stack = new StackPanel();
+            stack.Margin = new Thickness(Theme.Space5);
+            TextBlock heading = new TextBlock();
+            heading.Text = title;
+            heading.FontSize = Theme.SectionSize;
+            heading.FontWeight = FontWeights.Bold;
+            heading.Foreground = Theme.Text;
+            heading.TextWrapping = TextWrapping.Wrap;
+            stack.Children.Add(heading);
+            TextBlock text = new TextBlock();
+            text.Text = body;
+            text.TextWrapping = TextWrapping.Wrap;
+            text.Foreground = Theme.TextSub;
+            text.FontSize = Theme.BodySize;
+            text.LineHeight = Theme.BodySize * Theme.BodyLine;
+            text.Margin = new Thickness(0, Theme.Space3, 0, 0);
+            stack.Children.Add(text);
+
+            bool answer = false;
+            WrapPanel row = new WrapPanel();
+            row.HorizontalAlignment = HorizontalAlignment.Right;
+            row.Margin = new Thickness(0, Theme.Space5, 0, 0);
+            Button cancel = new Button();
+            cancel.Content = cancelLabel;
+            cancel.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonCompact");
+            cancel.Margin = new Thickness(0, 0, Theme.Space2, 0);
+            cancel.IsCancel = true;
+            cancel.Click += delegate { answer = false; dialog.Close(); };
+            row.Children.Add(cancel);
+            Button ok = new Button();
+            ok.Content = okLabel;
+            ok.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonPrimary");
+            ok.IsDefault = true;
+            ok.Click += delegate { answer = true; dialog.Close(); };
+            row.Children.Add(ok);
+            stack.Children.Add(row);
+
+            dialog.Content = stack;
+            dialog.ShowDialog();
+            return answer;
         }
     }
 

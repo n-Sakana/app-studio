@@ -34,8 +34,11 @@ namespace AppStudio
         {
             frame = CreatePassiveWindow();
             Border edge = new Border();
-            edge.BorderBrush = new SolidColorBrush(Color.FromArgb(200, 58, 160, 255));
-            edge.BorderThickness = new Thickness(2);
+            // While a recording runs the frame is red, the same colour as the
+            // mark on the control, so the state of the machine is legible from
+            // the edge of the screen without reading anything.
+            edge.BorderBrush = new SolidColorBrush(Color.FromArgb(210, 226, 74, 74));
+            edge.BorderThickness = new Thickness(3);
             edge.Background = Brushes.Transparent;
             frame.Content = edge;
 
@@ -45,25 +48,29 @@ namespace AppStudio
             // held to plain ASCII.
             dot.Text = Messages.Text("hud-dot.txt", "*");
             dot.Foreground = new SolidColorBrush(Theme.Parse("#E24A4A"));
-            dot.FontSize = Theme.BodySize;
+            dot.FontSize = 20;
             dot.VerticalAlignment = VerticalAlignment.Center;
             dot.Margin = new Thickness(0, 0, Theme.Space2, 0);
 
             clock = new TextBlock();
             clock.Foreground = Brushes.White;
             clock.FontFamily = Theme.UiFont;
-            clock.FontSize = Theme.LabelSize;
+            clock.FontSize = 17;
+            clock.FontWeight = FontWeights.Bold;
             clock.VerticalAlignment = VerticalAlignment.Center;
             clock.Text = recordingLabel + "  00:00";
 
             stop = new Button();
             stop.Content = stopLabel;
             stop.FontFamily = Theme.UiFont;
-            stop.FontSize = Theme.MetaSize;
-            stop.Height = 24;
-            stop.MinWidth = 64;
-            stop.Margin = new Thickness(Theme.Space3, 0, 0, 0);
-            stop.Padding = new Thickness(Theme.Space2, 0, Theme.Space2, 0);
+            // The stop control is the one thing an operator must never have to
+            // hunt for, so it is a large target rather than a neat one.
+            stop.FontSize = 15;
+            stop.FontWeight = FontWeights.Bold;
+            stop.Height = 44;
+            stop.MinWidth = 132;
+            stop.Margin = new Thickness(Theme.Space5, 0, 0, 0);
+            stop.Padding = new Thickness(Theme.Space4, 0, Theme.Space4, 0);
             stop.Foreground = Brushes.White;
             stop.Background = new SolidColorBrush(Theme.Parse("#B03E48"));
             stop.BorderBrush = new SolidColorBrush(Theme.Parse("#E27680"));
@@ -86,7 +93,7 @@ namespace AppStudio
             shell.BorderBrush = new SolidColorBrush(Theme.Parse("#3AA0FF"));
             shell.BorderThickness = new Thickness(1);
             shell.CornerRadius = new CornerRadius(Theme.RadiusMd);
-            shell.Padding = new Thickness(Theme.Space3, Theme.Space2, Theme.Space3, Theme.Space2);
+            shell.Padding = new Thickness(Theme.Space5, Theme.Space3, Theme.Space4, Theme.Space3);
             shell.Child = row;
             control.Content = shell;
 
@@ -216,8 +223,8 @@ namespace AppStudio
         {
             if (suppressed) return;
             System.Drawing.Rectangle work = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;
-            int width = 240;
-            int height = 44;
+            int width = 360;
+            int height = 72;
             int x = work.Left + (work.Width - width) / 2;
             int y = work.Top + 12;
             NativeMethods.SetWindowPos(controlHandle, new IntPtr(-1), x, y, width, height,
