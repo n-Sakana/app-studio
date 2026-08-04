@@ -9,6 +9,7 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 # never moved and no key is ever sent to anything on the desktop, so this test is
 # safe to run while somebody is using the machine.
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 & (Join-Path $root 'app-studio.ps1') -CompileOnly
 [AppStudio.DpiAwareness]::Enable()
@@ -51,7 +52,117 @@ function Shoot($window, $name) {
     return [AppStudio.Capture]::Crop($rect, $masks, (Join-Path $shotDir ($name + '.png')), $handle)
 }
 
+# One session per state the result screen can be in, written into the product's
+# own store so the window shows what it would show for a real recording. They
+# are removed again at the end.
+#
+# A screen is only as good as its worst state, so all five are built and looked
+# at: everything worked, some of it did not, most of it did not, nothing was
+# recorded, and everything has a very long name.
+function New-SeedRect($x, $y, $w, $h) {
+    $rect = New-Object AppStudio.RectValue
+    $rect.X = $x; $rect.Y = $y; $rect.Width = $w; $rect.Height = $h
+    return $rect
+}
+function New-SeedPicture($session, $id) {
+    $folder = $session.ShotsFolder
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $path = Join-Path $folder ($id + '.png')
+    $bitmap = New-Object Drawing.Bitmap(160, 120)
+    try {
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try { $graphics.Clear([Drawing.Color]::FromArgb(238, 242, 246)) } finally { $graphics.Dispose() }
+        $bitmap.Save($path, [Drawing.Imaging.ImageFormat]::Png)
+    } finally { $bitmap.Dispose() }
+    return $path
+}
+function Seed-State($root, $title, $state) {
+    $session = [AppStudio.SessionStore]::Create($root, 'record', $title)
+    $long = ($state -eq 'long')
+    $windowTitle = if ($long) { 'A window title that will not stop ' * 10 } else { 'Fixture window' }
+    $screenCount = if ($state -eq 'many') { 4 } else { 1 }
+    if ($state -ne 'empty') {
+        for ($index = 1; $index -le $screenCount; $index++) {
+            $screen = New-Object AppStudio.ScreenRecord
+            $screen.ScanId = 's'; $screen.ScreenId = ('S' + $index); $screen.Title = $windowTitle; $screen.ClassName = 'FixtureWindow'
+            $screen.Rect = New-SeedRect 0 0 800 600
+            if ($state -ne 'ok') { $screen.ShotProblem = 'SHOT-FAILED: the window was covered when the shutter fired.' }
+            # "has a picture" means the file is on disk, so the complete state
+            # has to have one.
+            else { $screen.ShotFile = New-SeedPicture $session $screen.ScreenId }
+            $session.Screens.Screens.Add($screen)
+            $null = [AppStudio.SessionStore]::Append($session, 'screens', $screen.ToJson())
+        }
+    }
+    $node = New-Object AppStudio.ScanNode
+    $node.NodeId = 0; $node.ScreenId = 'S1'
+    $node.Name = if ($long) { 'An element name that goes on for a very long time ' * 6 } else { 'Save' }
+    $node.AutomationId = 'SaveButton'; $node.ControlType = 'Button'; $node.ClassName = 'Button'; $node.CtrlId = 1001
+    $node.Rect = New-SeedRect 10 10 60 24
+    if ($state -ne 'empty') {
+        $session.Elements.Add($node)
+        $null = [AppStudio.SessionStore]::Append($session, 'elements', [AppStudio.ScanJson]::Node($node, 's', 0))
+        $session.Screens.Screens[0].ComponentIds.Add('E0')
+    }
+    $siblings = New-Object 'System.Collections.Generic.List[AppStudio.ScanNode]'
+    $siblings.Add($node)
+    $stepCount = 0
+    if ($state -eq 'ok') { $stepCount = 3 } elseif ($state -eq 'partial') { $stepCount = 2 } elseif ($state -eq 'many') { $stepCount = 12 } elseif ($state -eq 'long') { $stepCount = 1 }
+    for ($index = 1; $index -le $stepCount; $index++) {
+        $step = New-Object AppStudio.StepRecord
+        $step.Index = $index; $step.At = [DateTimeOffset]::Now; $step.OffsetMs = $index * 900; $step.GapMs = 700
+        $step.Kind = 'click'; $step.AppName = 'FixtureApp'; $step.WindowTitle = $windowTitle; $step.WindowClass = 'FixtureWindow'
+        $step.Button = 'left'; $step.Dpi = 96
+        $step.Point = New-Object AppStudio.PointValue; $step.Point.X = 100; $step.Point.Y = 200
+        $step.EffectSummary = if ($long) { 'the application reported something at considerable length ' * 8 } else { 'the button reported that it was pressed' }
+        # In the failing states nothing identifies what the step acted on, which
+        # is what makes them unreplayable.
+        if ($state -eq 'ok' -or $state -eq 'long' -or ($state -eq 'partial' -and $index -eq 1)) {
+            $step.ElementLabel = 'Button "' + $node.Name + '"'
+            $step.Locators = [AppStudio.LocatorBuilder]::Build($node, $session.Screens.Screens[0].Rect, $siblings)
+        } else {
+            $step.ElementLabel = '(unidentified element)'
+            $step.Unavailable.Add('no-identifying-locator: nothing addresses this element.')
+        }
+        if ($state -eq 'many') {
+            $outcome = New-Object AppStudio.ReplayOutcome
+            $outcome.State = 'not-found'; $outcome.Reason = 'No window matching FixtureApp / FixtureWindow is open.'
+            $outcome.WaitedMs = 120; $outcome.SettleMs = 240
+            $step.LastReplay = $outcome
+        }
+        $session.Steps.Add($step)
+        $null = [AppStudio.SessionStore]::Append($session, 'steps', $step.ToJson())
+    }
+    if ($state -eq 'partial') { $session.AddLimit('[uia] UIA-TIMEOUT: the tree walk did not finish inside its allowance.') }
+    if ($state -eq 'many') {
+        for ($index = 1; $index -le 9; $index++) {
+            $session.AddLimit('[msaa] MSAA-BUDGET: layer ' + $index + ' stopped after its allowance and left part of the window undescribed.')
+        }
+    }
+    if ($long) { $session.AddLimit(('A limit whose explanation is far longer than any column can hold ' * 8)) }
+    [AppStudio.SessionStore]::WriteMeta($session)
+    return $session.Folder
+}
+function Descends-From($child, $ancestors) {
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $parent = $walker.GetParent($child)
+    while ($null -ne $parent) {
+        foreach ($candidate in $ancestors) {
+            if ([System.Windows.Automation.Automation]::Compare($candidate, $parent)) { return $true }
+        }
+        $parent = $walker.GetParent($parent)
+    }
+    return $false
+}
+
+# Newest first in the list, so they are seeded worst-last and the partial one
+# is what the screen opens on.
+$seedStates = @('long', 'empty', 'many', 'ok', 'partial')
+# The list is newest first, so it reads back the other way round.
+$listStates = @('partial', 'ok', 'many', 'empty', 'long')
+$seedFolders = @()
 try {
+    foreach ($state in $seedStates) { $seedFolders += (Seed-State $root ('ui flow ' + $state) $state) }
     $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $app = Start-Process -FilePath $windowsPowerShell -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',(Join-Path $root 'app-studio.ps1'),'-AutoCloseMs','120000') -PassThru -WindowStyle Hidden
 
@@ -159,6 +270,89 @@ try {
     if ((All-Of $window ([System.Windows.Automation.ControlType]::List)).Count -lt 1) { throw 'The result screen has no session list.' }
     $null = Shoot $window 'result'
 
+    # --- 3a. the conclusion is readable without opening anything ----------
+    $list = (All-Of $window ([System.Windows.Automation.ControlType]::List))[0]
+    $items = $list.FindAll([System.Windows.Automation.TreeScope]::Children,
+        (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)))
+    if ($items.Count -lt 1) { throw 'The seeded session is not in the list.' }
+    if ($items.Count -lt $seedStates.Count) { throw ('only ' + $items.Count + ' of the seeded sessions are listed') }
+    # Every state the screen can be in, looked at in turn. A screen is only as
+    # good as its worst state.
+    $seen = @()
+    for ($stateIndex = 0; $stateIndex -lt $seedStates.Count; $stateIndex++) {
+        $items[$stateIndex].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+        Start-Sleep -Milliseconds 1200
+        $stateTexts = @()
+        foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::Text)) { $stateTexts += $item.Current.Name }
+        $stateJoined = ($stateTexts -join ' | ')
+        $words = @{}
+        foreach ($name in @('state-ok.txt', 'state-partial.txt', 'state-failed.txt', 'state-empty.txt')) {
+            $words[$name] = Message $name $name
+        }
+        $found = $null
+        foreach ($name in $words.Keys) { if ($stateJoined.IndexOf($words[$name], [StringComparison]::Ordinal) -ge 0) { $found = $name } }
+        if ($null -eq $found) { throw ('a session shows no state at all: ' + $items[$stateIndex].Current.Name) }
+        $seen += $found
+        # The next move is offered whatever the state, and the details are one
+        # layer deep in every one of them.
+        if ($stateJoined.IndexOf((Message 'detail-next.txt' 'Next'), [StringComparison]::Ordinal) -lt 0) {
+            throw ('a session offers no next action: ' + $items[$stateIndex].Current.Name)
+        }
+        $stateFolds = @()
+        foreach ($group in All-Of $window ([System.Windows.Automation.ControlType]::Group)) {
+            $pattern = $null
+            try { $pattern = $group.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern) } catch { }
+            if ($null -ne $pattern) { $stateFolds += $group }
+        }
+        foreach ($fold in $stateFolds) {
+            if (Descends-From $fold $stateFolds) { throw ('a fold is inside another fold in state ' + $listStates[$stateIndex]) }
+        }
+        $null = Shoot $window ('result-' + $listStates[$stateIndex])
+    }
+    if (@($seen | Sort-Object -Unique).Count -lt 3) { throw ('the seeded sessions all read as the same state: ' + ($seen -join ',')) }
+
+    $items[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    Start-Sleep -Milliseconds 1500
+    $null = Shoot $window 'result-detail'
+
+    $texts = @()
+    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::Text)) { $texts += $item.Current.Name }
+    $joinedText = ($texts -join ' | ')
+    foreach ($needed in @((Message 'state-partial.txt' 'partly complete'), (Message 'detail-next.txt' 'Next'), (Message 'detail-more.txt' 'Details'))) {
+        if ($joinedText.IndexOf($needed, [StringComparison]::Ordinal) -lt 0) {
+            throw ('the result screen does not show "' + $needed + '" before anything is opened')
+        }
+    }
+    # Whatever is wrong has to be on the first screen with its count.
+    if ($joinedText.IndexOf((Message 'verdict-warn-limits.txt' 'thing(s) could not be obtained'), [StringComparison]::Ordinal) -lt 0) {
+        throw 'the result screen hides what could not be obtained instead of counting it'
+    }
+
+    # --- 3b. one layer of folding, never two ------------------------------
+    $folds = @()
+    foreach ($group in All-Of $window ([System.Windows.Automation.ControlType]::Group)) {
+        $pattern = $null
+        try { $pattern = $group.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern) } catch { }
+        if ($null -ne $pattern) { $folds += $group }
+    }
+    if ($folds.Count -lt 2) { throw ('the result screen has ' + $folds.Count + ' fold(s); the details are not reachable') }
+    foreach ($fold in $folds) {
+        if (Descends-From $fold $folds) { throw 'a fold is inside another fold on the result screen' }
+    }
+    # Opening one produces a list, not more things to open.
+    $folds[0].GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+    Start-Sleep -Milliseconds 900
+    $null = Shoot $window 'result-open'
+    $after = @()
+    foreach ($group in All-Of $window ([System.Windows.Automation.ControlType]::Group)) {
+        $pattern = $null
+        try { $pattern = $group.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern) } catch { }
+        if ($null -ne $pattern) { $after += $group }
+    }
+    foreach ($fold in $after) {
+        if (Descends-From $fold $after) { throw 'opening a fold revealed another fold' }
+    }
+
     # --- 4. and it can go back --------------------------------------------
     $back = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'topbar-back.txt' 'Back')
     if ($null -eq $back) { throw 'The result screen offers no way back to the launcher.' }
@@ -176,8 +370,11 @@ try {
     }
     if ($null -eq $status) { throw 'The window shows no status line at all.' }
 
-    Write-Output ('PASS test-ui-flow launcher=' + $rect.Width + 'x' + $rect.Height + ' noResultAreaOnLaunch=1 settings=dialog replayPermission=off routes=uia+win32+sendInput msaaOffered=0 result=' + $resultRect.Width + 'x' + $resultRect.Height + ' back=restored withdrawnControls=0')
+    Write-Output ('PASS test-ui-flow launcher=' + $rect.Width + 'x' + $rect.Height + ' noResultAreaOnLaunch=1 settings=dialog replayPermission=off routes=uia+win32+sendInput msaaOffered=0 result=' + $resultRect.Width + 'x' + $resultRect.Height + ' conclusionFirst=1 folds=' + $folds.Count + ' foldDepth=1 states=' + (($seen | Sort-Object -Unique) -join '+') + ' back=restored withdrawnControls=0')
 } finally {
     if ($null -ne $app -and -not $app.HasExited) { $app.Kill(); $app.WaitForExit() }
     if ($null -ne $app) { $app.Dispose() }
+    foreach ($folder in $seedFolders) {
+        if ($null -ne $folder -and (Test-Path -LiteralPath $folder)) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }

@@ -9,11 +9,25 @@ try{
 # the guarantee, so it is fixed here rather than described in a document.
 $sources=Get-ChildItem (Join-Path $root 'src') -Filter '*.cs'
 $joined=($sources|ForEach-Object{[IO.File]::ReadAllText($_.FullName)})-join "`n"
-foreach($api in @('SetWindowsHookEx','WH_KEYBOARD','WH_KEYBOARD_LL','GetKeyboardState','ToUnicode','ToAscii','GetClipboardData','SetClipboardViewer','AddClipboardFormatListener','RegisterRawInputDevices')){
+foreach($api in @('WH_KEYBOARD','WH_KEYBOARD_LL','WH_JOURNALRECORD','GetKeyboardState','ToUnicode','ToAscii','GetClipboardData','SetClipboardViewer','AddClipboardFormatListener','RegisterRawInputDevices')){
  if($joined-match ('\b'+[regex]::Escape($api)+'\b')){throw ('a keystroke or clipboard capture API is present in the sources: '+$api)}
 }
+# A hook is allowed for the pointer and only for the pointer. The pointer has
+# events that cannot be polled at all - a wheel turn has no state to read -
+# while the keyboard is deliberately never hooked. So the guarantee is checked
+# on which hook exists, not on the name of the function that installs one.
+foreach($m in [regex]::Matches($joined,'WH_[A-Z_]+')){
+ if($m.Value-ne'WH_MOUSE_LL'){throw ('a hook other than the pointer hook is present in the sources: '+$m.Value)}
+}
+foreach($m in [regex]::Matches($joined,'SetWindowsHookEx\s*\(([^,]+),')){
+ $id=$m.Groups[1].Value.Trim()
+ # The one extern declaration names its parameter; every other occurrence is
+ # a call and has to name the pointer hook.
+ if($id-eq'int hookId'){continue}
+ if($id-notmatch 'WH_MOUSE_LL$'){throw ('SetWindowsHookEx is called with something other than the pointer hook: '+$id)}
+}
 # GetAsyncKeyState is allowed, but only against the fixed watch list.
-if($joined-notmatch 'GetAsyncKeyState'){throw 'the mouse button watch disappeared'}
+if($joined-notmatch 'GetAsyncKeyState'){throw 'the key watch disappeared'}
 
 # --- 2. the watch list itself --------------------------------------------
 $watched=[AppStudio.KeyTable]::Watched
@@ -22,6 +36,10 @@ foreach($vk in @(0x41,0x5A,0x30,0x39)){ if([AppStudio.KeyTable]::IsAlwaysSemanti
 foreach($vk in @(0x0D,0x09,0x1B,0x70,0x7B)){ if(-not [AppStudio.KeyTable]::IsAlwaysSemantic($vk)){throw ('a command key was not recognised: '+$vk)} }
 # Punctuation is never even looked at.
 foreach($vk in @(0xBA,0xBC,0xBE,0xDE,0xC0)){ if($watched-contains$vk){throw ('a punctuation key is on the watch list: '+$vk)} }
+# The typing detector notices that text is arriving without ever asking which
+# key it was, and it may only look at keys the one fixed list already covers.
+foreach($vk in [AppStudio.TypingKeys]::Watched){ if($watched-notcontains$vk){throw ('the typing detector looks at a key that is not on the fixed watch list: '+$vk)} }
+foreach($vk in @(0x41,0x30,0x20,0x08)){ if([AppStudio.TypingKeys]::Watched-notcontains$vk){throw ('the typing detector cannot see ordinary typing: '+$vk)} }
 if([AppStudio.KeyTable]::Chord($true,$false,$false,$false,0x53)-ne'Ctrl+S'){throw 'chord text mismatch'}
 $modifiers=$null;$key=0
 if(-not [AppStudio.KeyTable]::TryParse('Ctrl+Shift+S',[ref]$modifiers,[ref]$key)){throw 'a written chord could not be read back'}
@@ -65,7 +83,7 @@ if($unknownStep.ValueKind-ne'unknown'-or$unknownStep.Unavailable.Count-lt1){thro
 
 foreach($policy in @('recordText','lengthOnly')){
  $statement=[AppStudio.Privacy]::PolicyStatement($policy)
- foreach($claim in @('No keyboard stream','Clipboard contents are never read')){
+ foreach($claim in @('No keyboard stream','Clipboard contents are never read','pointer movement on its own is not')){
   if($statement-notmatch $claim){throw ('the policy statement dropped a claim under '+$policy)}
  }
 }
@@ -89,5 +107,5 @@ $markdown=[IO.File]::ReadAllText($session.SessionMdPath)
 if($markdown-notmatch 'not recorded'){throw 'session.md did not state that the value is absent'}
 if($markdown-notmatch 'ask the operator'){throw 'session.md did not say what a script has to do instead'}
 
-Write-Output 'PASS test-privacy keyCaptureApis=0 watchList=fixed bareLetters=nonSemantic secretRules=isPassword+name+style valuePolicies=recordText/lengthOnly/unknown secretLeak=0'
+Write-Output 'PASS test-privacy keyCaptureApis=0 hooks=WH_MOUSE_LL watchList=fixed typingDetector=subset bareLetters=nonSemantic secretRules=isPassword+name+style valuePolicies=recordText/lengthOnly/unknown secretLeak=0'
 }finally{Remove-Item $temp -Recurse -Force}

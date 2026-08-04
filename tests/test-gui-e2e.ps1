@@ -253,7 +253,10 @@ try {
     while ([DateTime]::UtcNow -lt $limit) {
         $created = New-Sessions
         foreach ($folder in $created) {
-            if (Test-Path (Join-Path $folder 'out\ai\session.md')) { $snapSession = $folder; break }
+            # report.html is the last of the three to be written, so waiting on
+            # it waits for the whole set. Waiting on session.md and then
+            # checking the others is a race the outputs are allowed to lose.
+            if (Test-Path (Join-Path $folder 'out\report.html')) { $snapSession = $folder; break }
         }
         if ($null -ne $snapSession) { break }
         Start-Sleep -Milliseconds 1000
@@ -342,7 +345,7 @@ try {
     while ([DateTime]::UtcNow -lt $limit) {
         foreach ($folder in @(New-Sessions)) {
             if ($folder -eq $snapSession) { continue }
-            if (Test-Path (Join-Path $folder (Join-Path 'out' (Join-Path 'ai' 'session.md')))) { $recordSession = $folder; break }
+            if (Test-Path (Join-Path $folder (Join-Path 'out' 'report.html'))) { $recordSession = $folder; break }
         }
         if ($null -ne $recordSession) { break }
         Start-Sleep -Milliseconds 1000
@@ -442,17 +445,29 @@ try {
             if ($null -ne (Find-Named $top ([System.Windows.Automation.ControlType]::Button) (Message 'home-snap.txt' 'Snap'))) { $productWindow = $top }
         }
         if ($null -eq $productWindow) { throw 'The App Studio window disappeared before replay.' }
-        $settingsFold = Find-Named $productWindow ([System.Windows.Automation.ControlType]::Group) (Message 'settings-fold.txt' 'Detailed settings')
-        if ($null -eq $settingsFold) { throw 'The detailed settings fold is missing.' }
-        $settingsFold.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-        Start-Sleep -Milliseconds 600
-        $permission = Find-Named $productWindow ([System.Windows.Automation.ControlType]::CheckBox) $writeLabel
-        if ($null -eq $permission) { throw 'The replay permission switch is missing.' }
-        $permission.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
-        Start-Sleep -Milliseconds 400
         $replayButton = Find-Named $productWindow ([System.Windows.Automation.ControlType]::Button) (Message 'detail-replay.txt' 'Replay')
         if ($null -eq $replayButton) { throw 'The replay button is missing for a recorded session.' }
-        Press $replayButton 'replay'
+        # Replay drives real applications, so the product asks before it starts.
+        # Pressing the button and being asked is the path a person takes; the
+        # permission is never on to begin with.
+        $replayButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Start-Sleep -Milliseconds 1200
+        $consent = $null
+        $consentTitle = Message 'replay-consent-title.txt' 'Replay drives the real application'
+        $consentLimit = [DateTime]::UtcNow.AddSeconds(12)
+        while ($null -eq $consent -and [DateTime]::UtcNow -lt $consentLimit) {
+            foreach ($top in [AppStudio.WindowTools]::ListTopLevelWindows()) {
+                if ($top.ProcessId -ne $app.Id) { continue }
+                if ($top.Title -ne $consentTitle) { continue }
+                $consent = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr][int64]$top.Hwnd)
+            }
+            if ($null -eq $consent) { Start-Sleep -Milliseconds 300 }
+        }
+        if ($null -eq $consent) { throw 'Replay started without asking for permission.' }
+        $allow = Find-Named $consent ([System.Windows.Automation.ControlType]::Button) (Message 'replay-consent-ok.txt' 'Allow and replay')
+        if ($null -eq $allow) { throw 'The consent dialog offers no way to allow the replay.' }
+        $allow.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Start-Sleep -Milliseconds 800
         $limit = [DateTime]::UtcNow.AddSeconds(300)
         $replayLog = Join-Path $recordSession 'replay.jsonl'
         while ([DateTime]::UtcNow -lt $limit -and -not (Test-Path $replayLog)) { Start-Sleep -Milliseconds 1000 }

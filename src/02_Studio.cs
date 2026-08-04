@@ -241,11 +241,9 @@ namespace AppStudio
             results.Margin = new Thickness(0, 0, Theme.Space2, 0);
             results.Click += delegate { GoResult(); };
             row.Children.Add(results);
-            Button options = new Button();
-            options.Content = Text("compact-options.txt", "Settings");
-            options.SetResourceReference(StyleProperty, "AppButtonCompact");
-            options.Click += delegate { ShowOptionsDialog(); };
-            row.Children.Add(options);
+            // The settings are reached from the top bar, which is on both
+            // shapes of this window. Offering them twice on one screen is two
+            // places to look for one thing.
             body.Children.Add(row);
 
             compactHint.Text = SessionSummary();
@@ -345,6 +343,12 @@ namespace AppStudio
             back.Visibility = String.Equals(mode, ModeResult, StringComparison.Ordinal) ? Visibility.Visible : Visibility.Collapsed;
             back.Click += delegate { GoCompact(); };
             right.Children.Add(back);
+            Button options = new Button();
+            options.Content = Text("compact-options.txt", "Settings");
+            options.SetResourceReference(StyleProperty, "AppButtonCompact");
+            options.Margin = new Thickness(0, 0, Theme.Space2, 0);
+            options.Click += delegate { ShowOptionsDialog(); };
+            right.Children.Add(options);
             Button theme = new Button();
             theme.Content = Text("topbar-theme.txt", "Theme");
             theme.SetResourceReference(StyleProperty, "AppButtonCompact");
@@ -601,9 +605,14 @@ namespace AppStudio
             card.Children.Add(Body(Text("welcome-body.txt", "Snap, record and replay.")));
             card.Children.Add(Note(Privacy.PolicyStatement(valuePolicy)));
             detail.Children.Add(Card(card));
-            detail.Children.Add(Settings());
         }
 
+        // The result screen reads top to bottom in the order a reader needs it:
+        // what happened, what is wrong with it, the one thing to do next, then
+        // everything else behind one layer of "details".
+        //
+        // Nothing here folds twice. A reader who opens a fold finds the answer,
+        // not more things to open.
         private void ShowDetail()
         {
             if (String.Equals(mode, ModeCompact, StringComparison.Ordinal)) return;
@@ -613,45 +622,109 @@ namespace AppStudio
                 ShowWelcome();
                 return;
             }
-            StackPanel head = new StackPanel();
-            head.Children.Add(Heading(String.IsNullOrEmpty(current.Title) ? current.Id : current.Title));
-            head.Children.Add(Note(current.Id + "   " + current.StartedAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)));
-            WrapPanel stats = new WrapPanel();
-            stats.Margin = new Thickness(0, Theme.Space4, 0, 0);
-            AddStat(stats, current.Screens.Screens.Count, Text("stat-screens.txt", "screens"));
-            AddStat(stats, current.Screens.ShotCount, Text("stat-shots.txt", "pictures"));
-            AddStat(stats, current.Elements.Count, Text("stat-elements.txt", "elements"));
-            AddStat(stats, current.Steps.Count, Text("stat-steps.txt", "actions"));
-            AddStat(stats, current.Limits.Count, Text("stat-limits.txt", "stated limits"));
-            head.Children.Add(stats);
-            head.Children.Add(OutputRow());
-            detail.Children.Add(Card(head));
-
-            if (current.Steps.Count > 0) detail.Children.Add(StepsCard());
-            detail.Children.Add(ScreensCard());
-            detail.Children.Add(LimitsCard());
-            detail.Children.Add(Settings());
+            SessionVerdict verdict = SessionVerdict.Of(current);
+            detail.Children.Add(Card(Conclusion(verdict)));
+            detail.Children.Add(Card(Details(verdict)));
         }
 
-        private UIElement OutputRow()
+        private UIElement Conclusion(SessionVerdict verdict)
         {
-            WrapPanel row = new WrapPanel();
-            row.Margin = new Thickness(0, Theme.Space5, 0, 0);
+            StackPanel head = new StackPanel();
+
+            DockPanel line = new DockPanel();
+            line.LastChildFill = true;
+            TextBlock stateLabel = new TextBlock();
+            Border chip = Badge(stateLabel, verdict.StateWord, Tone(verdict.State));
+            chip.Margin = new Thickness(0, 0, Theme.Space3, 0);
+            DockPanel.SetDock(chip, Dock.Left);
+            line.Children.Add(chip);
+            TextBlock headline = new TextBlock();
+            headline.Text = verdict.Headline;
+            headline.FontSize = Theme.TitleSize;
+            headline.FontWeight = FontWeights.Bold;
+            headline.Foreground = Theme.Text;
+            headline.TextWrapping = TextWrapping.Wrap;
+            headline.VerticalAlignment = VerticalAlignment.Center;
+            line.Children.Add(headline);
+            head.Children.Add(line);
+
+            head.Children.Add(Note((String.IsNullOrEmpty(current.Title) ? current.Id : current.Title) + "   " +
+                current.StartedAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "   " +
+                Text(verdict.IsRecording ? "kind-record.txt" : "kind-snap.txt", verdict.IsRecording ? "recording" : "snap")));
+
+            WrapPanel stats = new WrapPanel();
+            stats.Margin = new Thickness(0, Theme.Space4, 0, 0);
+            if (verdict.IsRecording) AddStat(stats, verdict.Steps, Text("stat-steps.txt", "actions"));
+            AddStat(stats, verdict.Screens, Text("stat-screens.txt", "screens"));
+            AddStat(stats, verdict.Elements, Text("stat-elements.txt", "elements"));
+            AddStat(stats, verdict.Limits, Text("stat-limits.txt", "stated limits"));
+            if (verdict.IsRecording) AddStat(stats, verdict.InputEvents, Text("stat-events.txt", "input events"));
+            head.Children.Add(stats);
+
+            // Whatever is wrong is on the first screen, with its count and what
+            // it costs. The whole of it is in the details below.
+            for (int index = 0; index < verdict.Warnings.Count; index++)
+            {
+                TextBlock warning = Body(verdict.Warnings[index]);
+                warning.Foreground = Theme.CautionText;
+                warning.FontSize = Theme.MetaSize;
+                head.Children.Add(warning);
+            }
+            if (verdict.IsRecording)
+            {
+                TextBlock replayLine = Note(Text("detail-replay-state.txt", "Replay") + ": " + verdict.ReplayLine);
+                head.Children.Add(replayLine);
+            }
+
+            // One next move, said in words, with the button that does it beside
+            // it. Everything else is a smaller button on the row below.
+            TextBlock next = Body(Text("detail-next.txt", "Next") + ": " + verdict.NextAction);
+            next.FontWeight = FontWeights.SemiBold;
+            next.Foreground = Theme.Text;
+            next.Margin = new Thickness(0, Theme.Space4, 0, 0);
+            head.Children.Add(next);
+            head.Children.Add(OutputRow(verdict));
+            return head;
+        }
+
+        private static string Tone(string state)
+        {
+            if (state == SessionVerdict.StateOk) return "Success";
+            if (state == SessionVerdict.StatePartial) return "Caution";
+            if (state == SessionVerdict.StateFailed) return "Danger";
+            return "Accent";
+        }
+
+        private UIElement OutputRow(SessionVerdict verdict)
+        {
             bool hasReport = current.ReportPath != null && File.Exists(current.ReportPath);
             bool hasAi = current.SessionMdPath != null && File.Exists(current.SessionMdPath) &&
                 current.ScreensPdfPath != null && File.Exists(current.ScreensPdfPath);
 
-            if (current.Steps.Count > 0)
+            WrapPanel primary = new WrapPanel();
+            primary.Margin = new Thickness(0, Theme.Space3, 0, 0);
+            if (verdict.IsRecording && verdict.Steps > 0)
             {
-                AddButton(row, Text("detail-replay.txt", "Replay"), delegate { StartReplay(); }, true);
+                AddButton(primary, Text("detail-replay.txt", "Replay"), delegate { StartReplay(); }, true);
             }
-            AddButton(row, Text("detail-report.txt", "Open the report"), delegate { OpenPath(current.ReportPath, hasReport); }, false);
+            else
+            {
+                AddButton(primary, Text("detail-report.txt", "Open the report"), delegate { OpenPath(current.ReportPath, hasReport); }, true);
+            }
+
+            WrapPanel row = new WrapPanel();
+            row.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            if (verdict.IsRecording && verdict.Steps > 0)
+            {
+                AddButton(row, Text("detail-report.txt", "Open the report"), delegate { OpenPath(current.ReportPath, hasReport); }, false);
+            }
             AddButton(row, Text("detail-ai.txt", "Open the two files for an assistant"), delegate { OpenPath(current.AiFolder, hasAi); }, false);
             AddButton(row, Text("detail-folder.txt", "Session folder"), delegate { OpenPath(current.Folder, true); }, false);
             AddButton(row, Text("detail-rebuild.txt", "Build the outputs again"), delegate { BuildOutputs(current, true); }, false);
             AddButton(row, Text("detail-export.txt", "Copy the outputs elsewhere"), delegate { ExportElsewhere(); }, false);
 
             StackPanel stack = new StackPanel();
+            stack.Children.Add(primary);
             stack.Children.Add(row);
             if (!hasReport || !hasAi)
             {
@@ -662,99 +735,108 @@ namespace AppStudio
             return stack;
         }
 
-        private UIElement StepsCard()
+        // One heading, then one fold per subject. Each fold opens onto a flat
+        // list inside its own scrolling box: opening a thing must not produce
+        // more things to open.
+        private UIElement Details(SessionVerdict verdict)
+        {
+            StackPanel outer = new StackPanel();
+            outer.Children.Add(Heading(Text("detail-more.txt", "Details")));
+            outer.Children.Add(Note(Text("detail-more-note.txt", "Everything the summary above is drawn from. Nothing is left out here.")));
+            if (current.Steps.Count > 0) outer.Children.Add(Fold(Text("detail-steps.txt", "What was done"), StepLines(), current.Steps.Count + " " + Text("list-steps.txt", "actions")));
+            outer.Children.Add(Fold(Text("detail-screens.txt", "Screens"), ScreenLines(),
+                current.Screens.Screens.Count + " / " + Text("screen-noshot.txt", "no picture") + " " + (verdict.Screens - verdict.Shots)));
+            outer.Children.Add(Fold(Text("detail-limits.txt", "What could not be obtained"), LimitLines(),
+                current.Limits.Count.ToString(CultureInfo.InvariantCulture)));
+            if (current.InputEvents.Count > 0)
+            {
+                outer.Children.Add(Fold(Text("detail-input.txt", "The raw input timeline"), InputLines(),
+                    current.InputEvents.Count + " " + Text("list-events.txt", "events")));
+            }
+            return outer;
+        }
+
+        private Expander Fold(string caption, UIElement body, string summaryText)
+        {
+            ScrollViewer scroll = new ScrollViewer();
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            scroll.MaxHeight = 300;
+            scroll.Content = body;
+            TextBlock summary;
+            Expander fold = Accordion(caption, scroll, out summary);
+            summary.Text = summaryText;
+            return fold;
+        }
+
+        private UIElement StepLines()
         {
             StackPanel body = new StackPanel();
-            ListBox list = new ListBox();
-            list.SetResourceReference(StyleProperty, "AppListBox");
-            list.MaxHeight = 320;
             for (int index = 0; index < current.Steps.Count; index++)
             {
                 StepRecord step = current.Steps[index];
-                ListBoxItem item = new ListBoxItem();
-                item.SetResourceReference(StyleProperty, "AppListItem");
-                TextBlock text = new TextBlock();
-                text.TextWrapping = TextWrapping.Wrap;
-                text.Text = step.StepId + "  " + StepLabel(step) +
+                string text = step.StepId + "  " + StepLabel(step) +
                     (step.AppName == null ? "" : "   [" + step.AppName + "]") +
+                    (step.GapMs > 0 ? "   +" + (step.GapMs / 1000.0).ToString("0.0", CultureInfo.InvariantCulture) + "s" : "") +
                     (step.LastReplay == null ? "" : "   -> " + step.LastReplay.State);
-                text.FontSize = Theme.MetaSize;
-                item.Content = text;
-                list.Items.Add(item);
+                bool bad = step.LastReplay != null && step.LastReplay.State != "done";
+                bool weak = !SessionVerdict.CanReplay(step);
+                if (weak) text = text + "   " + Text("step-noreplay.txt", "cannot be replayed");
+                body.Children.Add(Line(text, bad || weak ? Theme.CautionText : Theme.TextSub));
             }
-            body.Children.Add(list);
-            TextBlock summary;
-            StackPanel outer = new StackPanel();
-            outer.Children.Add(Heading(Text("detail-steps.txt", "What was done")));
-            Expander fold = Accordion(Text("detail-steps-fold.txt", "The recorded actions"), body, out summary);
-            summary.Text = current.Steps.Count + " " + Text("list-steps.txt", "actions");
-            fold.IsExpanded = true;
-            outer.Children.Add(fold);
-            return Card(outer);
+            return body;
         }
 
-        private UIElement ScreensCard()
+        private UIElement ScreenLines()
         {
             StackPanel body = new StackPanel();
-            int missing = 0;
+            if (current.Screens.Screens.Count == 0) body.Children.Add(Line(Text("screens-none.txt", "No screen was acquired."), Theme.CautionText));
             for (int index = 0; index < current.Screens.Screens.Count; index++)
             {
                 ScreenRecord screen = current.Screens.Screens[index];
-                if (!screen.HasShot) missing++;
-                TextBlock line = new TextBlock();
-                line.TextWrapping = TextWrapping.Wrap;
-                line.FontSize = Theme.MetaSize;
-                line.Margin = new Thickness(0, 2, 0, 2);
-                line.Text = screen.ScreenId + "  " + (String.IsNullOrEmpty(screen.Title) ? "(" + screen.ClassName + ")" : screen.Title) +
+                string text = screen.ScreenId + "  " + (String.IsNullOrEmpty(screen.Title) ? "(" + screen.ClassName + ")" : screen.Title) +
                     "   " + screen.Size + "   " + screen.ComponentIds.Count + " " + Text("list-elements.txt", "elements") +
                     (screen.HasShot ? "" : "   " + Text("screen-noshot.txt", "no picture") + ": " + screen.ShotProblem);
-                line.Foreground = screen.HasShot ? Theme.TextSub : Theme.CautionText;
-                body.Children.Add(line);
+                body.Children.Add(Line(text, screen.HasShot ? Theme.TextSub : Theme.CautionText));
             }
-            TextBlock summary;
-            StackPanel outer = new StackPanel();
-            outer.Children.Add(Heading(Text("detail-screens.txt", "Screens")));
-            Expander fold = Accordion(Text("detail-screens-fold.txt", "Every screen in this session"), body, out summary);
-            summary.Text = current.Screens.Screens.Count + " / " + Text("screen-noshot.txt", "no picture") + " " + missing;
-            outer.Children.Add(fold);
-            return Card(outer);
+            return body;
         }
 
-        private UIElement LimitsCard()
+        private UIElement LimitLines()
         {
             StackPanel body = new StackPanel();
             if (current.Limits.Count == 0)
             {
-                body.Children.Add(Note(Text("limits-none.txt", "No layer reported a limit. That is not a proof of completeness.")));
+                body.Children.Add(Line(Text("limits-none.txt", "No layer reported a limit. That is not a proof of completeness."), Theme.TextMuted));
             }
-            else
-            {
-                for (int index = 0; index < current.Limits.Count; index++)
-                {
-                    TextBlock line = Note(current.Limits[index]);
-                    line.Foreground = Theme.CautionText;
-                    body.Children.Add(line);
-                }
-            }
-            TextBlock summary;
-            StackPanel outer = new StackPanel();
-            outer.Children.Add(Heading(Text("detail-limits.txt", "What could not be obtained")));
-            Expander fold = Accordion(Text("detail-limits-fold.txt", "Stated limits and omissions"), body, out summary);
-            summary.Text = current.Limits.Count.ToString(CultureInfo.InvariantCulture);
-            outer.Children.Add(fold);
-            return Card(outer);
+            for (int index = 0; index < current.Limits.Count; index++) body.Children.Add(Line(current.Limits[index], Theme.CautionText));
+            return body;
         }
 
-        private UIElement Settings()
+        private UIElement InputLines()
         {
-            TextBlock summary;
-            StackPanel outer = new StackPanel();
-            outer.Children.Add(Heading(Text("settings-title.txt", "Detailed settings")));
-            Expander fold = Accordion(Text("settings-fold.txt", "Routes, privacy, budget and diagnostics"), SettingsBody(), out summary);
-            summary.Text = routeMode + " / " + (valuePolicy == Privacy.PolicyLengthOnly ? Text("value-length-short.txt", "length only") : Text("value-record-short.txt", "text recorded")) +
-                " / " + pdfBudgetKb + " KB";
-            outer.Children.Add(fold);
-            return Card(outer);
+            StackPanel body = new StackPanel();
+            for (int index = 0; index < current.InputEvents.Count; index++)
+            {
+                InputEventRecord item = current.InputEvents[index];
+                string text = "+" + (item.OffsetMs / 1000.0).ToString("0.00", CultureInfo.InvariantCulture) + "s  " + item.Display +
+                    (item.X == 0 && item.Y == 0 ? "" : "  (" + item.X + "," + item.Y + ")") +
+                    (String.IsNullOrEmpty(item.StepId) ? "" : "  -> " + item.StepId) +
+                    (String.IsNullOrEmpty(item.Note) ? "" : "  " + item.Note);
+                body.Children.Add(Line(text, Theme.TextSub));
+            }
+            return body;
+        }
+
+        private static TextBlock Line(string text, Brush colour)
+        {
+            TextBlock line = new TextBlock();
+            line.Text = text;
+            line.TextWrapping = TextWrapping.Wrap;
+            line.FontSize = Theme.MetaSize;
+            line.Margin = new Thickness(0, 2, 0, 2);
+            line.Foreground = colour;
+            return line;
         }
 
         private UIElement SettingsBody()

@@ -83,6 +83,12 @@ namespace AppStudio
         public string ResolvedBy;
         public int MatchCount;
         public int DurationMs;
+        // How long replay waited before this step, and how long it then waited
+        // for the application to settle. Both are bounded and both are stated,
+        // so nobody has to guess whether a step failed or was simply not given
+        // time.
+        public int WaitedMs;
+        public int SettleMs;
         public List<RouteAttempt> Attempts = new List<RouteAttempt>();
 
         public string AttemptLine
@@ -111,6 +117,8 @@ namespace AppStudio
                 .Add("resolvedBy", ResolvedBy)
                 .Add("matchCount", MatchCount)
                 .Add("durationMs", DurationMs)
+                .Add("waitedMs", WaitedMs)
+                .Add("settleMs", SettleMs)
                 .Add("attempts", attempts.ToArray());
         }
 
@@ -123,6 +131,8 @@ namespace AppStudio
             outcome.ResolvedBy = JsonReader.Text(item, "resolvedBy");
             outcome.MatchCount = JsonReader.Number(item, "matchCount", 0);
             outcome.DurationMs = JsonReader.Number(item, "durationMs", 0);
+            outcome.WaitedMs = JsonReader.Number(item, "waitedMs", 0);
+            outcome.SettleMs = JsonReader.Number(item, "settleMs", 0);
             object[] attempts = JsonReader.Items(item, "attempts");
             if (attempts != null)
             {
@@ -141,6 +151,9 @@ namespace AppStudio
     public sealed class StepRecord
     {
         public const string KindClick = "click";
+        public const string KindDoubleClick = "doubleClick";
+        public const string KindDrag = "drag";
+        public const string KindWheel = "wheel";
         public const string KindKeyChord = "keyChord";
         public const string KindTextInput = "textInput";
         public const string KindSecretInput = "secretInput";
@@ -149,6 +162,11 @@ namespace AppStudio
         public int Index;
         public DateTimeOffset At;
         public int OffsetMs;
+        // How long the operator waited before doing this, measured from the
+        // previous action. Replay honours it rather than running at a speed
+        // nobody ever worked at.
+        public int GapMs;
+        public int HoldMs;
         public string Kind;
 
         public string AppKey;
@@ -174,9 +192,26 @@ namespace AppStudio
         public string TreePath;
         public RectValue Rect;
         public PointValue Point;
+        public PointValue ToPoint;
+        public string Button;
+        public int WheelDelta;
+        public string Modifiers;
+        // Physical pixels mean nothing without the scaling they were taken at,
+        // and a recording made on one display is often replayed on another.
+        public int Dpi;
+        public string MonitorId;
         public List<string> Sources = new List<string>();
         public string Confidence = "none";
         public List<ElementLocator> Locators = new List<ElementLocator>();
+        // Where the drag ended, described the same way as the element it started
+        // on, so a replay never has to fall back on the recorded coordinates.
+        public List<ElementLocator> DropLocators = new List<ElementLocator>();
+        public string DropLabel;
+        // What had the keyboard when the operator acted. Replay puts the
+        // keyboard back there before sending anything, and says so when it
+        // cannot.
+        public string FocusLabel;
+        public List<ElementLocator> FocusLocators = new List<ElementLocator>();
 
         public string KeyChord;
         public string ValueKind = "none";
@@ -208,7 +243,11 @@ namespace AppStudio
                 if (Kind == KindKeyChord) return "key " + (KeyChord == null ? "?" : KeyChord);
                 if (Kind == KindTextInput) return "type into " + Describe();
                 if (Kind == KindSecretInput) return "secret entry into " + Describe();
-                return "click " + Describe();
+                if (Kind == KindDoubleClick) return "double click " + Describe();
+                if (Kind == KindDrag) return "drag " + Describe() + " to " + (DropLabel == null ? "another place" : DropLabel);
+                if (Kind == KindWheel) return "wheel " + (WheelDelta > 0 ? "up" : "down") + " over " + Describe();
+                string button = String.IsNullOrEmpty(Button) || Button == MouseButtons.Left ? "" : Button + " ";
+                return button + "click " + Describe();
             }
         }
 
@@ -225,6 +264,10 @@ namespace AppStudio
         {
             List<object> locators = new List<object>();
             for (int index = 0; index < Locators.Count; index++) locators.Add(Locators[index].ToJson());
+            List<object> drops = new List<object>();
+            for (int index = 0; index < DropLocators.Count; index++) drops.Add(DropLocators[index].ToJson());
+            List<object> focus = new List<object>();
+            for (int index = 0; index < FocusLocators.Count; index++) focus.Add(FocusLocators[index].ToJson());
             List<object> sources = new List<object>();
             for (int index = 0; index < Sources.Count; index++) sources.Add(Sources[index]);
             return new JsonObject()
@@ -233,6 +276,8 @@ namespace AppStudio
                 .Add("index", Index)
                 .Add("at", At)
                 .Add("offsetMs", OffsetMs)
+                .Add("gapMs", GapMs)
+                .Add("holdMs", HoldMs)
                 .Add("action", Kind)
                 .Add("appKey", AppKey)
                 .Add("appName", AppName)
@@ -255,9 +300,19 @@ namespace AppStudio
                 .Add("treePath", TreePath)
                 .Add("rect", SessionLogJson.Rect(Rect))
                 .Add("point", Point == null ? null : new JsonObject().Add("x", Point.X).Add("y", Point.Y))
+                .Add("toPoint", ToPoint == null ? null : new JsonObject().Add("x", ToPoint.X).Add("y", ToPoint.Y))
+                .Add("button", Button)
+                .Add("wheelDelta", WheelDelta)
+                .Add("modifiers", Modifiers)
+                .Add("dpi", Dpi)
+                .Add("monitor", MonitorId)
                 .Add("sources", sources.ToArray())
                 .Add("confidence", Confidence)
                 .Add("locators", locators.ToArray())
+                .Add("dropLabel", DropLabel)
+                .Add("dropLocators", drops.ToArray())
+                .Add("focusLabel", FocusLabel)
+                .Add("focusLocators", focus.ToArray())
                 .Add("keyChord", KeyChord)
                 .Add("valueKind", ValueKind)
                 .Add("valueLength", ValueLength < 0 ? null : (object)ValueLength)
@@ -275,7 +330,16 @@ namespace AppStudio
             StepRecord step = new StepRecord();
             step.Index = JsonReader.Number(item, "index", 0);
             step.OffsetMs = JsonReader.Number(item, "offsetMs", 0);
+            step.GapMs = JsonReader.Number(item, "gapMs", 0);
+            step.HoldMs = JsonReader.Number(item, "holdMs", 0);
             step.Kind = JsonReader.Text(item, "action");
+            step.Button = JsonReader.Text(item, "button");
+            step.WheelDelta = JsonReader.Number(item, "wheelDelta", 0);
+            step.Modifiers = JsonReader.Text(item, "modifiers");
+            step.Dpi = JsonReader.Number(item, "dpi", 0);
+            step.MonitorId = JsonReader.Text(item, "monitor");
+            step.DropLabel = JsonReader.Text(item, "dropLabel");
+            step.FocusLabel = JsonReader.Text(item, "focusLabel");
             step.AppKey = JsonReader.Text(item, "appKey");
             step.AppName = JsonReader.Text(item, "appName");
             step.ProcessId = JsonReader.Number(item, "processId", 0);
@@ -304,30 +368,145 @@ namespace AppStudio
             step.WindowTitleAfter = JsonReader.Text(item, "windowTitleAfter");
             step.EffectSummary = JsonReader.Text(item, "effect");
             step.Rect = SessionStore.ReadRect(JsonReader.Child(item, "rect"));
-            Dictionary<string, object> point = JsonReader.Child(item, "point");
-            if (point != null)
-            {
-                step.Point = new PointValue();
-                step.Point.X = JsonReader.Number(point, "x", 0);
-                step.Point.Y = JsonReader.Number(point, "y", 0);
-            }
+            step.Point = ReadPoint(JsonReader.Child(item, "point"));
+            step.ToPoint = ReadPoint(JsonReader.Child(item, "toPoint"));
             object[] sources = JsonReader.Items(item, "sources");
             if (sources != null) for (int index = 0; index < sources.Length; index++) step.Sources.Add(Convert.ToString(sources[index], CultureInfo.InvariantCulture));
             object[] diagnostics = JsonReader.Items(item, "diagnostics");
             if (diagnostics != null) for (int index = 0; index < diagnostics.Length; index++) step.Diagnostics.Add(Convert.ToString(diagnostics[index], CultureInfo.InvariantCulture));
             object[] unavailable = JsonReader.Items(item, "unavailable");
             if (unavailable != null) for (int index = 0; index < unavailable.Length; index++) step.Unavailable.Add(Convert.ToString(unavailable[index], CultureInfo.InvariantCulture));
-            object[] locators = JsonReader.Items(item, "locators");
-            if (locators != null)
-            {
-                for (int index = 0; index < locators.Length; index++)
-                {
-                    Dictionary<string, object> locator = locators[index] as Dictionary<string, object>;
-                    if (locator != null) step.Locators.Add(ElementLocator.FromJson(locator));
-                }
-            }
+            ReadLocators(item, "locators", step.Locators);
+            ReadLocators(item, "dropLocators", step.DropLocators);
+            ReadLocators(item, "focusLocators", step.FocusLocators);
             step.LastReplay = ReplayOutcome.FromJson(JsonReader.Child(item, "replay"));
             return step;
+        }
+
+        private static PointValue ReadPoint(Dictionary<string, object> item)
+        {
+            if (item == null) return null;
+            PointValue point = new PointValue();
+            point.X = JsonReader.Number(item, "x", 0);
+            point.Y = JsonReader.Number(item, "y", 0);
+            return point;
+        }
+
+        private static void ReadLocators(Dictionary<string, object> item, string key, List<ElementLocator> into)
+        {
+            object[] values = JsonReader.Items(item, key);
+            if (values == null) return;
+            for (int index = 0; index < values.Length; index++)
+            {
+                Dictionary<string, object> locator = values[index] as Dictionary<string, object>;
+                if (locator != null) into.Add(ElementLocator.FromJson(locator));
+            }
+        }
+    }
+
+    // One event exactly as the watch saw it, before anything was made of it.
+    // The steps are the meaning; this is the timeline underneath them, kept so a
+    // reader can see the order, the intervals and the transitions that produced
+    // those steps - including the events that became no step at all.
+    //
+    // A typed character never reaches this file. A key is written down by name
+    // only when it is one of the command keys the recording watches; ordinary
+    // typing appears as a "typing" event with no key on it, and what was
+    // actually entered is read back from the field under the value policy.
+    public sealed class InputEventRecord
+    {
+        public int Index;
+        public DateTimeOffset At;
+        public int OffsetMs;
+        public int GapMs;
+        public string Kind;
+        public string Button;
+        public string Key;
+        public string Modifiers;
+        public int X;
+        public int Y;
+        public int ToX;
+        public int ToY;
+        public int WheelDelta;
+        public int HoldMs;
+        public int Dpi;
+        public string MonitorId;
+        public long Hwnd;
+        public string AppName;
+        public string WindowTitle;
+        public string ElementLabel;
+        public string StepId;
+        public string Note;
+
+        public string Display
+        {
+            get
+            {
+                System.Text.StringBuilder text = new System.Text.StringBuilder();
+                text.Append(Kind);
+                if (!String.IsNullOrEmpty(Button) && Kind != InputKinds.KeyDown && Kind != InputKinds.KeyUp) text.Append(" ").Append(Button);
+                if (!String.IsNullOrEmpty(Key)) text.Append(" ").Append(Key);
+                if (Kind == InputKinds.Wheel) text.Append(" ").Append(WheelDelta.ToString(CultureInfo.InvariantCulture));
+                return text.ToString();
+            }
+        }
+
+        public JsonObject ToJson()
+        {
+            return new JsonObject()
+                .Add("kind", "input")
+                .Add("index", Index)
+                .Add("at", At)
+                .Add("offsetMs", OffsetMs)
+                .Add("gapMs", GapMs)
+                .Add("event", Kind)
+                .Add("button", Button)
+                .Add("key", Key)
+                .Add("modifiers", Modifiers)
+                .Add("x", X)
+                .Add("y", Y)
+                .Add("toX", ToX)
+                .Add("toY", ToY)
+                .Add("wheelDelta", WheelDelta)
+                .Add("holdMs", HoldMs)
+                .Add("dpi", Dpi)
+                .Add("monitor", MonitorId)
+                .Add("hwnd", Hwnd)
+                .Add("appName", AppName)
+                .Add("windowTitle", WindowTitle)
+                .Add("elementLabel", ElementLabel)
+                .Add("stepId", StepId)
+                .Add("note", Note);
+        }
+
+        public static InputEventRecord FromJson(Dictionary<string, object> item)
+        {
+            if (item == null) return null;
+            InputEventRecord record = new InputEventRecord();
+            record.Index = JsonReader.Number(item, "index", 0);
+            record.OffsetMs = JsonReader.Number(item, "offsetMs", 0);
+            record.GapMs = JsonReader.Number(item, "gapMs", 0);
+            record.Kind = JsonReader.Text(item, "event");
+            record.Button = JsonReader.Text(item, "button");
+            record.Key = JsonReader.Text(item, "key");
+            record.Modifiers = JsonReader.Text(item, "modifiers");
+            record.X = JsonReader.Number(item, "x", 0);
+            record.Y = JsonReader.Number(item, "y", 0);
+            record.ToX = JsonReader.Number(item, "toX", 0);
+            record.ToY = JsonReader.Number(item, "toY", 0);
+            record.WheelDelta = JsonReader.Number(item, "wheelDelta", 0);
+            record.HoldMs = JsonReader.Number(item, "holdMs", 0);
+            record.Dpi = JsonReader.Number(item, "dpi", 0);
+            record.MonitorId = JsonReader.Text(item, "monitor");
+            record.Hwnd = JsonReader.Number64(item, "hwnd", 0);
+            record.AppName = JsonReader.Text(item, "appName");
+            record.WindowTitle = JsonReader.Text(item, "windowTitle");
+            record.ElementLabel = JsonReader.Text(item, "elementLabel");
+            record.StepId = JsonReader.Text(item, "stepId");
+            record.Note = JsonReader.Text(item, "note");
+            DateTimeOffset at;
+            if (DateTimeOffset.TryParse(JsonReader.Text(item, "at"), out at)) record.At = at;
+            return record;
         }
     }
 
@@ -352,6 +531,10 @@ namespace AppStudio
         public List<ScanNode> Elements = new List<ScanNode>();
         public List<ScanCoverage> Coverage = new List<ScanCoverage>();
         public List<StepRecord> Steps = new List<StepRecord>();
+        public List<InputEventRecord> InputEvents = new List<InputEventRecord>();
+        // What the pointer watch managed to be: the event level hook, or the
+        // reduced state it fell back to. Stated, never assumed.
+        public string InputWatchState;
         public List<string> Limits = new List<string>();
         public List<string> Diagnostics = new List<string>();
         public List<string> Omissions = new List<string>();
@@ -442,6 +625,7 @@ namespace AppStudio
                 .Add("screenCount", Screens.Screens.Count)
                 .Add("elementCount", Elements.Count)
                 .Add("stepCount", Steps.Count)
+                .Add("inputWatch", InputWatchState)
                 .Add("limits", Limits.ToArray())
                 .Add("omissions", Omissions.ToArray());
         }
@@ -509,6 +693,7 @@ namespace AppStudio
             }
             session.Kind = JsonReader.Text(meta, "sessionKind") ?? StudioSession.KindSnap;
             session.Title = JsonReader.Text(meta, "title");
+            session.InputWatchState = JsonReader.Text(meta, "inputWatch");
             session.ValuePolicy = JsonReader.Text(meta, "valuePolicy") ?? Privacy.PolicyRecordText;
             DateTimeOffset started;
             if (DateTimeOffset.TryParse(JsonReader.Text(meta, "startedAt"), out started)) session.StartedAt = started;
@@ -538,7 +723,21 @@ namespace AppStudio
             LoadScreens(session);
             LoadElements(session);
             LoadSteps(session);
+            LoadInput(session);
             return session;
+        }
+
+        private static void LoadInput(StudioSession session)
+        {
+            string path = Path.Combine(session.Folder, "input.jsonl");
+            string[] lines = SessionLog.ReadAllLines(path);
+            for (int index = 0; index < lines.Length; index++)
+            {
+                Dictionary<string, object> item = JsonReader.ReadObject(lines[index]);
+                if (item == null) continue;
+                InputEventRecord record = InputEventRecord.FromJson(item);
+                if (record != null) session.InputEvents.Add(record);
+            }
         }
 
         private static void LoadScreens(StudioSession session)

@@ -60,6 +60,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `06_Win32Probe` | bounded Win32 取得 |
 | `07_UiaProbe` | UIA snapshot と pattern 操作 |
 | `08_Snapshot` | layer contract と worker 入口 |
+| `09_InputWatch` | ポインタの低レベル hook（押下/解放/double click/drag/wheel）、入力イベントの語彙、打鍵検出キー表 |
 | `10_Locator` | ScanNode からのロケータ生成と確度 |
 | `11_Resolver` | 取り直した一覧に対する解決。何が identification で何が description かを決める |
 | `12_Probe` | 操作の実行、guard、経路の繰り上がり、試行列、undo |
@@ -75,16 +76,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `22_ScanProviders` | UIA/MSAA tree の walk と座標 sampling（worker 側）|
 | `23_ScanRunner` | 専用 worker、進捗、打切り理由、人向け要約。録画用に worker を使い回す持続 mode を持つ |
 | `24_Messages` | `assets/messages` の日本語文言読み出し |
-| `25_Recorder` | アプリ横断の記録。押下監視スレッドと記述スレッドの分離、前面追跡、入力欄の値読み戻し |
+| `25_Recorder` | アプリ横断の記録。入力監視スレッドと記述スレッドの分離、生タイムライン、前面/フォーカス追跡、入力欄の値読み戻し |
 | `26_JsonReader` | JSON 読み取り |
 | `27_Picker` | 全画面の選択オーバーレイ |
 | `28_RecordHud` | 録画中の枠と停止コントロール。撮影前に画面から消えたことを自分で確かめる |
-| `29_Replay` | 再生。ウィンドウ確認、解決、実行、試行列 |
+| `29_Replay` | 再生。ウィンドウ確認、フォーカス復帰、記録間隔の再現、解決、実行、試行列 |
 | `30_SessionMd` | AI へ渡す `session.md` |
 | `31_Screens` | 画面台帳と撮影 |
 | `32_Pdf` | 依存なしの PDF writer（無劣化 Flate と写真 DCT） |
 | `33_ScreensPdf` | AI へ渡す `screens.pdf` と容量予算 |
 | `34_Acquire` | 取得と撮影の共通処理、秘密欄の黒塗り、出力の書き出し口 |
+| `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
+| `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
+| `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 
 ## 試験
 
@@ -101,7 +105,7 @@ runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test 
 - `test-compile`: 全 source、ASCII/C#5、起動終了
 - `test-docs`: 文書に載っている path と語彙が実在すること
 - `test-locator`: ロケータ生成の規則、禁止材料の不在、解決の一意／曖昧／不在、**位置と兄弟順が住所として使われないこと**
-- `test-privacy`: **キー捕捉 API がソースに存在しないこと**、監視キー表、秘密判定の3規則、値方針3種、秘密が出力へ出ないこと
+- `test-privacy`: **キーボード捕捉 API がソースに存在しないこと**、hook は `WH_MOUSE_LL` 1種だけであること、打鍵検出キーが固定監視リストの部分集合であること、監視キー表、秘密判定の3規則、値方針3種、秘密が出力へ出ないこと
 - `test-session-store`: 逐次追記の耐久性、実行中の読み戻し、round trip、一覧、壊れたフォルダの報告
 - `test-outputs`: 3出力の生成、**AI 添付がちょうど2ファイル**、PDF の xref 健全性、`session.md` の9節と base64 不在、HTML の外部参照0とエスケープ、容量予算（悪化する縮小段を採らないこと、効く場合は採ること、省略の明記）
 - `test-replay`: 経路 mode の意味、拒否の試行列、存在しないウィンドウ、許可なしの拒否、住所を持たない要素の拒否
@@ -114,8 +118,15 @@ runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test 
 - `test-live-canvas`: child HWND なし、UIA-EMPTYTREE、**構造を公開しないことが両出力に明記されること**
 - `test-scan`: 4経路の統合、HWND 無し要素、独自描画時の sampling 起動、値漏れ0
 - `test-autosave`: **製品が実際に書く `SessionStore.Append` 経路で**、強制終了しても記録と索引が残ること、書けない時に `STORE-WRITE` の理由を出して別の場所へ勝手に出さないこと
-- `test-ui-flow`: 実 GUI を UI Automation で駆動し、主画面が3つの主役だけを出すこと、詳細設定が折り畳まれていること、再生許可が既定で切であること、MSAA が経路として出ないこと
+- `test-ui-flow`: 実 GUI を UI Automation で駆動し、ランチャが小さく結果領域を持たないこと、設定がダイアログであること、再生許可が既定で切であること、MSAA が経路として出ないこと、結果画面が結論→詳細の順で、**折り畳みが入れ子になっていないこと**
+- `test-report-states`: 成功／一部失敗／多数失敗／空／長文の5状態で `report.html` を生成し、結論が最初に出ること、`<details>` が入れ子でないこと、各節が要約1行＋詳細1段であること、長文が桁溢れしないことを確認する
+- `test-input-timeline`: **実マウス・実キー**で、click／double click／drag／wheel／command key の down と up／録画開始時点で既にフォーカスがある欄への打鍵／Tab 移動が、生タイムラインと step の両方に落ちることを確認する
 - `test-calculator-e2e`: **実マウス**で Windows 標準の電卓を相手に、ランチャの大きさ、スナップ後にフォーカスが戻ること、複数系列の押下が1つも欠けずに記録されること、再生が許可を尋ねること、そして**電卓の表示が実際に期待値へ変わること**を確認する。再生が呼ばれたことではなく、対象アプリが変わったことを合格条件にする
+- `test-gesture-e2e`: **実マウス**で、double click／drag／wheel を「何が届いたかを言う fixture」相手に録画し、再生する。合格条件は fixture 側が同じ操作の到着を再度記録すること、および drag が実際に距離を持つこと
+- `test-ime-e2e`: **実キー**で Windows 標準 IME 経由の日本語入力を記録→再生する。ひらがな、漢字変換の確定、日本語の句読点のみ、録画開始前からフォーカス済みの欄、同一ウィンドウ内の Tab 移動を1続きで行い、**対象欄の最終値**で合否を判定する。文字は KEYEVENTF_UNICODE で注入せず、必ず IME を通す
+- `test-notepad-e2e`: **実マウス・実キー**で Windows 標準のメモ帳を相手に、開始時点で既にフォーカスのある本文への入力、Tab／shortcut、click、間隔を含む録画を行い、再生後に**メモ帳の本文が期待どおりに変わること**を合格条件にする
+- `test-notepad-e2e`: **実マウス・実キー**で Windows 標準のメモ帳を相手に、開始時点で既にフォーカスのある本文への入力、Tab／shortcut、click、間隔を含む録画を行い、再生後に**メモ帳の本文が期待どおりに変わること**を合格条件にする
+- `test-notepad-e2e`: **実マウス・実キー**で Windows 標準のメモ帳を相手に、開始時点で既にフォーカスのある本文への入力、Tab／shortcut、click、間隔を含む録画を行い、再生後に**メモ帳の本文が期待どおりに変わること**を合格条件にする
 - `test-gui-e2e`: **実マウス・実キー**で2つの実アプリを相手に、選択→取得→出力、アプリ横断の録画、秘密欄の非保存、キーフレームの黒塗り、自分のウィンドウが証拠へ混入しないこと、再生と試行列、秘密ステップでの操作者への問い合わせまで通す
 
 fixture だけを build:
@@ -124,9 +135,9 @@ fixture だけを build:
 .\tests\build-fixtures.ps1
 ```
 
-`FixtureWinForms`、`FixtureWin32`、`FixtureWpf`、`FixtureCanvas`、`FixtureInputTarget` を `tests/.build` に生成する。
+`FixtureWinForms`、`FixtureWin32`、`FixtureWpf`、`FixtureCanvas`、`FixtureInputTarget`、`FixtureIme` を `tests/.build` に生成する。
 
-`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-gui-e2e`、`test-calculator-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
+`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-input-timeline`、`test-gesture-e2e`、`test-ime-e2e`、`test-gui-e2e`、`test-notepad-e2e`、`test-calculator-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
 
 `test-gui-e2e` は自分で起動した fixture だけを操作する。全 click は押す直前に `WindowTools.ProcessIdAt` で対象プロセスのものだと確認し、違えば一度だけ対象を前面に出して確認し直し、それでも違えば例外にして何も押さない。再生の前には、記録した各ウィンドウ記述に一致する窓がちょうど1つであることを確かめ、複数あれば再生を行わずその事実を出力する。
 
@@ -156,6 +167,18 @@ WP-S 成果は `artifacts/wp-s/<run>/` に出る。WP-S 文書の数値と製品
 
 - 色・余白・角丸・型スケールは `src/00_Theme.cs` の token だけを使う。`Color.FromRgb` や `Brushes.White` を UI コードへ直接書かない。
 - 画面は2形態。**ランチャ 660 x 356**（メニューと設定だけ、結果領域を持たない）と、**結果画面 1120 x 840**（左レール＋詳細）。どちらも topbar / progress track / 本体 / status bar の4帯。
+- 結果画面は上から **結論 → 数値 → 警告 → 次の一手 → 詳細** の順。結論は状態チップ＋1文で、主語と結果が曖昧にならないこと。
+- **折り畳みは1段だけ。** 折り畳みを開いた先に折り畳みを置かない。開いた先は平らな一覧を持つ1つのスクロール箱にする。
+- 生ログ・全要素・環境・取得方法は詳細側に置く。最初の画面には出さない。
+- 状態語（成功／一部失敗／失敗／記録なし）と件数の言い回しは `35_Verdict` が唯一の出所。画面と HTML と `session.md` で同じ語を使う。
+- 結果画面は上から **結論 → 数値 → 警告 → 次の一手 → 詳細** の順。結論は状態チップ＋1文で、主語と結果が曖昧にならないこと。
+- **折り畳みは1段だけ。** 折り畳みを開いた先に折り畳みを置かない。開いた先は平らな一覧を持つ1つのスクロール箱にする。
+- 生ログ・全要素・環境・取得方法は詳細側に置く。最初の画面には出さない。
+- 状態語（成功／一部失敗／失敗／記録なし）と件数の言い回しは `35_Verdict` が唯一の出所。画面と HTML と `session.md` で同じ語を使う。
+- 結果画面は上から **結論 → 数値 → 警告 → 次の一手 → 詳細** の順。結論は状態チップ＋1文で、主語と結果が曖昧にならないこと。
+- **折り畳みは1段だけ。** 折り畳みを開いた先に折り畳みを置かない。開いた先は平らな一覧を持つ1つのスクロール箱にする。
+- 生ログ・全要素・環境・取得方法は詳細側に置く。最初の画面には出さない。
+- 状態語（成功／一部失敗／失敗／記録なし）と件数の言い回しは `35_Verdict` が唯一の出所。画面と HTML と `session.md` で同じ語を使う。
 - 結果領域を起動時から抱えない。読むものが無いうちに大きな窓を出さない。
 - **共有しているコントロール（status / progress / 一覧 / 詳細 / 主ボタン）は、形態を切り替える前に必ず親から外す。** WPF は同じ要素に2つ目の親を許さず、これを怠ると再構築が例外になる。
 - 録画中の停止操作は大きく取る。見失って押せないことがあってはならない。

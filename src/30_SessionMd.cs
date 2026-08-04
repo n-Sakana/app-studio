@@ -55,8 +55,24 @@ namespace AppStudio
 
         private static void Head(StringBuilder text, StudioSession session)
         {
+            SessionVerdict verdict = SessionVerdict.Of(session);
             text.AppendLine("# App Studio session " + Safe(session.Id));
             text.AppendLine();
+            // The same conclusion the window and the report show, in the same
+            // words. Three files that describe one session must not give three
+            // different answers to "did this work".
+            text.AppendLine("**" + Safe(verdict.StateWord) + "** - " + Safe(verdict.Headline));
+            text.AppendLine();
+            if (verdict.Warnings.Count > 0)
+            {
+                for (int index = 0; index < verdict.Warnings.Count; index++) text.AppendLine("- " + Safe(verdict.Warnings[index]));
+                text.AppendLine();
+            }
+            if (verdict.IsRecording)
+            {
+                text.AppendLine("Replay: " + Safe(verdict.ReplayLine));
+                text.AppendLine();
+            }
             text.AppendLine("This file and `screens.pdf` are the whole handover. There is no other attachment.");
             text.AppendLine();
             text.AppendLine("| field | value |");

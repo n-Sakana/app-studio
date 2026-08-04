@@ -13,6 +13,7 @@ $tests = @(
     'test-privacy.ps1',
     'test-session-store.ps1',
     'test-outputs.ps1',
+    'test-report-states.ps1',
     'test-replay.ps1',
     'test-diagnostics.ps1',
     'test-acq-diagnostics.ps1',
@@ -35,7 +36,11 @@ $realInputTests = @(
     'test-live-probe.ps1',
     'test-input-probe.ps1',
     'test-packaged-target.ps1',
+    'test-input-timeline.ps1',
+    'test-gesture-e2e.ps1',
+    'test-ime-e2e.ps1',
     'test-gui-e2e.ps1',
+    'test-notepad-e2e.ps1',
     'test-calculator-e2e.ps1'
 )
 if ($env:APPSTUDIO_ALLOW_REAL_INPUT -eq '1') {

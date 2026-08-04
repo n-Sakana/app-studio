@@ -10,6 +10,7 @@ $fixtureWpf = Join-Path $buildDir 'FixtureWpf.exe'
 $fixtureWinForms = Join-Path $buildDir 'FixtureWinForms.exe'
 $fixtureCanvas = Join-Path $buildDir 'FixtureCanvas.exe'
 $fixtureInputTarget = Join-Path $buildDir 'FixtureInputTarget.exe'
+$fixtureIme = Join-Path $buildDir 'FixtureIme.exe'
 $mutex = New-Object Threading.Mutex($false, 'Local\AppStudioFixtureBuild')
 $acquired = $false
 try {
@@ -42,6 +43,11 @@ try {
         & $csc /nologo /target:winexe /platform:anycpu /out:$fixtureInputTarget $inputTargetSource.FullName
         if ($LASTEXITCODE -ne 0) { throw ('FixtureInputTarget compile failed: ' + $LASTEXITCODE) }
     }
+    $imeSource = Get-Item (Join-Path $PSScriptRoot 'fixtures\FixtureIme.cs')
+    if (-not (Test-Path -LiteralPath $fixtureIme) -or (Get-Item $fixtureIme).LastWriteTimeUtc -lt $imeSource.LastWriteTimeUtc) {
+        & $csc /nologo /target:winexe /platform:anycpu /out:$fixtureIme $imeSource.FullName
+        if ($LASTEXITCODE -ne 0) { throw ('FixtureIme compile failed: ' + $LASTEXITCODE) }
+    }
     $canvasSource = Get-Item (Join-Path $PSScriptRoot 'fixtures\FixtureCanvas.cs')
     if (-not (Test-Path -LiteralPath $fixtureCanvas) -or (Get-Item $fixtureCanvas).LastWriteTimeUtc -lt $canvasSource.LastWriteTimeUtc) {
         & $csc /nologo /target:winexe /platform:anycpu /out:$fixtureCanvas $canvasSource.FullName
@@ -59,4 +65,5 @@ try {
     FixtureWinForms = $fixtureWinForms
     FixtureCanvas = $fixtureCanvas
     FixtureInputTarget = $fixtureInputTarget
+    FixtureIme = $fixtureIme
 }

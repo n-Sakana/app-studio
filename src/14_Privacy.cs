@@ -117,9 +117,12 @@ namespace AppStudio
         // readable output so the reader never has to guess.
         public static string PolicyStatement(string policy)
         {
-            string head = "No keyboard stream is captured. Shortcut keys are recorded as key names only; " +
+            string head = "No keyboard stream is captured. The state of a fixed list of keys is read to notice a shortcut " +
+                "or that typing is happening; a key name is written down only for a command key on that list, and " +
                 "typed text is read back from the target element, never from key traffic. " +
-                "Clipboard contents are never read.";
+                "Clipboard contents are never read. " +
+                "The pointer is watched at the event level, so a press, a release, a drag and a wheel turn are recorded " +
+                "with their positions; pointer movement on its own is not.";
             if (String.Equals(policy, PolicyLengthOnly, StringComparison.Ordinal))
             {
                 return head + " Text field values are recorded as a length only, so replay pauses and asks the operator for every entry.";

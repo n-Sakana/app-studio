@@ -53,6 +53,12 @@ internal static class FixtureInputTarget
         private readonly Label status;
         private int clickCount;
         private int keyCount;
+        private int doubleCount;
+        private int dragCount;
+        private int wheelCount;
+        private bool dragging;
+        private bool travelled;
+        private Point dragStart;
 
         internal TargetForm(string ready, string events, string expectedText, int left, int top)
         {
@@ -79,7 +85,12 @@ internal static class FixtureInputTarget
             surface.SetBounds(10, 34, 290, 70);
             surface.BackColor = Color.FromArgb(219, 234, 254);
             surface.BorderStyle = BorderStyle.FixedSingle;
+            surface.TabStop = true;
             surface.MouseDown += OnSurfaceMouseDown;
+            surface.MouseDoubleClick += OnSurfaceDoubleClick;
+            surface.MouseMove += OnSurfaceMouseMove;
+            surface.MouseUp += OnSurfaceMouseUp;
+            surface.MouseWheel += OnSurfaceWheel;
             Controls.Add(surface);
 
             entry = new TextBox();
@@ -98,12 +109,59 @@ internal static class FixtureInputTarget
         private void OnSurfaceMouseDown(object sender, MouseEventArgs args)
         {
             clickCount++;
+            dragging = true;
+            dragStart = new Point(args.X, args.Y);
             Point screen = surface.PointToScreen(new Point(args.X, args.Y));
             Append("{\"kind\":\"click\",\"button\":\"" + args.Button.ToString().ToLowerInvariant() +
                 "\",\"screenX\":" + screen.X.ToString(CultureInfo.InvariantCulture) +
                 ",\"screenY\":" + screen.Y.ToString(CultureInfo.InvariantCulture) +
                 ",\"count\":" + clickCount.ToString(CultureInfo.InvariantCulture) + "}");
-            status.Text = "clicks " + clickCount + " / keys " + keyCount;
+            Report();
+        }
+
+        // A second press inside the double click time, a press that travels
+        // before it is released, and a turn of the wheel. Each one is written
+        // down as having happened, with nothing about what it contained.
+        private void OnSurfaceDoubleClick(object sender, MouseEventArgs args)
+        {
+            doubleCount++;
+            Append("{\"kind\":\"doubleClick\",\"count\":" + doubleCount.ToString(CultureInfo.InvariantCulture) + "}");
+            Report();
+        }
+
+        private void OnSurfaceMouseMove(object sender, MouseEventArgs args)
+        {
+            if (!dragging) return;
+            if (Math.Max(Math.Abs(args.X - dragStart.X), Math.Abs(args.Y - dragStart.Y)) >= 8) travelled = true;
+        }
+
+        // Written at the release, not at the first movement, so the distance is
+        // the distance of the whole drag rather than of its first step.
+        private void OnSurfaceMouseUp(object sender, MouseEventArgs args)
+        {
+            bool wasDragging = dragging && travelled;
+            dragging = false;
+            travelled = false;
+            if (!wasDragging) return;
+            dragCount++;
+            Append("{\"kind\":\"drag\",\"dx\":" + (args.X - dragStart.X).ToString(CultureInfo.InvariantCulture) +
+                ",\"dy\":" + (args.Y - dragStart.Y).ToString(CultureInfo.InvariantCulture) +
+                ",\"count\":" + dragCount.ToString(CultureInfo.InvariantCulture) + "}");
+            Report();
+        }
+
+        private void OnSurfaceWheel(object sender, MouseEventArgs args)
+        {
+            wheelCount++;
+            Append("{\"kind\":\"wheel\",\"delta\":" + args.Delta.ToString(CultureInfo.InvariantCulture) +
+                ",\"count\":" + wheelCount.ToString(CultureInfo.InvariantCulture) + "}");
+            Report();
+        }
+
+        private void Report()
+        {
+            status.Text = "clicks " + clickCount + " / keys " + keyCount + " / double " + doubleCount +
+                " / drag " + dragCount + " / wheel " + wheelCount;
         }
 
         private void OnKeyPress(object sender, KeyPressEventArgs args)
@@ -113,7 +171,7 @@ internal static class FixtureInputTarget
             // The character itself is deliberately not written anywhere.
             Append("{\"kind\":\"key\",\"matchedExpected\":" + (matched ? "true" : "false") +
                 ",\"count\":" + keyCount.ToString(CultureInfo.InvariantCulture) + "}");
-            status.Text = "clicks " + clickCount + " / keys " + keyCount;
+            Report();
             args.Handled = true;
             entry.Clear();
         }

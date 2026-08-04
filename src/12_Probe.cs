@@ -19,7 +19,14 @@ namespace AppStudio
         SetValue,
         Scroll,
         Click,
-        Keys
+        Keys,
+        // Three things a person does with a pointer that no UI Automation
+        // pattern expresses. They exist as their own kinds so the route trail
+        // says plainly that synthetic input was the only route there ever was,
+        // rather than showing a pattern that was never tried.
+        DoubleClick,
+        Drag,
+        Wheel
     }
 
     public sealed class ProbeArgs
@@ -27,6 +34,15 @@ namespace AppStudio
         public bool WriteEnabled;
         public string Value;
         public int BudgetMs = 5000;
+        public string Button = MouseButtons.Left;
+        public int ToX;
+        public int ToY;
+        public int WheelDelta;
+        // A replay is a deliberate re-run of something the operator already did,
+        // and an operator who pressed the same button twice in a second meant
+        // to. The rate limit exists to stop an interactive probe repeating
+        // itself, so replay says so rather than being blocked by it.
+        public bool Repeatable;
         // Which carrying-out routes may be used. "auto" is the documented
         // ladder; the single-route settings exist so an operator can prove which
         // route an application actually answers. They never widen the ladder,
@@ -186,7 +202,7 @@ namespace AppStudio
             lock (Sync)
             {
                 DateTime last;
-                if (!bypassRateLimit && LastRun.TryGetValue(key, out last) && (DateTime.UtcNow - last).TotalMilliseconds < 1000)
+                if (!bypassRateLimit && !args.Repeatable && LastRun.TryGetValue(key, out last) && (DateTime.UtcNow - last).TotalMilliseconds < 1000)
                 {
                     return Blocked(element, kind, "policy.rateLimit", "The same operation on this element is limited to one attempt per second.");
                 }
@@ -265,7 +281,17 @@ namespace AppStudio
             ProbeError error = null;
             UiaActionResult uia = null;
 
-            if (ProbeRoutes.Allows(routeMode, ProbeRoutes.UiaOnly))
+            if (Physical(kind))
+            {
+                // No UI Automation pattern and no window message carries a
+                // double click, a drag or a wheel turn. Saying so is not the
+                // same as having tried and failed, so the trail says which it
+                // is.
+                outcome = "notSupported";
+                attempts.Add(Attempt("uia", "uia.pattern", "notSupported", 0, "UIA-NOPATTERN",
+                    "No UI Automation pattern expresses a " + KindText(kind) + ".", null));
+            }
+            else if (ProbeRoutes.Allows(routeMode, ProbeRoutes.UiaOnly))
             {
                 Stopwatch uiaWatch = Stopwatch.StartNew();
                 int actionBudget = Remaining(watch, args.BudgetMs);
@@ -304,7 +330,12 @@ namespace AppStudio
             if (ladder)
             {
                 bool win32Acted = false;
-                if (ProbeRoutes.Allows(routeMode, ProbeRoutes.Win32Only))
+                if (Physical(kind))
+                {
+                    attempts.Add(Attempt("win32", "win32.message", "notSupported", 0, "WIN32-NOROUTE",
+                        "No window message carries a " + KindText(kind) + ".", null));
+                }
+                else if (ProbeRoutes.Allows(routeMode, ProbeRoutes.Win32Only))
                 {
                     Stopwatch win32Watch = Stopwatch.StartNew();
                     FallbackResult fallback = TryWin32(beforeSnapshot, kind, args.Value, Math.Min(Math.Max(1, Remaining(watch, args.BudgetMs)), 500));
@@ -338,7 +369,7 @@ namespace AppStudio
                     if (ProbeRoutes.Allows(routeMode, ProbeRoutes.SendInputOnly))
                     {
                         Stopwatch inputWatch = Stopwatch.StartNew();
-                        FallbackResult fallback = TryInput(beforeSnapshot, element, kind, args.Value);
+                        FallbackResult fallback = TryInput(beforeSnapshot, element, kind, args);
                         inputWatch.Stop();
                         if (fallback.Performed)
                         {
@@ -441,7 +472,12 @@ namespace AppStudio
             return result;
         }
 
-        private static FallbackResult TryInput(Snapshot snapshot, ElementRef element, ProbeKind kind, string value)
+        private static bool Physical(ProbeKind kind)
+        {
+            return kind == ProbeKind.DoubleClick || kind == ProbeKind.Drag || kind == ProbeKind.Wheel;
+        }
+
+        private static FallbackResult TryInput(Snapshot snapshot, ElementRef element, ProbeKind kind, ProbeArgs args)
         {
             FallbackResult result = new FallbackResult();
             bool supportsClick = kind == ProbeKind.Invoke || kind == ProbeKind.Click || kind == ProbeKind.Toggle || kind == ProbeKind.Select || kind == ProbeKind.Expand;
@@ -449,8 +485,29 @@ namespace AppStudio
             {
                 result.Performed = true;
                 result.Method = "win32.SendInput.click";
-                result.Failed = !NativeInput.Click(element.X, element.Y);
+                result.Failed = !NativeInput.ClickButton(element.X, element.Y, args.Button, false);
                 if (result.Failed) result.Error = Error("SENDINPUT-FAIL", Marshal.GetLastWin32Error(), "SendInput could not emit a mouse click.");
+            }
+            else if (kind == ProbeKind.DoubleClick)
+            {
+                result.Performed = true;
+                result.Method = "win32.SendInput.doubleClick";
+                result.Failed = !NativeInput.ClickButton(element.X, element.Y, args.Button, true);
+                if (result.Failed) result.Error = Error("SENDINPUT-FAIL", Marshal.GetLastWin32Error(), "SendInput could not emit a double click.");
+            }
+            else if (kind == ProbeKind.Drag)
+            {
+                result.Performed = true;
+                result.Method = "win32.SendInput.drag";
+                result.Failed = !NativeInput.Drag(element.X, element.Y, args.ToX, args.ToY, args.Button);
+                if (result.Failed) result.Error = Error("SENDINPUT-FAIL", Marshal.GetLastWin32Error(), "SendInput could not emit a drag.");
+            }
+            else if (kind == ProbeKind.Wheel)
+            {
+                result.Performed = true;
+                result.Method = "win32.SendInput.wheel";
+                result.Failed = !NativeInput.Wheel(element.X, element.Y, args.WheelDelta);
+                if (result.Failed) result.Error = Error("SENDINPUT-FAIL", Marshal.GetLastWin32Error(), "SendInput could not emit a wheel turn.");
             }
             else if (kind == ProbeKind.Keys)
             {
@@ -458,7 +515,7 @@ namespace AppStudio
                 result.Method = "win32.SendInput.keys";
                 IntPtr window = snapshot != null && snapshot.Win32 != null ? new IntPtr(snapshot.Win32.Hwnd) : IntPtr.Zero;
                 if (window != IntPtr.Zero) NativeMethods.SetForegroundWindow(window);
-                result.Failed = !NativeInput.SendUnicode(value ?? String.Empty);
+                result.Failed = !NativeInput.SendUnicode(args.Value ?? String.Empty);
                 if (result.Failed) result.Error = Error("SENDINPUT-FAIL", Marshal.GetLastWin32Error(), "SendInput could not emit Unicode keys.");
             }
             return result;

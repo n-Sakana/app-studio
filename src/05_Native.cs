@@ -27,10 +27,28 @@ namespace AppStudio
         internal const uint MOUSEEVENTF_MOVE = 0x0001;
         internal const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         internal const uint MOUSEEVENTF_LEFTUP = 0x0004;
+        internal const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+        internal const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+        internal const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+        internal const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+        internal const uint MOUSEEVENTF_WHEEL = 0x0800;
         internal const uint KEYEVENTF_KEYUP = 0x0002;
         internal const uint KEYEVENTF_UNICODE = 0x0004;
         internal const uint MONITOR_DEFAULTTONEAREST = 2;
         internal const uint GA_ROOT = 2;
+
+        // The pointer is watched at the event level, which is the only place a
+        // wheel turn, a second click inside the double click time and the
+        // release point of a drag exist at all.
+        internal const int WH_MOUSE_LL = 14;
+        internal const uint WM_LBUTTONDOWN = 0x0201;
+        internal const uint WM_LBUTTONUP = 0x0202;
+        internal const uint WM_RBUTTONDOWN = 0x0204;
+        internal const uint WM_RBUTTONUP = 0x0205;
+        internal const uint WM_MBUTTONDOWN = 0x0207;
+        internal const uint WM_MBUTTONUP = 0x0208;
+        internal const uint WM_MOUSEWHEEL = 0x020A;
+        internal const uint PM_REMOVE = 0x0001;
 
         internal delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
 
@@ -84,6 +102,70 @@ namespace AppStudio
             internal uint type;
             internal INPUTUNION data;
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct MSLLHOOKSTRUCT
+        {
+            internal POINT pt;
+            internal uint mouseData;
+            internal uint flags;
+            internal uint time;
+            internal IntPtr extraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct MSG
+        {
+            internal IntPtr hwnd;
+            internal uint message;
+            internal IntPtr wParam;
+            internal IntPtr lParam;
+            internal uint time;
+            internal POINT pt;
+        }
+
+        internal delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern IntPtr SetWindowsHookEx(int hookId, HookProc callback, IntPtr module, uint threadId);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern bool UnhookWindowsHookEx(IntPtr hook);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        internal static extern IntPtr GetModuleHandle(string name);
+
+        [DllImport("user32.dll")]
+        internal static extern bool PeekMessage(out MSG message, IntPtr window, uint filterMin, uint filterMax, uint remove);
+
+        [DllImport("user32.dll")]
+        internal static extern bool TranslateMessage(ref MSG message);
+
+        [DllImport("user32.dll")]
+        internal static extern IntPtr DispatchMessage(ref MSG message);
+
+        [DllImport("user32.dll")]
+        internal static extern uint GetDoubleClickTime();
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct GUITHREADINFO
+        {
+            internal int cbSize;
+            internal uint flags;
+            internal IntPtr hwndActive;
+            internal IntPtr hwndFocus;
+            internal IntPtr hwndCapture;
+            internal IntPtr hwndMenuOwner;
+            internal IntPtr hwndMoveSize;
+            internal IntPtr hwndCaret;
+            internal RECT rcCaret;
+        }
+
+        [DllImport("user32.dll", SetLastError = true)]
+        internal static extern bool GetGUIThreadInfo(uint threadId, ref GUITHREADINFO info);
 
         [DllImport("user32.dll")]
         internal static extern IntPtr WindowFromPoint(POINT point);
@@ -311,6 +393,91 @@ namespace AppStudio
             return NativeMethods.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT))) == inputs.Length;
         }
 
+        // A press of a named button, optionally twice inside the system's own
+        // double click time. The pointer is put where the caller asked first,
+        // because a button event carries no position of its own.
+        internal static bool ClickButton(int x, int y, string button, bool twice)
+        {
+            uint down = NativeMethods.MOUSEEVENTF_LEFTDOWN;
+            uint up = NativeMethods.MOUSEEVENTF_LEFTUP;
+            if (String.Equals(button, MouseButtons.Right, StringComparison.Ordinal))
+            {
+                down = NativeMethods.MOUSEEVENTF_RIGHTDOWN;
+                up = NativeMethods.MOUSEEVENTF_RIGHTUP;
+            }
+            else if (String.Equals(button, MouseButtons.Middle, StringComparison.Ordinal))
+            {
+                down = NativeMethods.MOUSEEVENTF_MIDDLEDOWN;
+                up = NativeMethods.MOUSEEVENTF_MIDDLEUP;
+            }
+            if (!NativeMethods.SetCursorPos(x, y)) return false;
+            if (!Pair(down, up, 0)) return false;
+            if (!twice) return true;
+            // Comfortably inside the system's double click time, so the target
+            // sees one double click rather than two separate presses.
+            int gap = (int)Math.Max(30, Math.Min(120, NativeMethods.GetDoubleClickTime() / 3));
+            System.Threading.Thread.Sleep(gap);
+            return Pair(down, up, 0);
+        }
+
+        // Press, move in steps, release. The steps matter: an application that
+        // starts a drag on the first move sees nothing at all if the pointer
+        // teleports from one point to the other while the button is down.
+        internal static bool Drag(int fromX, int fromY, int toX, int toY, string button)
+        {
+            uint down = NativeMethods.MOUSEEVENTF_LEFTDOWN;
+            uint up = NativeMethods.MOUSEEVENTF_LEFTUP;
+            if (String.Equals(button, MouseButtons.Right, StringComparison.Ordinal))
+            {
+                down = NativeMethods.MOUSEEVENTF_RIGHTDOWN;
+                up = NativeMethods.MOUSEEVENTF_RIGHTUP;
+            }
+            else if (String.Equals(button, MouseButtons.Middle, StringComparison.Ordinal))
+            {
+                down = NativeMethods.MOUSEEVENTF_MIDDLEDOWN;
+                up = NativeMethods.MOUSEEVENTF_MIDDLEUP;
+            }
+            if (!NativeMethods.SetCursorPos(fromX, fromY)) return false;
+            System.Threading.Thread.Sleep(40);
+            if (!Single(down)) return false;
+            System.Threading.Thread.Sleep(60);
+            const int Steps = 12;
+            for (int index = 1; index <= Steps; index++)
+            {
+                int x = fromX + (int)Math.Round((toX - fromX) * (index / (double)Steps));
+                int y = fromY + (int)Math.Round((toY - fromY) * (index / (double)Steps));
+                NativeMethods.SetCursorPos(x, y);
+                System.Threading.Thread.Sleep(25);
+            }
+            System.Threading.Thread.Sleep(60);
+            return Single(up);
+        }
+
+        internal static bool Wheel(int x, int y, int delta)
+        {
+            if (!NativeMethods.SetCursorPos(x, y)) return false;
+            NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[1];
+            inputs[0].type = NativeMethods.INPUT_MOUSE;
+            inputs[0].data.mouse.flags = NativeMethods.MOUSEEVENTF_WHEEL;
+            inputs[0].data.mouse.mouseData = unchecked((uint)delta);
+            return NativeMethods.SendInput(1, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT))) == 1;
+        }
+
+        private static bool Single(uint flag)
+        {
+            NativeMethods.INPUT[] inputs = new NativeMethods.INPUT[1];
+            inputs[0].type = NativeMethods.INPUT_MOUSE;
+            inputs[0].data.mouse.flags = flag;
+            return NativeMethods.SendInput(1, inputs, Marshal.SizeOf(typeof(NativeMethods.INPUT))) == 1;
+        }
+
+        private static bool Pair(uint downFlag, uint upFlag, int holdMs)
+        {
+            if (!Single(downFlag)) return false;
+            if (holdMs > 0) System.Threading.Thread.Sleep(holdMs);
+            return Single(upFlag);
+        }
+
         internal static bool SendUnicode(string text)
         {
             if (String.IsNullOrEmpty(text)) return true;
@@ -404,6 +571,34 @@ namespace AppStudio
             value.X = point.X;
             value.Y = point.Y;
             return value;
+        }
+
+        // Which control currently holds the keyboard, as the operating system
+        // itself sees it. This is a window handle, so it answers for anything
+        // built out of real controls - a text box, a list, a button that was
+        // reached with Tab. A surface that draws its own controls has only one
+        // window, so the answer there is the window itself and moving the
+        // keyboard inside it is invisible from out here. That is a limit of what
+        // can be observed, and it is written down rather than guessed at.
+        public static long FocusedControl()
+        {
+            try
+            {
+                IntPtr front = NativeMethods.GetForegroundWindow();
+                if (front == IntPtr.Zero) return 0;
+                uint processId;
+                uint thread = NativeMethods.GetWindowThreadProcessId(front, out processId);
+                if (thread == 0) return 0;
+                NativeMethods.GUITHREADINFO info = new NativeMethods.GUITHREADINFO();
+                info.cbSize = System.Runtime.InteropServices.Marshal.SizeOf(typeof(NativeMethods.GUITHREADINFO));
+                if (!NativeMethods.GetGUIThreadInfo(thread, ref info)) return 0;
+                if (info.hwndFocus != IntPtr.Zero) return info.hwndFocus.ToInt64();
+                return info.hwndActive.ToInt64();
+            }
+            catch
+            {
+                return 0;
+            }
         }
 
         // Cheap ownership test used to keep manual observation inside the target
