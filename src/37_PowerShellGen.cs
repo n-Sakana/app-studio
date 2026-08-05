@@ -5,35 +5,71 @@ namespace AppStudio
     using System.Globalization;
     using System.Text;
 
-    // The PowerShell half of the same automation. It is a whole script, not a
-    // sketch: the operation library at the top is what makes the recorded part
-    // underneath readable, and the recorded part names the same nine operations
-    // the VBA module names.
+    // The PowerShell half of the same automation, written as five files.
     //
-    // Nothing in here presses a remembered coordinate. An element is found
-    // again by the locators the recording produced, in the order it produced
-    // them, and a place inside an element is a fraction of that element's
-    // rectangle as it is now.
+    // Workflow.ps1 is the one a person edits: one line for one thing the
+    // operator did, and nothing else in it. The interval before a step, putting
+    // the keyboard back before a chord, and settling afterwards are carried out
+    // by the runtime around that line, so deleting the line deletes the step
+    // whole. RecordedFacts.ps1 holds what the recording saw. The three Runtime
+    // files hold how any of it is carried out and are not meant to be edited.
+    //
+    // Nothing in here presses a remembered coordinate. An element is found again
+    // by the locators the recording produced, in the order it produced them, and
+    // a place inside an element is a fraction of that element's rectangle as it
+    // is now.
     public static class PowerShellGen
     {
-        public static string Build(ScriptPlan plan, StudioSession session)
+        public static List<CodeFile> BuildFiles(ScriptPlan plan, StudioSession session)
+        {
+            List<ScriptLine> lines = ScriptModel.Lines(plan);
+            List<CodeFile> files = new List<CodeFile>();
+            files.Add(Make(CodeModules.Workflow, Workflow(plan, session, lines)));
+            files.Add(Make(CodeModules.RecordedFacts, Facts(plan, lines)));
+            files.Add(Make(CodeModules.RuntimeCore, Join(CoreLines())));
+            files.Add(Make(CodeModules.RuntimeLocator, Join(LocatorLines())));
+            files.Add(Make(CodeModules.RuntimeNative, Join(NativeLines())));
+            return files;
+        }
+
+        private static CodeFile Make(string name, string text)
+        {
+            CodeFile file = new CodeFile();
+            file.Language = ScriptLanguages.PowerShell;
+            file.Name = name;
+            file.Role = CodeRoles.Of(name);
+            file.Text = text;
+            return file;
+        }
+
+        private static string Join(string[] lines)
         {
             StringBuilder text = new StringBuilder();
-            Header(text, plan, session);
-            Library(text);
-            Procedure(text, plan);
+            for (int index = 0; index < lines.Length; index++) text.AppendLine(lines[index]);
             return text.ToString();
         }
 
-        private static void Header(StringBuilder text, ScriptPlan plan, StudioSession session)
+        // ---------- Workflow.ps1 : the recorded procedure ----------
+
+        private static string Workflow(ScriptPlan plan, StudioSession session, List<ScriptLine> lines)
         {
+            StringBuilder text = new StringBuilder();
             text.AppendLine("#requires -Version 5.1");
             text.AppendLine("#");
-            text.AppendLine("# " + App.Name + " " + App.Version + " - generated automation (PowerShell)");
+            text.AppendLine("# " + App.Name + " " + App.Version + " - the recorded procedure (PowerShell)");
             text.AppendLine("# session " + Comment(plan.SessionId) + "  " + Comment(plan.SessionTitle));
             text.AppendLine("#");
-            text.AppendLine("# This drives the real applications on this machine. Read it before you run it.");
-            text.AppendLine("# It was written from a recording; it is a starting point that is meant to be edited.");
+            text.AppendLine("# THIS is the file to edit. One line below is one thing the operator did,");
+            text.AppendLine("# in the order they did it. Deleting a line takes that step out and nothing");
+            text.AppendLine("# else: the wait before it and the settle after it belong to the line and go");
+            text.AppendLine("# with it, and the four files beside this one do not change.");
+            text.AppendLine("#");
+            text.AppendLine("# The id in quotes is the recorded step. What that step is aimed at - the");
+            text.AppendLine("# address, the interval, the text - is in " + CodeModules.RecordedFacts + ".ps1.");
+            text.AppendLine("# How any of it is carried out is in the three Runtime files. You should not");
+            text.AppendLine("# need to open them to change what this procedure does.");
+            text.AppendLine("#");
+            text.AppendLine("# It drives the real applications on this machine. Read it before you run it.");
             text.AppendLine("#");
             if (session != null && session.ValuePolicy != null)
             {
@@ -55,56 +91,455 @@ namespace AppStudio
             text.AppendLine("Set-StrictMode -Version 2.0");
             text.AppendLine("$ErrorActionPreference = 'Stop'");
             text.AppendLine();
+            text.AppendLine("# The runtime. Dot sourced, so everything below runs in this scope.");
+            text.AppendLine(". (Join-Path $PSScriptRoot '" + CodeModules.RuntimeNative + ".ps1')");
+            text.AppendLine(". (Join-Path $PSScriptRoot '" + CodeModules.RuntimeLocator + ".ps1')");
+            text.AppendLine(". (Join-Path $PSScriptRoot '" + CodeModules.RuntimeCore + ".ps1')");
+            text.AppendLine(". (Join-Path $PSScriptRoot '" + CodeModules.RecordedFacts + ".ps1')");
+            text.AppendLine();
+            text.AppendLine("Start-Workflow -SettleMs $SettleMs");
+            text.AppendLine();
+            text.AppendLine("#region the recorded procedure - one line is one step");
+            text.AppendLine();
+            if (lines.Count == 0)
+            {
+                text.AppendLine("# This session recorded nothing that can be carried out, so there is no");
+                text.AppendLine("# procedure here. Nothing is invented to fill the gap.");
+                text.AppendLine();
+            }
+            for (int index = 0; index < lines.Count; index++)
+            {
+                text.AppendLine(WorkflowLine(lines[index]));
+            }
+            text.AppendLine();
+            text.AppendLine("#endregion");
+            text.AppendLine();
+            text.AppendLine("Complete-Workflow");
+            return text.ToString();
         }
 
-        // The nine operations. Their names and their meaning are the ones in
-        // ScriptModel, so the VBA module below says the same words about the
-        // same recording.
-        private static void Library(StringBuilder text)
+        // One call, one comment, one line. The operation names are the nine the
+        // VBA workflow uses, spelled the same way.
+        private static string WorkflowLine(ScriptLine line)
         {
-            string[] lines = new string[]
+            StringBuilder text = new StringBuilder();
+            text.Append(Pad(line.Op, 15)).Append(" '").Append(Quote(line.Id)).Append("'");
+            string note = Comment(line.Comment);
+            if (note.Length > 0)
             {
-                "#region operation library - the same nine operations the VBA module has",
-                "",
-                "Add-Type -AssemblyName UIAutomationClient",
-                "Add-Type -AssemblyName UIAutomationTypes",
-                "Add-Type -AssemblyName System.Windows.Forms",
-                "",
-                "if ($null -eq ('AppStudioRun.Native' -as [type])) {",
-                "    Add-Type -TypeDefinition @\"",
-                "using System;",
-                "using System.Runtime.InteropServices;",
-                "namespace AppStudioRun {",
-                "  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }",
-                "  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; public int pad1; public int pad2; }",
-                "  public static class Native {",
-                "    [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();",
-                "    [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();",
-                "    [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h);",
-                "    [DllImport(\"user32.dll\")] public static extern uint SendInput(uint n, INPUT[] p, int size);",
-                "    [DllImport(\"user32.dll\")] public static extern bool GetCursorPos(out int x, out int y);",
-                "    [DllImport(\"user32.dll\")] public static extern int GetSystemMetrics(int i);",
-                "    [DllImport(\"user32.dll\", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder b, int n);",
-                "    [DllImport(\"user32.dll\", EntryPoint = \"GetWindowLongW\")] public static extern int GetWindowLong(IntPtr h, int index);",
-                "    public static void Mouse(uint flags, int x, int y, uint data) {",
-                "      INPUT[] one = new INPUT[1];",
-                "      one[0].type = 0;",
-                "      one[0].mi.dx = x; one[0].mi.dy = y; one[0].mi.mouseData = data; one[0].mi.dwFlags = flags;",
-                "      SendInput(1, one, Marshal.SizeOf(typeof(INPUT)));",
-                "    }",
-                "  }",
-                "}",
-                "\"@",
-                "}",
-                "[void][AppStudioRun.Native]::SetProcessDPIAware()",
+                while (text.Length < 34) text.Append(' ');
+                text.Append("  # ").Append(note);
+            }
+            return text.ToString();
+        }
+
+        private static string Pad(string value, int width)
+        {
+            string text = value == null ? "" : value;
+            StringBuilder padded = new StringBuilder(text);
+            while (padded.Length < width) padded.Append(' ');
+            return padded.ToString();
+        }
+
+        // ---------- RecordedFacts.ps1 : what the recording saw ----------
+
+        private static string Facts(ScriptPlan plan, List<ScriptLine> lines)
+        {
+            StringBuilder text = new StringBuilder();
+            text.AppendLine("#");
+            text.AppendLine("# " + App.Name + " " + App.Version + " - what the recording saw");
+            text.AppendLine("# session " + Comment(plan.SessionId));
+            text.AppendLine("#");
+            text.AppendLine("# Generated from the recording. One block per line of Workflow.ps1, holding");
+            text.AppendLine("# the addresses that step was reached by, the interval the operator left");
+            text.AppendLine("# before it, and whatever the step carried.");
+            text.AppendLine("#");
+            text.AppendLine("# An address here is never a screen coordinate. A place inside an element is");
+            text.AppendLine("# a fraction of that element's own rectangle, so it follows the element when");
+            text.AppendLine("# the window moves.");
+            text.AppendLine("#");
+            text.AppendLine("# Editing this changes what a step aims at. Editing Workflow.ps1 changes");
+            text.AppendLine("# which steps happen. A block left here with no line using it is harmless.");
+            text.AppendLine("#");
+            text.AppendLine();
+            text.AppendLine("$script:AppStudioFacts = @{}");
+            text.AppendLine();
+            for (int index = 0; index < lines.Count; index++)
+            {
+                Fact(text, lines[index]);
+            }
+            return text.ToString();
+        }
+
+        private static void Fact(StringBuilder text, ScriptLine line)
+        {
+            string note = Comment(line.Comment);
+            if (note.Length > 0) text.AppendLine("# " + Quote(line.Id) + "  " + note);
+            text.AppendLine("$script:AppStudioFacts['" + Quote(line.Id) + "'] = @{");
+            text.AppendLine("    step  = '" + Quote(line.StepId) + "'");
+            text.AppendLine("    op    = '" + Quote(line.Op) + "'");
+            text.AppendLine("    note  = '" + Quote(note) + "'");
+            text.AppendLine("    gapMs = " + line.GapMs.ToString(CultureInfo.InvariantCulture));
+            if (line.Op == ScriptOp.FindWindow)
+            {
+                text.AppendLine("    windowClass = '" + Quote(line.WindowClass) + "'");
+                text.AppendLine("    windowTitle = '" + Quote(line.WindowTitle) + "'");
+            }
+            if (line.Op == ScriptOp.Unsupported)
+            {
+                text.AppendLine("    reason = '" + Quote(line.Reason) + "'");
+            }
+            if (!String.IsNullOrEmpty(line.ElementLabel))
+            {
+                text.AppendLine("    element = '" + Quote(line.ElementLabel) + "'");
+            }
+            if (line.Locators != null && line.Locators.Count > 0)
+            {
+                text.AppendLine("    locators = " + Locators(line.Locators));
+            }
+            if (line.FocusLocators != null && line.FocusLocators.Count > 0)
+            {
+                text.AppendLine("    focus = " + Locators(line.FocusLocators));
+            }
+            if (line.DropLocators != null && line.DropLocators.Count > 0)
+            {
+                text.AppendLine("    drop = " + Locators(line.DropLocators));
+                text.AppendLine("    dropRelX = " + Number(line.DropRelX));
+                text.AppendLine("    dropRelY = " + Number(line.DropRelY));
+            }
+            if (line.Op == ScriptOp.InvokeElement)
+            {
+                text.AppendLine("    button = '" + Quote(line.Button) + "'");
+                text.AppendLine("    times  = " + line.Times.ToString(CultureInfo.InvariantCulture));
+                text.AppendLine("    relX   = " + Number(line.RelX));
+                text.AppendLine("    relY   = " + Number(line.RelY));
+                if (line.WheelDelta != 0) text.AppendLine("    wheelDelta = " + line.WheelDelta.ToString(CultureInfo.InvariantCulture));
+            }
+            if (line.Op == ScriptOp.SetElementText)
+            {
+                text.AppendLine("    text = '" + Quote(line.Text) + "'");
+            }
+            if (line.Op == ScriptOp.SendKeys)
+            {
+                text.AppendLine("    chord    = '" + Quote(line.Chord) + "'");
+                text.AppendLine("    recorded = '" + Quote(line.Keys) + "'");
+            }
+            if (line.Op == ScriptOp.AskSecret)
+            {
+                text.AppendLine("    prompt = '" + Quote(line.SecretPrompt) + "'");
+            }
+            text.AppendLine("}");
+            text.AppendLine();
+        }
+
+        // ---------- RuntimeCore.ps1 : the nine operations ----------
+
+        private static string[] CoreLines()
+        {
+            return new string[]
+            {
+                "#",
+                "# The nine operations, and the bookkeeping around them.",
+                "#",
+                "# These are the same nine names the VBA runtime carries, with the same",
+                "# meanings. A line of Workflow.ps1 names one of them and the id of a step;",
+                "# everything that step needs is looked up here rather than written out",
+                "# beside the call, because the workflow is meant to be read.",
+                "#",
+                "# Each operation waits the interval the operator left before its step, does",
+                "# the one thing, and then waits for the application to stop changing. That",
+                "# is why a step is one line and why deleting the line deletes the wait with",
+                "# it.",
+                "#",
+                "# Runtime file. You should not need to change anything here to change what",
+                "# the procedure does.",
+                "#",
                 "",
                 "$script:AppStudioWindow = $null",
                 "$script:AppStudioStep = '-'",
+                "$script:AppStudioSettleMs = 2500",
+                "",
+                "function Start-Workflow {",
+                "    param([int]$SettleMs = 2500)",
+                "    $script:AppStudioSettleMs = $SettleMs",
+                "    $script:AppStudioWindow = $null",
+                "    [void][AppStudioRun.Native]::SetProcessDPIAware()",
+                "}",
+                "",
+                "function Complete-Workflow {",
+                "    Write-Output 'The recorded procedure finished.'",
+                "}",
                 "",
                 "function AppStudioStop {",
                 "    param([string]$Reason)",
                 "    throw ('App Studio step ' + $script:AppStudioStep + ' stopped: ' + $Reason)",
                 "}",
+                "",
+                "# What the recording saw about this step. A line naming a step that is not",
+                "# in RecordedFacts.ps1 stops the run: it is a workflow and a recording that",
+                "# no longer agree, and guessing which one is right is not this runtime's to",
+                "# make.",
+                "function AppStudioBegin {",
+                "    param([string]$StepId)",
+                "    $script:AppStudioStep = $StepId",
+                "    if (-not $script:AppStudioFacts.Contains($StepId)) {",
+                "        AppStudioStop ('there is nothing recorded under this id. Either the line was ' +",
+                "            'renamed in Workflow.ps1 or the block was removed from " + CodeModules.RecordedFacts + ".ps1.')",
+                "    }",
+                "    $fact = $script:AppStudioFacts[$StepId]",
+                "    WaitGap (AppStudioFact $fact 'gapMs' 0)",
+                "    return $fact",
+                "}",
+                "",
+                "function AppStudioFact {",
+                "    param($Fact, [string]$Name, $Default)",
+                "    if ($null -eq $Fact) { return $Default }",
+                "    if (-not $Fact.Contains($Name)) { return $Default }",
+                "    return $Fact[$Name]",
+                "}",
+                "",
+                "# Waits for the window the recording expects to be in front, then keeps it.",
+                "function FindWindow {",
+                "    param([string]$StepId, [int]$TimeoutMs = 10000)",
+                "    $fact = AppStudioBegin $StepId",
+                "    $class = [string](AppStudioFact $fact 'windowClass' '')",
+                "    $title = [string](AppStudioFact $fact 'windowTitle' '')",
+                "    $root = [System.Windows.Automation.AutomationElement]::RootElement",
+                "    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)",
+                "    $found = $null",
+                "    while ([DateTime]::UtcNow -lt $deadline) {",
+                "        $candidates = New-Object System.Collections.ArrayList",
+                "        foreach ($child in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {",
+                "            $sameClass = [string]::IsNullOrEmpty($class) -or $child.Current.ClassName -eq $class",
+                "            $sameTitle = [string]::IsNullOrEmpty($title) -or $child.Current.Name -eq $title",
+                "            if ($sameClass -and $sameTitle) { [void]$candidates.Add($child) }",
+                "        }",
+                "        if ($candidates.Count -eq 1) { $found = $candidates[0]; break }",
+                "        if ($candidates.Count -gt 1) {",
+                "            AppStudioStop ('more than one window matches class \"' + $class + '\" title \"' + $title + '\" (' + $candidates.Count + '). Nothing was pressed, because there is no way to tell which one the recording meant.')",
+                "        }",
+                "        Start-Sleep -Milliseconds 150",
+                "    }",
+                "    if ($null -eq $found) {",
+                "        AppStudioStop ('no window matches class \"' + $class + '\" title \"' + $title + '\". The application may not be running, or its title may differ from the recorded run.')",
+                "    }",
+                "    $script:AppStudioWindow = $found",
+                "    $handle = [IntPtr]$found.Current.NativeWindowHandle",
+                "    if ($handle -ne [IntPtr]::Zero) { [void][AppStudioRun.Native]::SetForegroundWindow($handle) }",
+                "    Start-Sleep -Milliseconds 120",
+                "    WaitIdle -BudgetMs $script:AppStudioSettleMs",
+                "}",
+                "",
+                "function FocusElement {",
+                "    param([string]$StepId)",
+                "    $fact = AppStudioBegin $StepId",
+                "    AppStudioFocus (AppStudioFact $fact 'locators' @())",
+                "    WaitIdle -BudgetMs $script:AppStudioSettleMs",
+                "}",
+                "",
+                "function AppStudioFocus {",
+                "    param([object[]]$Locators)",
+                "    if ($null -eq $Locators -or $Locators.Count -eq 0) { return }",
+                "    $element = AppStudioResolve $Locators",
+                "    try { $element.SetFocus() } catch {",
+                "        AppStudioStop ('the keyboard could not be put back on this element: ' + $_.Exception.Message + '. Nothing was typed.')",
+                "    }",
+                "    Start-Sleep -Milliseconds 80",
+                "}",
+                "",
+                "# Presses the element. A pattern the element publishes is preferred, because",
+                "# it acts on the control rather than on the screen; synthetic input is the",
+                "# fallback and it needs the window in front.",
+                "function InvokeElement {",
+                "    param([string]$StepId)",
+                "    $fact = AppStudioBegin $StepId",
+                "    $locators = AppStudioFact $fact 'locators' @()",
+                "    $button = [string](AppStudioFact $fact 'button' 'left')",
+                "    $times = [int](AppStudioFact $fact 'times' 1)",
+                "    $relX = [double](AppStudioFact $fact 'relX' (-1))",
+                "    $relY = [double](AppStudioFact $fact 'relY' (-1))",
+                "    $wheel = [int](AppStudioFact $fact 'wheelDelta' 0)",
+                "    $drop = AppStudioFact $fact 'drop' @()",
+                "    $element = AppStudioResolve $locators",
+                "    if ($wheel -ne 0) {",
+                "        $at = AppStudioPoint $element $relX $relY",
+                "        AppStudioWheel $at[0] $at[1] $wheel",
+                "    } elseif ($null -ne $drop -and @($drop).Count -gt 0) {",
+                "        $from = AppStudioPoint $element $relX $relY",
+                "        $target = AppStudioResolve $drop",
+                "        $to = AppStudioPoint $target ([double](AppStudioFact $fact 'dropRelX' (-1))) ([double](AppStudioFact $fact 'dropRelY' (-1)))",
+                "        AppStudioDrag $from[0] $from[1] $to[0] $to[1]",
+                "    } else {",
+                "        AppStudioPress $element $button $times $relX $relY",
+                "    }",
+                "    WaitIdle -BudgetMs $script:AppStudioSettleMs",
+                "}",
+                "",
+                "function AppStudioPress {",
+                "    param($Element, [string]$Button, [int]$Times, [double]$RelX, [double]$RelY)",
+                "    if ($Times -eq 1) {",
+                "        $pattern = $null",
+                "        if ($Element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {",
+                "            $pattern.Invoke()",
+                "            return",
+                "        }",
+                "        $toggle = $null",
+                "        if ($Element.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {",
+                "            $toggle.Toggle()",
+                "            return",
+                "        }",
+                "        $select = $null",
+                "        if ($Element.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$select)) {",
+                "            $select.Select()",
+                "            return",
+                "        }",
+                "    }",
+                "    $at = AppStudioPoint $Element $RelX $RelY",
+                "    AppStudioClick $at[0] $at[1] $Button $Times",
+                "}",
+                "",
+                "function SetElementText {",
+                "    param([string]$StepId)",
+                "    $fact = AppStudioBegin $StepId",
+                "    $locators = AppStudioFact $fact 'locators' @()",
+                "    $value = [string](AppStudioFact $fact 'text' '')",
+                "    AppStudioFocus (AppStudioFact $fact 'focus' @())",
+                "    $element = AppStudioResolve $locators",
+                "    if ($element.Current.IsPassword) {",
+                "        AppStudioStop 'this element is a password field. Writing into it from a script is refused.'",
+                "    }",
+                "    $pattern = $null",
+                "    if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern) -and -not $pattern.Current.IsReadOnly) {",
+                "        $pattern.SetValue($value)",
+                "        WaitIdle -BudgetMs $script:AppStudioSettleMs",
+                "        return",
+                "    }",
+                "    try { $element.SetFocus() } catch {",
+                "        AppStudioStop ('this element publishes no way to set its text and the keyboard could not be put on it either: ' + $_.Exception.Message)",
+                "    }",
+                "    Start-Sleep -Milliseconds 60",
+                "    [System.Windows.Forms.SendKeys]::SendWait('^a')",
+                "    [System.Windows.Forms.SendKeys]::SendWait((AppStudioEscapeKeys $value))",
+                "    WaitIdle -BudgetMs $script:AppStudioSettleMs",
+                "}",
+                "",
+                "function ReadElementText {",
+                "    param([string]$StepId)",
+                "    $fact = AppStudioBegin $StepId",
+                "    $element = AppStudioResolve (AppStudioFact $fact 'locators' @())",
+                "    if ($element.Current.IsPassword) { return $null }",
+                "    $pattern = $null",
+                "    if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) { return $pattern.Current.Value }",
+                "    $textPattern = $null",
+                "    if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) { return $textPattern.DocumentRange.GetText(-1) }",
+                "    return $element.Current.Name",
+                "}",
+                "",
+                "function AppStudioEscapeKeys {",
+                "    param([string]$Text)",
+                "    if ($null -eq $Text) { return '' }",
+                "    $out = New-Object System.Text.StringBuilder",
+                "    foreach ($character in $Text.ToCharArray()) {",
+                "        if ('+^%~(){}[]'.IndexOf($character) -ge 0) { [void]$out.Append('{').Append($character).Append('}') }",
+                "        else { [void]$out.Append($character) }",
+                "    }",
+                "    return $out.ToString()",
+                "}",
+                "",
+                "# One recorded chord, sent after the keyboard has been put back where the",
+                "# recording had it.",
+                "function SendKeys {",
+                "    param([string]$StepId)",
+                "    $fact = AppStudioBegin $StepId",
+                "    $chord = [string](AppStudioFact $fact 'chord' '')",
+                "    $recorded = [string](AppStudioFact $fact 'recorded' '')",
+                "    if ([string]::IsNullOrEmpty($chord)) {",
+                "        AppStudioStop ('the recorded key \"' + $recorded + '\" has no equivalent that can be sent from here, so nothing was sent.')",
+                "    }",
+                "    AppStudioFocus (AppStudioFact $fact 'focus' @())",
+                "    [System.Windows.Forms.SendKeys]::SendWait($chord)",
+                "    WaitIdle -BudgetMs $script:AppStudioSettleMs",
+                "}",
+                "",
+                "function WaitGap {",
+                "    param([int]$Ms)",
+                "    if ($Ms -le 0) { return }",
+                "    $wait = $Ms",
+                "    if ($wait -lt 120) { $wait = 120 }",
+                "    if ($wait -gt 4000) { $wait = 4000 }",
+                "    Start-Sleep -Milliseconds $wait",
+                "}",
+                "",
+                "# Waits for the front window to stop changing, up to a stated ceiling.",
+                "# Reaching the ceiling is a measured wait, not a failure.",
+                "function WaitIdle {",
+                "    param([int]$BudgetMs = 2500)",
+                "    $watch = [Diagnostics.Stopwatch]::StartNew()",
+                "    $lastFront = [IntPtr]::Zero",
+                "    $stable = 0",
+                "    while ($watch.ElapsedMilliseconds -lt $BudgetMs) {",
+                "        $front = [AppStudioRun.Native]::GetForegroundWindow()",
+                "        if ($front -eq $lastFront) { $stable = $stable + 1 } else { $stable = 0 }",
+                "        $lastFront = $front",
+                "        if ($stable -ge 2) { break }",
+                "        Start-Sleep -Milliseconds 80",
+                "    }",
+                "    $watch.Stop()",
+                "}",
+                "",
+                "# A value the recording deliberately never kept. It is asked for here and it",
+                "# is never written to a file, a log or the console.",
+                "function AskSecret {",
+                "    param([string]$StepId)",
+                "    $fact = AppStudioBegin $StepId",
+                "    $prompt = [string](AppStudioFact $fact 'prompt' 'This step needs a value the recording did not keep. Type it now')",
+                "    $secure = Read-Host -Prompt $prompt -AsSecureString",
+                "    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)",
+                "    try {",
+                "        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)",
+                "        if ([string]::IsNullOrEmpty($plain)) { AppStudioStop 'no value was supplied for a step that needs one.' }",
+                "        AppStudioFocus (AppStudioFact $fact 'locators' @())",
+                "        Start-Sleep -Milliseconds 60",
+                "        [System.Windows.Forms.SendKeys]::SendWait((AppStudioEscapeKeys $plain))",
+                "    } finally {",
+                "        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)",
+                "    }",
+                "    WaitIdle -BudgetMs $script:AppStudioSettleMs",
+                "}",
+                "",
+                "# The recording holds something no address can be built from. The run stops",
+                "# here with the reason rather than pressing a remembered coordinate.",
+                "function Unsupported {",
+                "    param([string]$StepId)",
+                "    $script:AppStudioStep = $StepId",
+                "    $reason = 'this step has no address that survives a restart.'",
+                "    if ($script:AppStudioFacts.Contains($StepId)) {",
+                "        $reason = [string](AppStudioFact $script:AppStudioFacts[$StepId] 'reason' $reason)",
+                "    }",
+                "    AppStudioStop $reason",
+                "}",
+                ""
+            };
+        }
+
+        // ---------- RuntimeLocator.ps1 : finding the element again ----------
+
+        private static string[] LocatorLines()
+        {
+            return new string[]
+            {
+                "#",
+                "# Turning a recorded address back into the element that is on screen now.",
+                "#",
+                "# The locators are tried in the order the recording produced them: the",
+                "# identifier the application chose first, a position among siblings last. A",
+                "# locator that matches more than one element decides nothing and is not used",
+                "# as if it had; the next one is tried instead, and when all of them are",
+                "# spent the run stops rather than pressing something it cannot name.",
+                "#",
+                "# Runtime file. You should not need to change anything here to change what",
+                "# the procedure does.",
+                "#",
                 "",
                 "function AppStudioLabel {",
                 "    param($Element)",
@@ -115,10 +550,10 @@ namespace AppStudio
                 "    return ($short + ' \"' + $name + '\"')",
                 "}",
                 "",
-                "# The readable hierarchy path, rebuilt the way the recording wrote it.",
-                "# It is the weakest of the strategies used here and it moves when the",
-                "# application's layout does, which is why it is only ever tried after the",
-                "# identifiers above it have failed.",
+                "# The readable hierarchy path, rebuilt the way the recording wrote it. It is",
+                "# the weakest of the strategies used here and it moves when the application's",
+                "# layout does, which is why it is only ever tried after the identifiers above",
+                "# it have failed.",
                 "function AppStudioPath {",
                 "    param($Element, $Root)",
                 "    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker",
@@ -135,6 +570,9 @@ namespace AppStudio
                 "    return ($parts -join ' > ')",
                 "}",
                 "",
+                "# Windows Forms and several toolkits append a per process number to the",
+                "# window class. The number changes on every launch, so the volatile tail is",
+                "# dropped rather than compared as if it were stable.",
                 "function AppStudioStableClass {",
                 "    param([string]$Value)",
                 "    if ([string]::IsNullOrEmpty($Value)) { return $Value }",
@@ -147,38 +585,9 @@ namespace AppStudio
                 "    return $Value",
                 "}",
                 "",
-                "# Waits for the window the recording expects to be in front, then keeps it.",
-                "function FindWindow {",
-                "    param([string]$Class, [string]$Title, [int]$TimeoutMs = 10000)",
-                "    $root = [System.Windows.Automation.AutomationElement]::RootElement",
-                "    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)",
-                "    $found = $null",
-                "    while ([DateTime]::UtcNow -lt $deadline) {",
-                "        $candidates = New-Object System.Collections.ArrayList",
-                "        foreach ($child in $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)) {",
-                "            $sameClass = [string]::IsNullOrEmpty($Class) -or $child.Current.ClassName -eq $Class",
-                "            $sameTitle = [string]::IsNullOrEmpty($Title) -or $child.Current.Name -eq $Title",
-                "            if ($sameClass -and $sameTitle) { [void]$candidates.Add($child) }",
-                "        }",
-                "        if ($candidates.Count -eq 1) { $found = $candidates[0]; break }",
-                "        if ($candidates.Count -gt 1) {",
-                "            AppStudioStop ('more than one window matches class \"' + $Class + '\" title \"' + $Title + '\" (' + $candidates.Count + '). Nothing was pressed, because there is no way to tell which one the recording meant.')",
-                "        }",
-                "        Start-Sleep -Milliseconds 150",
-                "    }",
-                "    if ($null -eq $found) {",
-                "        AppStudioStop ('no window matches class \"' + $Class + '\" title \"' + $Title + '\". The application may not be running, or its title may differ from the recorded run.')",
-                "    }",
-                "    $script:AppStudioWindow = $found",
-                "    $handle = [IntPtr]$found.Current.NativeWindowHandle",
-                "    if ($handle -ne [IntPtr]::Zero) { [void][AppStudioRun.Native]::SetForegroundWindow($handle) }",
-                "    Start-Sleep -Milliseconds 120",
-                "    return $found",
-                "}",
-                "",
                 "# One locator against the window as it is now. Returns every element it",
-                "# matched: deciding what to do about none or many is the caller's job,",
-                "# and neither answer is turned into a guess here.",
+                "# matched: deciding what to do about none or many is the caller's job, and",
+                "# neither answer is turned into a guess here.",
                 "function AppStudioMatch {",
                 "    param($Locator)",
                 "    $window = $script:AppStudioWindow",
@@ -214,18 +623,16 @@ namespace AppStudio
                 "        if ($hit) { [void]$hits.Add($element) }",
                 "    }",
                 "    # The comma keeps the list a list. PowerShell unrolls a returned",
-                "    # collection, and a single match coming back as one element has no",
-                "    # Count for the caller to read.",
+                "    # collection, and a single match coming back as one element has no Count",
+                "    # for the caller to read.",
                 "    return ,$hits",
                 "}",
                 "",
-                "# The locators in the order the recording produced them: the identifier the",
-                "# application chose first, a position among siblings last. A locator that",
-                "# matches more than one element decides nothing and is not used as if it",
-                "# had; the next one is tried instead, and when all of them are spent the",
-                "# run stops rather than pressing something it cannot name.",
                 "function AppStudioResolve {",
                 "    param([object[]]$Locators)",
+                "    if ($null -eq $Locators -or $Locators.Count -eq 0) {",
+                "        AppStudioStop 'this step has no address at all, so there is nothing to look for. Its recorded position is a description, never an address.'",
+                "    }",
                 "    $ambiguous = @()",
                 "    foreach ($locator in $Locators) {",
                 "        $hits = @(AppStudioMatch $locator)",
@@ -238,6 +645,8 @@ namespace AppStudio
                 "    AppStudioStop 'the element could not be found again in this window. Nothing was sent.'",
                 "}",
                 "",
+                "# Where inside the element to act, as a fraction of the rectangle it has",
+                "# right now. Never a coordinate the recording remembered.",
                 "function AppStudioPoint {",
                 "    param($Element, [double]$RelX, [double]$RelY)",
                 "    $rect = $Element.Current.BoundingRectangle",
@@ -248,267 +657,108 @@ namespace AppStudio
                 "    $fy = if ($RelY -lt 0) { 0.5 } else { $RelY }",
                 "    return @([int]($rect.X + $rect.Width * $fx), [int]($rect.Y + $rect.Height * $fy))",
                 "}",
+                ""
+            };
+        }
+
+        // ---------- RuntimeNative.ps1 : the OS plumbing ----------
+
+        private static string[] NativeLines()
+        {
+            return new string[]
+            {
+                "#",
+                "# The parts that talk to Windows directly: the declarations, the pointer,",
+                "# and turning a desktop point into what SendInput wants.",
+                "#",
+                "# Runtime file. You should not need to change anything here to change what",
+                "# the procedure does.",
+                "#",
+                "",
+                "Add-Type -AssemblyName UIAutomationClient",
+                "Add-Type -AssemblyName UIAutomationTypes",
+                "Add-Type -AssemblyName System.Windows.Forms",
+                "",
+                "if ($null -eq ('AppStudioRun.Native' -as [type])) {",
+                "    Add-Type -TypeDefinition @\"",
+                "using System;",
+                "using System.Runtime.InteropServices;",
+                "namespace AppStudioRun {",
+                "  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }",
+                "  [StructLayout(LayoutKind.Sequential)] public struct INPUT { public uint type; public MOUSEINPUT mi; public int pad1; public int pad2; }",
+                "  public static class Native {",
+                "    [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware();",
+                "    [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow();",
+                "    [DllImport(\"user32.dll\")] public static extern bool SetForegroundWindow(IntPtr h);",
+                "    [DllImport(\"user32.dll\")] public static extern uint SendInput(uint n, INPUT[] p, int size);",
+                "    [DllImport(\"user32.dll\")] public static extern bool GetCursorPos(out int x, out int y);",
+                "    [DllImport(\"user32.dll\")] public static extern int GetSystemMetrics(int i);",
+                "    [DllImport(\"user32.dll\", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder b, int n);",
+                "    [DllImport(\"user32.dll\", EntryPoint = \"GetWindowLongW\")] public static extern int GetWindowLong(IntPtr h, int index);",
+                "    public static void Mouse(uint flags, int x, int y, uint data) {",
+                "      INPUT[] one = new INPUT[1];",
+                "      one[0].type = 0;",
+                "      one[0].mi.dx = x; one[0].mi.dy = y; one[0].mi.mouseData = data; one[0].mi.dwFlags = flags;",
+                "      SendInput(1, one, Marshal.SizeOf(typeof(INPUT)));",
+                "    }",
+                "  }",
+                "}",
+                "\"@",
+                "}",
+                "",
+                "# A desktop point in the 0..65535 space SendInput uses for an absolute move.",
+                "function AppStudioAbsolute {",
+                "    param([int]$X, [int]$Y)",
+                "    $screenW = [AppStudioRun.Native]::GetSystemMetrics(78)",
+                "    $screenH = [AppStudioRun.Native]::GetSystemMetrics(79)",
+                "    if ($screenW -le 0 -or $screenH -le 0) { AppStudioStop 'the virtual desktop reported no size, so no pointer position can be expressed.' }",
+                "    $originX = [AppStudioRun.Native]::GetSystemMetrics(76)",
+                "    $originY = [AppStudioRun.Native]::GetSystemMetrics(77)",
+                "    return @([int](($X - $originX) * 65535 / $screenW), [int](($Y - $originY) * 65535 / $screenH))",
+                "}",
                 "",
                 "function AppStudioClick {",
                 "    param([int]$X, [int]$Y, [string]$Button, [int]$Times)",
-                "    $screenW = [AppStudioRun.Native]::GetSystemMetrics(78)",
-                "    $screenH = [AppStudioRun.Native]::GetSystemMetrics(79)",
-                "    $originX = [AppStudioRun.Native]::GetSystemMetrics(76)",
-                "    $originY = [AppStudioRun.Native]::GetSystemMetrics(77)",
-                "    if ($screenW -le 0 -or $screenH -le 0) { AppStudioStop 'the virtual desktop reported no size, so no pointer position can be expressed.' }",
-                "    $ax = [int](($X - $originX) * 65535 / $screenW)",
-                "    $ay = [int](($Y - $originY) * 65535 / $screenH)",
+                "    $at = AppStudioAbsolute $X $Y",
                 "    $down = 0x0002; $up = 0x0004",
                 "    if ($Button -eq 'right') { $down = 0x0008; $up = 0x0010 }",
                 "    elseif ($Button -eq 'middle') { $down = 0x0020; $up = 0x0040 }",
-                "    [AppStudioRun.Native]::Mouse(0x8001, $ax, $ay, 0)",
+                "    [AppStudioRun.Native]::Mouse(0x8001, $at[0], $at[1], 0)",
                 "    Start-Sleep -Milliseconds 40",
                 "    for ($i = 0; $i -lt $Times; $i++) {",
-                "        [AppStudioRun.Native]::Mouse(0x8001 -bor $down, $ax, $ay, 0)",
-                "        [AppStudioRun.Native]::Mouse(0x8001 -bor $up, $ax, $ay, 0)",
+                "        [AppStudioRun.Native]::Mouse(0x8001 -bor $down, $at[0], $at[1], 0)",
+                "        [AppStudioRun.Native]::Mouse(0x8001 -bor $up, $at[0], $at[1], 0)",
                 "        if ($i -lt ($Times - 1)) { Start-Sleep -Milliseconds 60 }",
                 "    }",
                 "}",
                 "",
-                "# Presses the element. A pattern the element publishes is preferred,",
-                "# because it acts on the control rather than on the screen; synthetic",
-                "# input is the fallback and it needs the window in front.",
-                "function InvokeElement {",
-                "    param([object[]]$Locators, [string]$Button = 'left', [int]$Times = 1, [double]$RelX = -1, [double]$RelY = -1, [int]$WheelDelta = 0, [object[]]$DropLocators = $null, [double]$DropRelX = -1, [double]$DropRelY = -1)",
-                "    $element = AppStudioResolve $Locators",
-                "    if ($WheelDelta -ne 0) {",
-                "        $at = AppStudioPoint $element $RelX $RelY",
-                "        $screenW = [AppStudioRun.Native]::GetSystemMetrics(78)",
-                "        $screenH = [AppStudioRun.Native]::GetSystemMetrics(79)",
-                "        $ax = [int]((($at[0]) - [AppStudioRun.Native]::GetSystemMetrics(76)) * 65535 / $screenW)",
-                "        $ay = [int]((($at[1]) - [AppStudioRun.Native]::GetSystemMetrics(77)) * 65535 / $screenH)",
-                "        [AppStudioRun.Native]::Mouse(0x8001, $ax, $ay, 0)",
-                "        Start-Sleep -Milliseconds 40",
-                "        # mouseData carries a signed turn in an unsigned field.",
-                "        $data = if ($WheelDelta -lt 0) { [uint32](4294967296 + $WheelDelta) } else { [uint32]$WheelDelta }",
-                "        [AppStudioRun.Native]::Mouse(0x0800, 0, 0, $data)",
-                "        return",
-                "    }",
-                "    if ($null -ne $DropLocators) {",
-                "        $from = AppStudioPoint $element $RelX $RelY",
-                "        $target = AppStudioResolve $DropLocators",
-                "        $to = AppStudioPoint $target $DropRelX $DropRelY",
-                "        $screenW = [AppStudioRun.Native]::GetSystemMetrics(78)",
-                "        $screenH = [AppStudioRun.Native]::GetSystemMetrics(79)",
-                "        $ox = [AppStudioRun.Native]::GetSystemMetrics(76)",
-                "        $oy = [AppStudioRun.Native]::GetSystemMetrics(77)",
-                "        $fx = [int]((($from[0]) - $ox) * 65535 / $screenW); $fy = [int]((($from[1]) - $oy) * 65535 / $screenH)",
-                "        $tx = [int]((($to[0]) - $ox) * 65535 / $screenW); $ty = [int]((($to[1]) - $oy) * 65535 / $screenH)",
-                "        [AppStudioRun.Native]::Mouse(0x8001, $fx, $fy, 0)",
-                "        Start-Sleep -Milliseconds 60",
-                "        [AppStudioRun.Native]::Mouse(0x8002, $fx, $fy, 0)",
-                "        Start-Sleep -Milliseconds 60",
-                "        [AppStudioRun.Native]::Mouse(0x8001, $tx, $ty, 0)",
-                "        Start-Sleep -Milliseconds 60",
-                "        [AppStudioRun.Native]::Mouse(0x8004, $tx, $ty, 0)",
-                "        return",
-                "    }",
-                "    if ($Times -eq 1) {",
-                "        $pattern = $null",
-                "        if ($element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {",
-                "            $pattern.Invoke()",
-                "            return",
-                "        }",
-                "        $toggle = $null",
-                "        if ($element.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {",
-                "            $toggle.Toggle()",
-                "            return",
-                "        }",
-                "        $select = $null",
-                "        if ($element.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$select)) {",
-                "            $select.Select()",
-                "            return",
-                "        }",
-                "    }",
-                "    $at = AppStudioPoint $element $RelX $RelY",
-                "    AppStudioClick $at[0] $at[1] $Button $Times",
+                "function AppStudioWheel {",
+                "    param([int]$X, [int]$Y, [int]$Delta)",
+                "    $at = AppStudioAbsolute $X $Y",
+                "    [AppStudioRun.Native]::Mouse(0x8001, $at[0], $at[1], 0)",
+                "    Start-Sleep -Milliseconds 40",
+                "    # mouseData carries a signed turn in an unsigned field.",
+                "    $data = if ($Delta -lt 0) { [uint32](4294967296 + $Delta) } else { [uint32]$Delta }",
+                "    [AppStudioRun.Native]::Mouse(0x0800, 0, 0, $data)",
                 "}",
                 "",
-                "function FocusElement {",
-                "    param([object[]]$Locators)",
-                "    $element = AppStudioResolve $Locators",
-                "    try { $element.SetFocus() } catch {",
-                "        AppStudioStop ('the keyboard could not be put back on this element: ' + $_.Exception.Message + '. Nothing was typed.')",
-                "    }",
-                "    Start-Sleep -Milliseconds 80",
-                "}",
-                "",
-                "function SetElementText {",
-                "    param([object[]]$Locators, [string]$Text)",
-                "    $element = AppStudioResolve $Locators",
-                "    if ($element.Current.IsPassword) {",
-                "        AppStudioStop 'this element is a password field. Writing into it from a script is refused.'",
-                "    }",
-                "    $value = $null",
-                "    if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value) -and -not $value.Current.IsReadOnly) {",
-                "        $value.SetValue($Text)",
-                "        return",
-                "    }",
-                "    try { $element.SetFocus() } catch {",
-                "        AppStudioStop ('this element publishes no way to set its text and the keyboard could not be put on it either: ' + $_.Exception.Message)",
-                "    }",
+                "function AppStudioDrag {",
+                "    param([int]$FromX, [int]$FromY, [int]$ToX, [int]$ToY)",
+                "    $from = AppStudioAbsolute $FromX $FromY",
+                "    $to = AppStudioAbsolute $ToX $ToY",
+                "    [AppStudioRun.Native]::Mouse(0x8001, $from[0], $from[1], 0)",
                 "    Start-Sleep -Milliseconds 60",
-                "    [System.Windows.Forms.SendKeys]::SendWait('^a')",
-                "    [System.Windows.Forms.SendKeys]::SendWait((AppStudioEscapeKeys $Text))",
+                "    [AppStudioRun.Native]::Mouse(0x8002, $from[0], $from[1], 0)",
+                "    Start-Sleep -Milliseconds 60",
+                "    [AppStudioRun.Native]::Mouse(0x8001, $to[0], $to[1], 0)",
+                "    Start-Sleep -Milliseconds 60",
+                "    [AppStudioRun.Native]::Mouse(0x8004, $to[0], $to[1], 0)",
                 "}",
-                "",
-                "function ReadElementText {",
-                "    param([object[]]$Locators)",
-                "    $element = AppStudioResolve $Locators",
-                "    if ($element.Current.IsPassword) { return $null }",
-                "    $value = $null",
-                "    if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$value)) { return $value.Current.Value }",
-                "    $textPattern = $null",
-                "    if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) { return $textPattern.DocumentRange.GetText(-1) }",
-                "    return $element.Current.Name",
-                "}",
-                "",
-                "function AppStudioEscapeKeys {",
-                "    param([string]$Text)",
-                "    if ($null -eq $Text) { return '' }",
-                "    $out = New-Object System.Text.StringBuilder",
-                "    foreach ($character in $Text.ToCharArray()) {",
-                "        if ('+^%~(){}[]'.IndexOf($character) -ge 0) { [void]$out.Append('{').Append($character).Append('}') }",
-                "        else { [void]$out.Append($character) }",
-                "    }",
-                "    return $out.ToString()",
-                "}",
-                "",
-                "function SendKeys {",
-                "    param([string]$Chord, [string]$Recorded)",
-                "    if ([string]::IsNullOrEmpty($Chord)) {",
-                "        AppStudioStop ('the recorded key \"' + $Recorded + '\" has no equivalent that can be sent from here, so nothing was sent.')",
-                "    }",
-                "    [System.Windows.Forms.SendKeys]::SendWait($Chord)",
-                "}",
-                "",
-                "function WaitGap {",
-                "    param([int]$Ms)",
-                "    $wait = $Ms",
-                "    if ($wait -lt 120) { $wait = 120 }",
-                "    if ($wait -gt 4000) { $wait = 4000 }",
-                "    Start-Sleep -Milliseconds $wait",
-                "}",
-                "",
-                "# Waits for the front window to stop changing, up to a stated ceiling.",
-                "# Reaching the ceiling is a measured wait, not a failure.",
-                "function WaitIdle {",
-                "    param([int]$BudgetMs = 2500)",
-                "    $watch = [Diagnostics.Stopwatch]::StartNew()",
-                "    $lastFront = [IntPtr]::Zero",
-                "    $stable = 0",
-                "    while ($watch.ElapsedMilliseconds -lt $BudgetMs) {",
-                "        $front = [AppStudioRun.Native]::GetForegroundWindow()",
-                "        if ($front -eq $lastFront) { $stable = $stable + 1 } else { $stable = 0 }",
-                "        $lastFront = $front",
-                "        if ($stable -ge 2) { break }",
-                "        Start-Sleep -Milliseconds 80",
-                "    }",
-                "    $watch.Stop()",
-                "}",
-                "",
-                "# A value the recording deliberately never kept. It is asked for here and",
-                "# it is never written to a file, a log or the console.",
-                "function AskSecret {",
-                "    param([object[]]$Locators, [string]$Prompt)",
-                "    $secure = Read-Host -Prompt $Prompt -AsSecureString",
-                "    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)",
-                "    try {",
-                "        $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)",
-                "        if ([string]::IsNullOrEmpty($plain)) { AppStudioStop 'no value was supplied for a step that needs one.' }",
-                "        $element = AppStudioResolve $Locators",
-                "        try { $element.SetFocus() } catch { }",
-                "        Start-Sleep -Milliseconds 60",
-                "        [System.Windows.Forms.SendKeys]::SendWait((AppStudioEscapeKeys $plain))",
-                "    } finally {",
-                "        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)",
-                "    }",
-                "}",
-                "",
-                "function Unsupported {",
-                "    param([string]$Reason)",
-                "    AppStudioStop $Reason",
-                "}",
-                "",
-                "#endregion",
                 ""
             };
-            for (int index = 0; index < lines.Length; index++) text.AppendLine(lines[index]);
         }
 
-        private static void Procedure(StringBuilder text, ScriptPlan plan)
-        {
-            text.AppendLine("#region the recorded procedure");
-            text.AppendLine();
-            for (int index = 0; index < plan.Ops.Count; index++)
-            {
-                ScriptOp op = plan.Ops[index];
-                text.AppendLine("# " + op.StepId + "  " + Comment(op.Headline));
-                text.AppendLine("$script:AppStudioStep = '" + Quote(op.StepId) + "'");
-                text.AppendLine(Line(op));
-                text.AppendLine();
-            }
-            text.AppendLine("#endregion");
-            text.AppendLine();
-            text.AppendLine("Write-Output 'The recorded procedure finished.'");
-        }
-
-        private static string Line(ScriptOp op)
-        {
-            if (op.Op == ScriptOp.FindWindow)
-            {
-                return "FindWindow -Class '" + Quote(op.WindowClass) + "' -Title '" + Quote(op.WindowTitle) + "'";
-            }
-            if (op.Op == ScriptOp.WaitGap)
-            {
-                return "WaitGap -Ms " + op.GapMs.ToString(CultureInfo.InvariantCulture);
-            }
-            if (op.Op == ScriptOp.WaitIdle)
-            {
-                return "WaitIdle -BudgetMs $SettleMs";
-            }
-            if (op.Op == ScriptOp.Unsupported)
-            {
-                return "Unsupported -Reason '" + Quote(op.Reason) + "'";
-            }
-            if (op.Op == ScriptOp.SendKeys)
-            {
-                return "SendKeys -Chord '" + Quote(SendKeysChord(op.Keys)) + "' -Recorded '" + Quote(op.Keys) + "'";
-            }
-            if (op.Op == ScriptOp.FocusElement)
-            {
-                return "FocusElement -Locators " + Locators(op.Locators);
-            }
-            if (op.Op == ScriptOp.SetElementText)
-            {
-                return "SetElementText -Locators " + Locators(op.Locators) + " -Text '" + Quote(op.Text) + "'";
-            }
-            if (op.Op == ScriptOp.AskSecret)
-            {
-                return "AskSecret -Locators " + Locators(op.Locators) + " -Prompt '" + Quote(SecretPrompt(op)) + "'";
-            }
-            if (op.Op == ScriptOp.ReadElementText)
-            {
-                return "ReadElementText -Locators " + Locators(op.Locators);
-            }
-            StringBuilder line = new StringBuilder();
-            line.Append("InvokeElement -Locators ").Append(Locators(op.Locators));
-            line.Append(" -Button '").Append(Quote(op.Button)).Append("'");
-            line.Append(" -Times ").Append(op.Times.ToString(CultureInfo.InvariantCulture));
-            line.Append(" -RelX ").Append(Number(op.RelX)).Append(" -RelY ").Append(Number(op.RelY));
-            if (op.WheelDelta != 0) line.Append(" -WheelDelta ").Append(op.WheelDelta.ToString(CultureInfo.InvariantCulture));
-            if (op.DropLocators != null && op.DropLocators.Count > 0)
-            {
-                line.Append(" -DropLocators ").Append(Locators(op.DropLocators));
-                line.Append(" -DropRelX ").Append(Number(op.DropRelX)).Append(" -DropRelY ").Append(Number(op.DropRelY));
-            }
-            return line.ToString();
-        }
+        // ---------- shared helpers ----------
 
         public static string SecretPrompt(ScriptOp op)
         {

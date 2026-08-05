@@ -39,7 +39,15 @@ namespace AppStudio
     {
         public static CheckResult Check(string language, string text)
         {
-            if (String.Equals(language, ScriptLanguages.Vba, StringComparison.Ordinal)) return CheckVba(text);
+            return Check(language, text, CodeModules.Workflow);
+        }
+
+        // Which module this is matters for VBA: only the workflow is expected to
+        // carry the entry point, and reporting a runtime module as missing one
+        // would be reporting a fault that is not there.
+        public static CheckResult Check(string language, string text, string moduleName)
+        {
+            if (String.Equals(language, ScriptLanguages.Vba, StringComparison.Ordinal)) return CheckVba(text, moduleName);
             return CheckPowerShell(text);
         }
 
@@ -98,6 +106,11 @@ namespace AppStudio
         // and cannot tell you the module is correct.
         public static CheckResult CheckVba(string text)
         {
+            return CheckVba(text, CodeModules.Workflow);
+        }
+
+        public static CheckResult CheckVba(string text, string moduleName)
+        {
             CheckResult result = new CheckResult();
             result.Method = "structural check only - there is no VBA compiler here";
             string body = text == null ? "" : text;
@@ -151,7 +164,10 @@ namespace AppStudio
             if (open > 0) result.Problems.Add(open.ToString(CultureInfo.InvariantCulture) + " Sub or Function is left open at the end of the module.");
             if (conditional != 0) result.Problems.Add("the #If and #End If lines do not balance.");
             if (!sawOptionExplicit) result.Problems.Add("Option Explicit is missing, so a mistyped name would be a silent empty variable.");
-            if (!sawEntryPoint) result.Problems.Add("there is no Sub RunRecordedProcedure to start from.");
+            if (!sawEntryPoint && CodeModules.IsWorkflow(moduleName))
+            {
+                result.Problems.Add("there is no Sub " + VbaGen.EntryPoint + " to start from.");
+            }
             result.Ok = result.Problems.Count == 0;
             result.Headline = result.Ok
                 ? "The module is structurally sound. This is not a compile: only a VBA host can tell you it builds."
@@ -216,6 +232,63 @@ namespace AppStudio
             }
         }
 
+        // The whole automation, not one file of it.
+        //
+        // A workflow on its own is a list of calls to a runtime that is not
+        // there. Every module of the language is written into the same folder
+        // and the workflow is the one that is started, exactly the way the
+        // operator would run it from the code folder.
+        public static RunResult RunPowerShellProject(List<CodeFile> modules, string folder, int timeoutMs)
+        {
+            RunResult result = new RunResult();
+            result.Method = "Windows PowerShell 5.1, separate process";
+            try
+            {
+                string entry = Write(modules, folder, ScriptLanguages.PowerShell);
+                if (entry == null)
+                {
+                    result.Problem = "There is no " + CodeModules.Workflow + " module to start from, so nothing was run.";
+                    return result;
+                }
+                result.Started = true;
+                ProcessResult run = Run(PowerShellPath(), "-NoProfile -ExecutionPolicy Bypass -STA -File \"" + entry + "\"", folder, timeoutMs);
+                result.ExitCode = run.ExitCode;
+                result.Output = (run.Output + (run.Error.Length > 0 ? Environment.NewLine + run.Error : "")).Trim();
+                if (run.TimedOut)
+                {
+                    result.Problem = "The script was still running after " + (timeoutMs / 1000).ToString(CultureInfo.InvariantCulture) +
+                        " seconds and was stopped. Whatever it had already done to the application has been done.";
+                    return result;
+                }
+                result.Ok = run.ExitCode == 0;
+                if (!result.Ok && result.Output.Length == 0) result.Problem = "The script exited with " + run.ExitCode.ToString(CultureInfo.InvariantCulture) + " and said nothing.";
+                return result;
+            }
+            catch (Exception exception)
+            {
+                result.Problem = exception.GetType().Name + ": " + exception.Message;
+                return result;
+            }
+        }
+
+        // Writes every module of one language side by side and answers with the
+        // path of the one a run starts from, or null when it is not there.
+        public static string Write(List<CodeFile> modules, string folder, string language)
+        {
+            Directory.CreateDirectory(folder);
+            string entry = null;
+            if (modules == null) return null;
+            for (int index = 0; index < modules.Count; index++)
+            {
+                CodeFile file = modules[index];
+                if (!String.Equals(file.Language, language, StringComparison.Ordinal)) continue;
+                string path = Path.Combine(folder, file.FileName);
+                File.WriteAllText(path, file.Text == null ? "" : file.Text, new UTF8Encoding(false));
+                if (file.IsWorkflow) entry = path;
+            }
+            return entry;
+        }
+
         // Running VBA needs a VBA host. Excel is the one that is normally
         // there, and it will only accept a module when the operator has trusted
         // access to the VBA project model. Every one of those conditions is
@@ -226,13 +299,13 @@ namespace AppStudio
         // that never returns - and a caller with no ceiling would wait for it
         // for ever. The work runs on its own apartment thread, the wait is
         // bounded, and the host this started is closed if it runs out of time.
-        public static RunResult RunVba(string text, string folder, string entryPoint, int timeoutMs)
+        public static RunResult RunVba(List<CodeFile> modules, string folder, string entryPoint, int timeoutMs)
         {
             RunResult carried = null;
             int[] hostProcess = new int[1];
             System.Threading.Thread worker = new System.Threading.Thread(delegate()
             {
-                carried = RunVbaCore(text, folder, entryPoint, hostProcess);
+                carried = RunVbaCore(modules, folder, entryPoint, hostProcess);
             });
             worker.IsBackground = true;
             worker.SetApartmentState(System.Threading.ApartmentState.STA);
@@ -280,7 +353,7 @@ namespace AppStudio
             }
         }
 
-        private static RunResult RunVbaCore(string text, string folder, string entryPoint, int[] hostProcess)
+        private static RunResult RunVbaCore(List<CodeFile> modules, string folder, string entryPoint, int[] hostProcess)
         {
             RunResult result = new RunResult();
             result.Method = "Excel as the VBA host, through late binding";
@@ -294,9 +367,12 @@ namespace AppStudio
                         "Import it into a VBA project on a machine that has one.";
                     return result;
                 }
-                Directory.CreateDirectory(folder);
-                string path = Path.Combine(folder, VbaGen.ModuleName + ".bas");
-                File.WriteAllText(path, text == null ? "" : text, new UTF8Encoding(false));
+                string entry = Write(modules, folder, ScriptLanguages.Vba);
+                if (entry == null)
+                {
+                    result.Problem = "There is no " + CodeModules.Workflow + " module to start from, so nothing was run.";
+                    return result;
+                }
                 result.Started = true;
                 excel = Activator.CreateInstance(type);
                 hostProcess[0] = ProcessOf(excel);
@@ -316,8 +392,15 @@ namespace AppStudio
                         "Nothing was run.";
                     return result;
                 }
+                // Every module goes in, not only the one that is started. A
+                // workflow imported on its own would not compile, and the error
+                // would be about a name rather than about the missing runtime.
                 object components = Get(project, "VBComponents");
-                Call(components, "Import", path);
+                for (int index = 0; index < modules.Count; index++)
+                {
+                    if (!String.Equals(modules[index].Language, ScriptLanguages.Vba, StringComparison.Ordinal)) continue;
+                    Call(components, "Import", Path.Combine(folder, modules[index].FileName));
+                }
                 // The module reports into a file rather than onto the screen,
                 // because a message box here would be a dialog behind an
                 // invisible window with nobody to close it.

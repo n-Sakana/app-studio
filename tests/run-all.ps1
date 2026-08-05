@@ -16,6 +16,7 @@ $tests = @(
     'test-report-states.ps1',
     'test-replay.ps1',
     'test-codegen.ps1',
+    'test-workflow-edit.ps1',
     'test-handoff.ps1',
     'test-intake.ps1',
     'test-diagnostics.ps1',
@@ -47,7 +48,8 @@ $realInputTests = @(
     'test-notepad-e2e.ps1',
     'test-calculator-e2e.ps1',
     'test-code-run-e2e.ps1',
-    'test-vba-host.ps1'
+    'test-vba-host.ps1',
+    'test-inspector.ps1'
 )
 if ($env:APPSTUDIO_ALLOW_REAL_INPUT -eq '1') {
     $tests += $realInputTests

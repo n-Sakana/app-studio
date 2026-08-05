@@ -8,9 +8,22 @@ $session=[AppStudio.SessionStore]::Create($temp,'record','handoff fixture')
 $session.ValuePolicy='recordText'
 $session.Environment=(New-Object AppStudio.JsonObject).Add('os',(New-Object AppStudio.JsonObject).Add('caption','Fixture OS'))
 $session.AddLimit('[uia] SCAN-TIMEOUT: the walk stopped after its allowance.')
+# The picture document is one of the two attachments, so the fixture has a real
+# picture in it. Without one there is no PDF, and the attachment check would be
+# passing on a session that could never be handed over.
+$shot=Join-Path $session.ShotsFolder 'S1.png'
+New-Item -ItemType Directory $session.ShotsFolder -Force|Out-Null
+$bitmap=New-Object Drawing.Bitmap(320,240)
+try{
+ $g=[Drawing.Graphics]::FromImage($bitmap)
+ try{$g.Clear([Drawing.Color]::White);$g.FillRectangle([Drawing.Brushes]::SteelBlue,20,20,120,60)}finally{$g.Dispose()}
+ $bitmap.Save($shot,[Drawing.Imaging.ImageFormat]::Png)
+}finally{$bitmap.Dispose()}
 $screen=New-Object AppStudio.ScreenRecord
 $screen.ScanId='sc-1';$screen.ScreenId='S1';$screen.Title='Fixture Window';$screen.ClassName='FixtureWindow';$screen.PdfPage=1
 $screen.Rect=New-Object AppStudio.RectValue;$screen.Rect.Width=900;$screen.Rect.Height=700
+$screen.ShotFile=$shot;$screen.CapturedAt=[DateTimeOffset]::Now;$screen.CaptureMethod='BitBlt'
+$screen.Sha256=(Get-FileHash $shot -Algorithm SHA256).Hash
 $session.Screens.Screens.Add($screen)
 $node=New-Object AppStudio.ScanNode
 $node.NodeId=1;$node.ScreenId='S1';$node.Name='Save';$node.ControlType='Button';$node.AutomationId='saveButton';$node.ClassName='Button';$node.CtrlId=1041
@@ -27,67 +40,94 @@ $project=[AppStudio.CodeProject]::Open($session)
 $requestId=[AppStudio.Handoff]::NewRequestId()
 if(-not[AppStudio.Handoff]::IsRequestId($requestId)){throw 'a freshly made request id is not accepted by its own reader'}
 if([AppStudio.Handoff]::IsRequestId('not-an-id')){throw 'anything at all is being accepted as a request id'}
+
+# The two files the request tells the assistant to read have to exist before it
+# is worth pasting anything, so they are written the way the product writes
+# them.
+$null=[AppStudio.Outputs]::WriteAll($session,6291456,$project)
+
 $result=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId)
 $text=$result.Text
 
-# One text carries all eight things. None of them is left for the operator to
-# fetch and paste themselves.
-foreach($section in @('## 1. What is being asked','## 2. How to answer','## 3. The operation vocabulary','## 4. The machine, the screens and the coordinate system','## 5. What the operator did','## 6. Windows and elements','## 7. What could not be obtained','## 8. The code as it stands')){
+# ---- one copy, one paste -----------------------------------------------------
+#
+# There is no such thing as a chunk here any more. The request is short because
+# what the assistant has to read is attached, so nothing has to be cut up and
+# nothing has to be pasted twice.
+if($result.PSObject.Properties.Name-contains'Chunks'){throw 'the request can still be cut into chunks'}
+if($result.PSObject.Properties.Name-contains'Split'){throw 'the request still knows how to split itself'}
+if($text.Contains('REQUEST 01 OF')-or$text.Contains(' REQUEST ')){throw 'the request still numbers itself as one of several'}
+if($text.Length-gt20000){throw ('the request is '+$text.Length+' characters, which is not a one paste request any more')}
+
+# ---- what is in it -----------------------------------------------------------
+foreach($section in @('## The two files attached with this message','## What is being asked','## The modules','## How to answer')){
  if(-not$text.Contains($section)){throw ('the request is missing the section '+$section)}
 }
 if(-not$text.Contains($requestId)){throw 'the request does not carry its own id'}
 if(-not$text.Contains('Make the save reliable.')){throw 'the request dropped what was being asked'}
-foreach($op in @('FindWindow','FocusElement','InvokeElement','SetElementText','ReadElementText','SendKeys','WaitGap','WaitIdle','AskSecret')){
- if(-not$text.Contains('`'+$op+'`')){throw ('the request does not describe the operation '+$op)}
+foreach($name in @('session.md','screens.pdf')){
+ if(-not$text.Contains($name)){throw ('the request does not name the attachment '+$name)}
 }
-# The return format is stated, in full, with the id already filled in.
+if(-not$text.Contains('section 10')){throw 'the request does not say where in the attachment the code is'}
+
+# ---- what is NOT in it -------------------------------------------------------
+#
+# The code, the log, the ledger and the limits belong to the attachment. Putting
+# them here as well is what made the request too long to paste in one go.
+if($text.Contains('SCAN-TIMEOUT')){throw 'the request embeds what could not be obtained instead of attaching it'}
+if($text.Contains('| A1 |')){throw 'the request embeds the action log'}
+if($text.Contains('| 420 |')){throw 'the request embeds the recorded intervals'}
+if($text.Contains('saveButton')){throw 'the request embeds the element ledger'}
+if($text.Contains('Set-StrictMode')){throw 'the request embeds the generated PowerShell'}
+if($text.Contains('Attribute VB_Name')){throw 'the request embeds the generated VBA'}
+if($text.Contains('```powershell')-or$text.Contains('```vb')){throw 'the request carries a code block of the automation'}
+
+# ---- the modules are named, so an answer can say which one it is --------------
+foreach($module in @('Workflow','RecordedFacts','RuntimeCore','RuntimeLocator','RuntimeNative')){
+ if(-not$text.Contains('`'+$module+'`')-and-not$text.Contains($module+'.ps1')){throw ('the request does not name the module '+$module)}
+}
+
+# ---- the return format, in full, with the id already filled in ---------------
 foreach($line in @('SUMMARY BEGIN','SUMMARY END','BEGIN powershell','END powershell','COMPLETE 1','PART 00 OF 03','NOCHANGE UNNECESSARY')){
  if(-not$text.Contains('#@APPSTUDIO '+$requestId+' '+$line)){throw ('the return format does not show '+$line)}
 }
+foreach($rule in @('one module per message','UNCLEAR','Do not offer choices and do not ask a question')){
+ if(-not$text.Contains($rule)){throw ('the return format dropped: '+$rule)}
+}
+
+# ---- the attachments are looked at, not assumed ------------------------------
+if($result.Attachments.Count-ne2){throw ('the request names '+$result.Attachments.Count+' attachments instead of 2')}
+if(-not$result.AttachmentsReady){throw ('the two files were written but the request says they are missing: '+$result.MissingText())}
+foreach($attachment in $result.Attachments){
+ if(-not$attachment.Exists){throw ($attachment.Name+' is not on disk')}
+ if($attachment.Bytes-le0){throw ($attachment.Name+' is empty')}
+}
+Remove-Item (Join-Path $session.AiFolder 'screens.pdf') -Force
+$gone=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId)
+if($gone.AttachmentsReady){throw 'a missing attachment was reported as ready'}
+if($gone.MissingText()-ne'screens.pdf'){throw ('the missing attachment was named as '+$gone.MissingText())}
+
+# ---- the code really is in the attachment ------------------------------------
+$markdown=[IO.File]::ReadAllText($session.SessionMdPath,(New-Object Text.UTF8Encoding($false)))
+if(-not$markdown.Contains('## 10. The automation as it stands')){throw 'session.md does not carry the automation'}
+foreach($module in @('Workflow.ps1','RecordedFacts.ps1','RuntimeCore.ps1','Workflow.bas','RuntimeCore.bas')){
+ if(-not$markdown.Contains($module)){throw ('session.md does not carry '+$module)}
+}
+foreach($op in @('FindWindow','FocusElement','InvokeElement','SetElementText','ReadElementText','SendKeys','WaitGap','WaitIdle','AskSecret')){
+ if(-not$markdown.Contains('`'+$op+'`')){throw ('session.md does not describe the operation '+$op)}
+}
 foreach($claim in @('Never press a remembered screen coordinate','physical screen pixels','not a proof of completeness')){
- if(-not$text.Contains($claim)){throw ('the request dropped the rule: '+$claim)}
+ if(-not$markdown.Contains($claim)){throw ('session.md dropped the rule: '+$claim)}
 }
-if(-not$text.Contains('SCAN-TIMEOUT')){throw 'the request dropped what could not be obtained'}
-if(-not$text.Contains('| A1 |')){throw 'the request dropped the action log'}
-if(-not$text.Contains('| 420 |')){throw 'the request dropped the recorded interval'}
-if(-not$text.Contains('Edit "Name"')){throw 'the request dropped what held the keyboard'}
-if(-not$text.Contains('saveButton')){throw 'the request dropped the element ledger'}
-if(-not$text.Contains('RecordedProcedure.ps1')){throw 'the request dropped the PowerShell as it stands'}
-if(-not$text.Contains('RecordedProcedure.bas')){throw 'the request dropped the VBA as it stands'}
+if(-not$markdown.Contains('Set-StrictMode')){throw 'session.md does not carry the PowerShell as it stands'}
+if(-not$markdown.Contains('Attribute VB_Name')){throw 'session.md does not carry the VBA as it stands'}
 
-# Short enough to paste in one go stays one copy.
-if($result.Split){throw 'a request that fits in one paste was split anyway'}
-if($result.Chunks.Count-ne1){throw ('a single request produced '+$result.Chunks.Count+' chunks')}
-if(-not$result.Chunks[0].StartsWith('#@APPSTUDIO '+$requestId+' REQUEST 01 OF 01')){throw 'the single chunk is not numbered'}
-
-# Too long to paste in one go is cut on line boundaries and numbered. Nothing is
-# dropped to make it fit.
-$long=New-Object Text.StringBuilder
-for($i=0;$i -lt 2400;$i++){[void]$long.AppendLine('# filler line '+$i+' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')}
-$project.SetText('powershell','RecordedProcedure',$long.ToString())
-$big=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId)
-if(-not$big.Split){throw 'a request far too long for one paste was not split'}
-$total=$big.Chunks.Count
-for($i=0;$i -lt $total;$i++){
- $head='#@APPSTUDIO '+$requestId+' REQUEST '+('{0:00}' -f ($i+1))+' OF '+('{0:00}' -f $total)
- if(-not$big.Chunks[$i].StartsWith($head)){throw ('chunk '+($i+1)+' is not numbered as '+$head)}
-}
-if(-not$big.Chunks[0].Contains('Read them all before answering')){throw 'the first part does not say to wait'}
-if(-not$big.Chunks[$total-1].Contains('That is the whole request')){throw 'the last part does not say it is the last'}
-$rejoined=New-Object Text.StringBuilder
-for($i=0;$i -lt $total;$i++){
- $lines=$big.Chunks[$i] -split "`r`n"
- for($j=0;$j -lt $lines.Count;$j++){
-  if($j-eq0){continue}
-  if($lines[$j].StartsWith('This request is being sent in ')){continue}
-  if($lines[$j].StartsWith('Continued. Part ')){continue}
-  if($lines[$j]-eq'That is the whole request. Answer now, in the shape section 2 describes.'){continue}
-  [void]$rejoined.AppendLine($lines[$j])
- }
-}
-$flat={param($s) ($s -replace "`r`n","" -replace "`n","" -replace " ","")}
-if((&$flat $rejoined.ToString()).Length -lt (&$flat $big.Text).Length){throw 'putting the parts back together loses text'}
-if(-not(&$flat $rejoined.ToString()).Contains((&$flat 'filler line 2399'))){throw 'the last of the text never reached any part'}
+# ---- the handover is still exactly two files ---------------------------------
+$aiFiles=@(Get-ChildItem $session.AiFolder -File)
+if($aiFiles.Count-ne1){throw 'the assistant folder changed shape while one file was deleted for the test'}
+$null=[AppStudio.Outputs]::WriteAll($session,6291456,$project)
+$aiFiles=@(Get-ChildItem $session.AiFolder -File)
+if($aiFiles.Count-ne2){throw ('the assistant folder holds '+$aiFiles.Count+' files instead of 2')}
 
 # The request is written beside the code, not into the assistant folder: that
 # folder is exactly two files and has to stay that way.
@@ -96,5 +136,5 @@ if($null-ne$problem){throw ('the request could not be written: '+$problem)}
 if(-not(Test-Path (Join-Path $project.Folder 'request.md'))){throw 'the request was not written beside the code'}
 if(Test-Path (Join-Path $session.AiFolder 'request.md')){throw 'the request was written into the two file assistant folder'}
 
-Write-Output ('PASS test-handoff bytes='+$text.Length+' chunks='+$total+' sections=8')
+Write-Output ('PASS test-handoff requestChars='+$text.Length+' copies=1 attachments=2 embeddedCode=0 sessionMdChars='+$markdown.Length)
 }finally{Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue}

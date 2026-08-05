@@ -323,6 +323,16 @@ namespace AppStudio
     {
         public static OutputSet WriteAll(StudioSession session, int pdfBudgetBytes)
         {
+            return WriteAll(session, pdfBudgetBytes, null);
+        }
+
+        // The automation, when there is one, goes into `session.md` with
+        // everything else. It is written again whenever the operator asks an
+        // assistant, so what is attached is what is on screen: an attachment
+        // that describes an older version of the code would have the assistant
+        // answering about something nobody has any more.
+        public static OutputSet WriteAll(StudioSession session, int pdfBudgetBytes, CodeProject project)
+        {
             OutputSet outputs = new OutputSet();
             if (session == null) return outputs;
             session.Omissions.Clear();
@@ -336,7 +346,7 @@ namespace AppStudio
             }
             for (int index = 0; index < outputs.Pdf.Notes.Count; index++) session.AddLimit(outputs.Pdf.Notes[index]);
             if (!outputs.Pdf.Written && outputs.Pdf.Problem != null) session.AddLimit(outputs.Pdf.Problem);
-            outputs.Markdown = SessionMd.Write(session, session.SessionMdPath, outputs.Pdf);
+            outputs.Markdown = SessionMd.Write(session, session.SessionMdPath, outputs.Pdf, project);
             if (!outputs.Markdown.Written && outputs.Markdown.Problem != null) session.AddLimit("session.md: " + outputs.Markdown.Problem);
             outputs.Report = Report.Write(session, session.ReportPath, outputs.Pdf);
             if (!outputs.Report.Written && outputs.Report.Problem != null) session.AddLimit("report.html: " + outputs.Report.Problem);

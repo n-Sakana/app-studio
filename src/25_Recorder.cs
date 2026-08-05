@@ -81,6 +81,14 @@ namespace AppStudio
 
         public event Action<RecorderStatus> Progress;
 
+        // Off unless the operator asked for it in the detailed settings. It
+        // draws over whatever they are recording, so it is never on by default.
+        public bool Inspect;
+        private const int InspectMinGapMs = 150;
+        private DateTime lastInspectAt = DateTime.MinValue;
+        private int lastInspectX = Int32.MinValue;
+        private int lastInspectY = Int32.MinValue;
+
         public Recorder(string baseDirectory, StudioSession studioSession, Acquire.ISurfaceGuard surfaceGuard, System.Windows.Threading.Dispatcher uiDispatcher)
         {
             baseDir = baseDirectory;
@@ -350,6 +358,7 @@ namespace AppStudio
                     else if (IsForeign(front)) currentWindow.Rect = front.Rect;
                     FollowFocus("the keyboard moved to another control", false);
                     ReportTick();
+                    InspectTick();
                 }
                 catch (Exception exception)
                 {
@@ -1262,6 +1271,40 @@ namespace AppStudio
                 if (snapshot.MsaaStatus != null && snapshot.MsaaStatus.State != "ok") step.Diagnostics.Add("msaa: " + snapshot.MsaaStatus.State);
                 if (snapshot.Win32Status != null && snapshot.Win32Status.State != "ok") step.Diagnostics.Add("win32: " + snapshot.Win32Status.State);
             }
+        }
+
+        // The optional inspector: a ring round whatever the pointer is over and
+        // a chip saying what it is.
+        //
+        // It is off unless the operator turned it on, it is only asked when the
+        // pointer has actually moved, and it is asked at most a few times a
+        // second. All three of those are about the same thing: this runs on the
+        // loop that must not fall behind, because a loop that falls behind loses
+        // presses, and losing a press to draw a decoration is not a trade worth
+        // making. Nothing here can throw and nothing here waits on the
+        // application being recorded.
+        private void InspectTick()
+        {
+            if (!Inspect || dispatcher == null) return;
+            RecordHud hud = guard as RecordHud;
+            if (hud == null) return;
+            NativeMethods.POINT point;
+            if (!NativeMethods.GetCursorPos(out point)) return;
+            DateTime now = DateTime.UtcNow;
+            bool moved = Math.Abs(point.X - lastInspectX) > 2 || Math.Abs(point.Y - lastInspectY) > 2;
+            if (!moved && (now - lastInspectAt).TotalMilliseconds < 700) return;
+            if ((now - lastInspectAt).TotalMilliseconds < InspectMinGapMs) return;
+            lastInspectAt = now;
+            lastInspectX = point.X;
+            lastInspectY = point.Y;
+            InspectFact fact = Inspector.At(point.X, point.Y, hud.OwnHandles);
+            int x = point.X;
+            int y = point.Y;
+            dispatcher.BeginInvoke(new Action(delegate
+            {
+                if (fact == null) hud.HideInspect();
+                else hud.ShowInspect(fact, x, y);
+            }));
         }
 
         private void UpdateFrame(RectValue rect)

@@ -47,6 +47,10 @@ namespace AppStudio
         public const double MicroSize = 11;
         public const double NumSize = 22;
         public const double BodyLine = 1.55;
+        // Code is read line by line and compared column by column, so it gets a
+        // size and a leading of its own rather than borrowing the body ones.
+        public const double CodeSize = 13;
+        public const double CodeLine = 18;
 
         // ---- fixed window metrics ----
         public const double TopbarHeight = 46;
@@ -109,6 +113,20 @@ namespace AppStudio
         public static SolidColorBrush SuccessText { get { return Get("SuccessText"); } }
         public static SolidColorBrush SuccessSoft { get { return Get("SuccessSoft"); } }
         public static SolidColorBrush Focus { get { return Get("Focus"); } }
+        // ---- code ----
+        // Reading code is a different job from reading a report, so it gets its
+        // own few colours rather than reusing the status ones. They are the same
+        // hues the rest of the window uses, so a screen full of code still looks
+        // like the same application.
+        public static SolidColorBrush CodeComment { get { return Get("CodeComment"); } }
+        public static SolidColorBrush CodeString { get { return Get("CodeString"); } }
+        public static SolidColorBrush CodeKeyword { get { return Get("CodeKeyword"); } }
+        public static SolidColorBrush CodeNumber { get { return Get("CodeNumber"); } }
+        public static SolidColorBrush CodeVariable { get { return Get("CodeVariable"); } }
+        public static SolidColorBrush CodeGutter { get { return Get("CodeGutter"); } }
+        public static SolidColorBrush CodeGutterText { get { return Get("CodeGutterText"); } }
+        public static SolidColorBrush CodeFindMark { get { return Get("CodeFindMark"); } }
+        public static SolidColorBrush SurfaceCode { get { return Get("SurfaceCode"); } }
 
         // ---- install / switch ----------------------------------------------
 
@@ -225,7 +243,9 @@ namespace AppStudio
                 "Danger", "DangerText", "DangerSoft",
                 "Caution", "CautionText", "CautionSoft",
                 "Success", "SuccessText", "SuccessSoft",
-                "Focus", "Shadow", "TopbarBackground"
+                "Focus", "Shadow", "TopbarBackground",
+                "CodeComment", "CodeString", "CodeKeyword", "CodeNumber", "CodeVariable",
+                "CodeGutter", "CodeGutterText", "CodeFindMark"
             };
         }
 
@@ -266,6 +286,18 @@ namespace AppStudio
             Set("Focus", dark ? "#79A9DC" : "#9DBBDE");
             Set("Shadow", dark ? "#00000073" : "#17202C1A");
             Set("TopbarBackground", dark ? "#1C2127" : "#FFFFFF");
+
+            // Code colours. Muted on purpose: the point is to tell a comment
+            // from a string at a glance, not to make the editor the loudest
+            // thing on the screen.
+            Set("CodeComment", dark ? "#6E7C88" : "#7A8791");
+            Set("CodeString", dark ? "#C08A5E" : "#9A5B28");
+            Set("CodeKeyword", dark ? "#7FA8D8" : "#2B5C96");
+            Set("CodeNumber", dark ? "#8FBF9B" : "#33704A");
+            Set("CodeVariable", dark ? "#C7A0CE" : "#7A4A85");
+            Set("CodeGutter", dark ? "#171B21" : "#F1F4F6");
+            Set("CodeGutterText", dark ? "#5A646E" : "#9AA4AC");
+            Set("CodeFindMark", dark ? "#4A4320" : "#FBEFC0");
 
             for (int index = 0; index < Installed.Count; index++) PublishBrushes(Installed[index]);
         }

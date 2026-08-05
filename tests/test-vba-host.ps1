@@ -26,25 +26,38 @@ try {
     $step.Locators.Add($locator)
     $session.Steps.Add($step)
     $project = [AppStudio.CodeProject]::Open($session)
-    $vba = $project.Find('vba', 'RecordedProcedure').Text
+    $modules = $project.Files('vba')
+    $vba = $project.Find('vba', 'Workflow').Text
 
-    $structure = [AppStudio.ScriptRun]::CheckVba($vba)
-    if (-not $structure.Ok) { throw ('the generated module is not structurally sound: ' + (($structure.Problems) -join ' / ')) }
-    if ($structure.Method -notmatch 'structural') { throw 'the structural check does not admit that it is only a structural check' }
+    if ($modules.Count -ne 5) { throw ('the automation is ' + $modules.Count + ' VBA modules instead of 5') }
+    foreach ($module in $modules) {
+        $structure = [AppStudio.ScriptRun]::CheckVba($module.Text, $module.Name)
+        if (-not $structure.Ok) { throw ('the generated ' + $module.FileName + ' is not structurally sound: ' + (($structure.Problems) -join ' / ')) }
+        if ($structure.Method -notmatch 'structural') { throw 'the structural check does not admit that it is only a structural check' }
+    }
     foreach ($entry in @('Public Sub RunRecordedProcedure()', 'Public Sub RunRecordedProcedureTo(', 'On Error GoTo Failed')) {
-        if ($vba.IndexOf($entry, [StringComparison]::Ordinal) -lt 0) { throw ('the module is missing ' + $entry) }
+        if ($vba.IndexOf($entry, [StringComparison]::Ordinal) -lt 0) { throw ('the workflow module is missing ' + $entry) }
     }
     # Every Declare has to name the entry point it actually calls. Without the
-    # alias the renamed one is looked for in the DLL and is never found.
-    foreach ($line in ($vba -split "`r`n")) {
-        if ($line -match '^\s*(Private|Public)\s+Declare' -and $line -notmatch '\sAlias\s') {
-            throw ('a Declare has no Alias, so its entry point cannot be found: ' + $line.Trim())
+    # alias the renamed one is looked for in the DLL and is never found. They
+    # live in the runtime module now, so every module is read rather than only
+    # the one that is started.
+    $declares = 0
+    foreach ($module in $modules) {
+        foreach ($line in ($module.Text -split "`r`n")) {
+            if ($line -match '^\s*(Private|Public)\s+Declare') {
+                $declares++
+                if ($line -notmatch '\sAlias\s') {
+                    throw ('a Declare has no Alias, so its entry point cannot be found: ' + $line.Trim())
+                }
+            }
         }
     }
+    if ($declares -lt 10) { throw ('only ' + $declares + ' Declare lines were found across the modules') }
 
     $before = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue).Count
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $result = [AppStudio.ScriptRun]::RunVba($vba, (Join-Path $temp 'run'), 'RunRecordedProcedure', 120000)
+    $result = [AppStudio.ScriptRun]::RunVba($modules, (Join-Path $temp 'run'), 'RunRecordedProcedure', 120000)
     $watch.Stop()
     if ($watch.ElapsedMilliseconds -gt 130000) { throw ('the host call was not bounded: ' + $watch.ElapsedMilliseconds + ' ms') }
 

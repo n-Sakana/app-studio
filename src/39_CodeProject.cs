@@ -14,10 +14,18 @@ namespace AppStudio
         public string Language;
         public string Name;
         public string Text = "";
+        // What this file is for. The screen shows it so nobody edits the
+        // machinery by accident and nobody goes looking for the procedure in it.
+        public string Role = CodeRoles.Runtime;
 
         public string FileName
         {
             get { return Name + "." + ScriptLanguages.Extension(Language); }
+        }
+
+        public bool IsWorkflow
+        {
+            get { return CodeModules.IsWorkflow(Name); }
         }
 
         public CodeFile Copy()
@@ -26,6 +34,7 @@ namespace AppStudio
             copy.Language = Language;
             copy.Name = Name;
             copy.Text = Text;
+            copy.Role = Role;
             return copy;
         }
     }
@@ -39,7 +48,9 @@ namespace AppStudio
     // silently.
     public sealed class CodeProject
     {
-        public const string GeneratedName = "RecordedProcedure";
+        // The module a person edits, and the one a run starts from. It is the
+        // same name in both languages.
+        public const string GeneratedName = CodeModules.Workflow;
 
         private readonly string folder;
         private readonly List<CodeFile> baseline = new List<CodeFile>();
@@ -70,22 +81,22 @@ namespace AppStudio
         {
             CodeProject project = new CodeProject(FolderFor(session));
             project.Plan = ScriptModel.Build(session);
-            project.baseline.Add(Generated(ScriptLanguages.PowerShell, PowerShellGen.Build(project.Plan, session)));
-            project.baseline.Add(Generated(ScriptLanguages.Vba, VbaGen.Build(project.Plan, session)));
+            Add(project.baseline, PowerShellGen.BuildFiles(project.Plan, session));
+            Add(project.baseline, VbaGen.BuildFiles(project.Plan, session));
             for (int index = 0; index < project.baseline.Count; index++) project.current.Add(project.baseline[index].Copy());
             project.Load();
             return project;
         }
 
-        private static CodeFile Generated(string language, string text)
+        private static void Add(List<CodeFile> into, List<CodeFile> files)
         {
-            CodeFile file = new CodeFile();
-            file.Language = language;
-            file.Name = GeneratedName;
-            file.Text = text;
-            return file;
+            for (int index = 0; index < files.Count; index++) into.Add(files[index]);
         }
 
+        // The files of one language, in the order they are meant to be read:
+        // the workflow first because it is the one that is edited, then what it
+        // reads, then the machinery. Anything an assistant added that is not one
+        // of the five known modules comes after them, in name order.
         public List<CodeFile> Files(string language)
         {
             List<CodeFile> found = new List<CodeFile>();
@@ -93,7 +104,24 @@ namespace AppStudio
             {
                 if (String.Equals(current[index].Language, language, StringComparison.Ordinal)) found.Add(current[index]);
             }
+            found.Sort(ByModuleOrder);
             return found;
+        }
+
+        private static int ByModuleOrder(CodeFile left, CodeFile right)
+        {
+            int a = CodeModules.Rank(left.Name);
+            int b = CodeModules.Rank(right.Name);
+            if (a != b) return a < b ? -1 : 1;
+            return String.Compare(left.Name, right.Name, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // The module a run starts from. An assistant may add files but it may
+        // not take the entry point away, and a project without one says so
+        // rather than running something else.
+        public CodeFile Entry(string language)
+        {
+            return Find(language, CodeModules.Workflow);
         }
 
         public List<CodeFile> All()
@@ -131,6 +159,7 @@ namespace AppStudio
                 file = new CodeFile();
                 file.Language = language;
                 file.Name = name;
+                file.Role = CodeRoles.Of(name);
                 current.Add(file);
             }
             file.Text = text == null ? "" : text;
@@ -268,8 +297,8 @@ namespace AppStudio
                 if (!Directory.Exists(saved)) return;
                 string[] paths = Directory.GetFiles(saved);
                 if (paths.Length == 0) return;
-                current.Clear();
                 Array.Sort(paths, StringComparer.OrdinalIgnoreCase);
+                List<CodeFile> read = new List<CodeFile>();
                 for (int index = 0; index < paths.Length; index++)
                 {
                     string extension = Path.GetExtension(paths[index]);
@@ -278,15 +307,45 @@ namespace AppStudio
                     CodeFile file = new CodeFile();
                     file.Language = language;
                     file.Name = Path.GetFileNameWithoutExtension(paths[index]);
+                    file.Role = CodeRoles.Of(file.Name);
                     file.Text = File.ReadAllText(paths[index]);
-                    current.Add(file);
+                    read.Add(file);
                 }
+                // A language is taken back from disk only when what was saved
+                // still has the module a run starts from. A folder written
+                // before the automation was split into modules holds one file
+                // under a name nothing calls any more, and loading it would put
+                // a workflow on screen with no runtime beside it. The freshly
+                // generated set is kept in that case, and it is a whole one.
+                Adopt(read, ScriptLanguages.PowerShell);
+                Adopt(read, ScriptLanguages.Vba);
             }
             catch
             {
                 // A code folder that cannot be read is not a reason to lose the
                 // freshly generated version, which is already in place.
             }
+        }
+
+        private void Adopt(List<CodeFile> read, string language)
+        {
+            bool hasEntry = false;
+            for (int index = 0; index < read.Count; index++)
+            {
+                if (String.Equals(read[index].Language, language, StringComparison.Ordinal) && read[index].IsWorkflow) hasEntry = true;
+            }
+            if (!hasEntry) return;
+            List<CodeFile> kept = new List<CodeFile>();
+            for (int index = 0; index < current.Count; index++)
+            {
+                if (!String.Equals(current[index].Language, language, StringComparison.Ordinal)) kept.Add(current[index]);
+            }
+            for (int index = 0; index < read.Count; index++)
+            {
+                if (String.Equals(read[index].Language, language, StringComparison.Ordinal)) kept.Add(read[index]);
+            }
+            current.Clear();
+            for (int index = 0; index < kept.Count; index++) current.Add(kept[index]);
         }
 
         public string Summary(string language)

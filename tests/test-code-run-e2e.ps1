@@ -90,11 +90,15 @@ try {
     [AppStudio.SessionStore]::WriteMeta($session)
 
     $project = [AppStudio.CodeProject]::Open($session)
-    $script = $project.Find('powershell', 'RecordedProcedure').Text
-    $parsed = [AppStudio.ScriptRun]::CheckPowerShell($script)
-    if (-not $parsed.Ok) { throw ('the generated PowerShell does not parse: ' + (($parsed.Problems) -join ' / ')) }
+    $modules = $project.Files('powershell')
+    if ($modules.Count -ne 5) { throw ('the automation is ' + $modules.Count + ' modules instead of 5') }
+    foreach ($module in $modules) {
+        $parsed = [AppStudio.ScriptRun]::CheckPowerShell($module.Text)
+        if (-not $parsed.Ok) { throw ('the generated ' + $module.FileName + ' does not parse: ' + (($parsed.Problems) -join ' / ')) }
+    }
 
-    $result = [AppStudio.ScriptRun]::RunPowerShell($script, (Join-Path $temp 'run'), 120000)
+    # The whole module set is what runs, not the workflow on its own.
+    $result = [AppStudio.ScriptRun]::RunPowerShellProject($modules, (Join-Path $temp 'run'), 120000)
     if (-not $result.Started) { throw ('the generated script was never started: ' + $result.Problem) }
     if ($null -ne $result.Problem) { throw ('the generated script stopped: ' + $result.Problem + "`n" + $result.Output) }
     if (-not $result.Ok) { throw ('the generated script failed with exit ' + $result.ExitCode + ":`n" + $result.Output) }
@@ -112,7 +116,47 @@ try {
         throw ('the button changed to something unexpected: ' + $afterButton)
     }
 
-    Write-Output ('PASS test-code-run-e2e field="' + $beforeField.Substring(0, 6) + '..." -> "' + $afterField + '" button="' + $beforeButton + '" -> "' + $afterButton + '" exit=' + $result.ExitCode)
+    # ---- taking one step out is deleting one line, on a real window ----------
+    #
+    # The claim the split is there for, checked against the application rather
+    # than against the text: remove the press from the workflow, leave every
+    # other module alone, and the button must stop being pressed while the field
+    # is still written.
+    $pressedOnce = $afterButton
+    $before = @{}
+    foreach ($module in $modules) { $before[$module.Name] = $module.Text }
+    $workflow = $project.Find('powershell', 'Workflow').Text
+    $kept = New-Object System.Collections.ArrayList
+    $removed = 0
+    foreach ($line in ($workflow -split "`r`n|`n")) {
+        if ($line -match "^\s*InvokeElement\s+'") { $removed++; continue }
+        [void]$kept.Add($line)
+    }
+    if ($removed -ne 1) { throw ('the press is ' + $removed + ' lines of the workflow instead of 1') }
+    $project.SetText('powershell', 'Workflow', ($kept -join "`r`n"))
+    $after = $project.Files('powershell')
+    $untouched = 0
+    foreach ($module in $after) {
+        if ($module.Name -eq 'Workflow') { continue }
+        if ($module.Text -ne $before[$module.Name]) { throw ($module.FileName + ' changed while one line was deleted from the workflow') }
+        $untouched++
+    }
+    if ($untouched -ne 4) { throw ('only ' + $untouched + ' modules were checked for being untouched') }
+
+    (By-Id $window 'CustomerCode').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
+    Start-Sleep -Milliseconds 300
+    $second = [AppStudio.ScriptRun]::RunPowerShellProject($after, (Join-Path $temp 'run2'), 120000)
+    if (-not $second.Ok) { throw ('the edited automation failed with exit ' + $second.ExitCode + ":`n" + $second.Output) }
+    Start-Sleep -Milliseconds 800
+    $secondButton = (By-Id $window 'FirstSave').Current.Name
+    $secondField = (By-Id $window 'CustomerCode').GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
+    if ($secondField -ne $wanted) { throw ('the step that was kept stopped working: the field holds "' + $secondField + '"') }
+    if ($secondButton -ne $pressedOnce) {
+        throw ('the deleted step still happened: the button went from "' + $pressedOnce + '" to "' + $secondButton + '"')
+    }
+
+    Write-Output ('PASS test-code-run-e2e modules=5 field="' + $beforeField.Substring(0, 6) + '..." -> "' + $afterField + '" button="' + $beforeButton + '" -> "' + $afterButton +
+        '" deletedLines=1 runtimeUntouched=' + $untouched + ' buttonAfterDeletion="' + $secondButton + '" exit=' + $result.ExitCode)
 } finally {
     if ($null -ne $fixture) { try { if (-not $fixture.HasExited) { $fixture.Kill() } } catch { } }
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue

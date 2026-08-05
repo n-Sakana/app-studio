@@ -79,22 +79,24 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `25_Recorder` | アプリ横断の記録。入力監視スレッドと記述スレッドの分離、生タイムライン、前面/フォーカス追跡、入力欄の値読み戻し |
 | `26_JsonReader` | JSON 読み取り |
 | `27_Picker` | 全画面の選択オーバーレイ |
-| `28_RecordHud` | 録画中の枠と停止コントロール。撮影前に画面から消えたことを自分で確かめる |
+| `28_RecordHud` | 録画中の枠と停止コントロール、および任意インスペクターの発光枠とチップ。撮影前に画面から消えたことを自分で確かめる。4窓とも自プロセスとして `OwnHandles` に出す |
 | `29_Replay` | 再生。ウィンドウ確認、フォーカス復帰、記録間隔の再現、解決、実行、試行列 |
 | `30_SessionMd` | AI へ渡す `session.md` |
 | `31_Screens` | 画面台帳と撮影 |
 | `32_Pdf` | 依存なしの PDF writer（無劣化 Flate と写真 DCT） |
 | `33_ScreensPdf` | AI へ渡す `screens.pdf` と容量予算 |
 | `34_Acquire` | 取得と撮影の共通処理、秘密欄の黒塗り、出力の書き出し口 |
-| `36_ScriptModel` | 録画 step を両言語共通の操作列へ落とす唯一の場所。PowerShell と VBA が同じ録画について食い違わない根拠 |
-| `37_PowerShellGen` | PowerShell の初期コード生成。UIA でウィンドウと要素を解決し、位置は要素矩形に対する割合で扱う |
-| `38_VbaGen` | VBA の初期コード生成。Win32 だけで届く範囲を書き、届かない step は理由付きで停止させる |
-| `39_CodeProject` | 生成版・現行版・取り込み直前版の3版保持と `runtime/sessions/<id>/code/` への保存・読み戻し |
-| `40_Handoff` | AI へ渡すテキスト1個の組み立てと、長い場合の番号付き分割 |
+| `36_ScriptModel` | 録画 step を両言語共通の操作列へ落とす唯一の場所。PowerShell と VBA が同じ録画について食い違わない根拠。`ScriptModel.Lines` が「1操作＝1行」の workflow 行列へ畳み、module 名と役割（`CodeModules` / `CodeRoles`）もここで決める |
+| `37_PowerShellGen` | PowerShell の初期コード生成。`Workflow` / `RecordedFacts` / `RuntimeCore` / `RuntimeLocator` / `RuntimeNative` の5 module を書く。UIA でウィンドウと要素を解決し、位置は要素矩形に対する割合で扱う |
+| `38_VbaGen` | VBA の初期コード生成。**同じ5 module 名**で書く。Win32 だけで届く範囲を書き、届かない step は workflow 上で `Unsupported` として理由付きで停止させる |
+| `39_CodeProject` | 生成版・現行版・取り込み直前版の3版保持と `runtime/sessions/<id>/code/` への保存・読み戻し。複数 module を module 順に並べ、`Workflow` を entry point として扱う |
+| `40_Handoff` | AI へ渡す依頼文1個の組み立て。**1回のコピー・1回の貼り付け**で、コード・操作ログ・台帳は入れず添付2ファイルへ回す。添付の実在検査もここ |
 | `41_Intake` | 返答の解析。request id 照合、BEGIN/END/COMPLETE/PART、装飾除去、拒否理由 |
 | `42_Diff` | 行単位の差分。反映前に何が変わるのかを見せるためだけに使う |
-| `43_CodeScreen` | コード編集画面。形式切替、検証、実行、AI への送りと受け、差分と復帰 |
-| `44_ScriptRun` | PowerShell の構文検証と実行、VBA の構造検証と VBA ホストでの実行 |
+| `43_CodeScreen` | コード編集画面。module tree、形式切替、通常／全画面編集の2 layout、検証、実行、AI への送りと受け、差分と復帰 |
+| `44_ScriptRun` | PowerShell の構文検証と module 一式での実行、VBA の構造検証（module 別）と VBA ホストへの全 module 取り込み実行 |
+| `45_CodeEditor` | コードを読み書きする箱。行番号、PowerShell/VBA の色分け、検索。色は透明前景の TextBox の背後へ描き、編集そのものは素の TextBox のまま保つ |
+| `46_Inspector` | 録画中の任意インスペクター用に、ポインタ下の1点を **Win32 だけで有界に**読む。UIA は使わない（数百 ms かかり、応答しないアプリで止まるため）。例外を投げず、読めなかったことを事実として返す |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
@@ -118,12 +120,14 @@ runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test 
 - `test-session-store`: 逐次追記の耐久性、実行中の読み戻し、round trip、一覧、壊れたフォルダの報告
 - `test-outputs`: 3出力の生成、**AI 添付がちょうど2ファイル**、PDF の xref 健全性、`session.md` の9節と base64 不在、HTML の外部参照0とエスケープ、容量予算（悪化する縮小段を採らないこと、効く場合は採ること、省略の明記）
 - `test-replay`: 経路 mode の意味、拒否の試行列、存在しないウィンドウ、許可なしの拒否、住所を持たない要素の拒否
-- `test-codegen`: 操作列の生成、PowerShell と VBA が**同じ9操作を持つこと**、住所を持たない step が黙って落ちず停止すること、UIA だけの要素を VBA が理由付きで断ること、位置が住所として書かれないこと、秘密が値ではなく問い合わせになること、生成 PowerShell が実際に parse できること、3版（生成・現行・直前）の保持と復帰
-- `test-handoff`: テキスト1個が8節すべてを持つこと、request id と返却形式が入ること、通常のセッションが**1回のコピーで収まること**、長すぎる場合だけ番号付きに分割され再結合で欠落しないこと、依頼テキストが `ai/` を2ファイルのまま保つこと
+- `test-codegen`: 操作列の生成、**両言語が同じ5 module 名で出ること**、PowerShell と VBA の runtime が**同じ9操作を持つこと**、workflow に住所・間隔・literal が漏れないこと、住所を持たない step が黙って落ちず停止すること、UIA だけの要素を VBA が理由付きで断ること、位置が住所として書かれないこと、秘密が値ではなく問い合わせになること、生成した全 module が parse／構造検査を通ること、runtime module に entry point を求めないこと、3版（生成・現行・直前）の保持と復帰
+- `test-workflow-edit`: **1〜9を順に押す録画から5だけ外す**変更が、Workflow の**1行削除**で済み、両言語とも残り8ステップになり、**Workflow 以外の8 module が byte 単位で無変更**であること、削除後も parse／構造検査を通り、module 一式として実行用に書き出せること
+- `test-handoff`: 依頼文が**1回のコピーで収まり分割機構を持たないこと**、依頼内容・添付2点を読む指示・module 一覧・返却形式・request id を持つこと、**コード・操作ログ・台帳・限界を埋め込まないこと**、添付2ファイルの実在を検査し欠けていれば名指しすること、コードが `session.md` の10節に入ること、依頼テキストが `ai/` を2ファイルのまま保つこと
 - `test-intake`: 正常系（1ファイル／複数ファイル／拒否）と20種の不正形、チャット装飾を剥がしても**本文は逐語**であること、PART の欠落・順不同・重複・総数不一致・内容衝突、再結合の順序、差分の増減行数
-- `test-code-ui`: 実 GUI を UI Automation で駆動し、結果画面からコード編集画面へ入ること、開いた瞬間に実行可能なコードが入っていること、PowerShell と VBA が同格に並ぶこと、**1回のコピー**で依頼文が出ること、**別の依頼への返答が理由付きで拒否され画面のコードが変わらないこと**、返答が差分として出てから反映されること、反映・取り消し・生成版への復帰、［← 戻る］が結果画面へ返ること
-- `test-code-run-e2e`: 生成した PowerShell を実際に走らせ、**fixture の状態が実際に変わること**を合格条件にする。スクリプトが最後まで走ったことではなく、対象アプリが変わったことを見る
-- `test-vba-host`: 生成した VBA を実際の VBA ホストへ取り込んで走らせる。ホストが無い／VBA プロジェクトへのアクセスが信頼されていない／走って停止した、の**どれであっても名指しで報告されること**を確認し、どれも「合格」に丸めない。あわせて全 `Declare` が `Alias` を持つこと、呼出しに上限があること、**ホストを残さないこと**を見る
+- `test-code-ui`: 実 GUI を UI Automation で駆動し、結果画面からコード編集画面へ入ること、開いた瞬間に実行可能なコードが入っていること、PowerShell と VBA が同格に並ぶこと、**module tree に両言語の5 module が出ること**、**全画面編集へ切り替えて戻っても編集中の内容と選択 module が失われないこと**、**1回のコピー**で依頼文が出ること、**別の依頼への返答が理由付きで拒否され画面のコードが変わらないこと**、返答が差分として出てから反映されること、反映・取り消し・生成版への復帰、［← 戻る］が結果画面へ返ること
+- `test-code-run-e2e`: 生成した PowerShell を **5 module 一式のまま**実際に走らせ、**fixture の状態が実際に変わること**を合格条件にする。スクリプトが最後まで走ったことではなく、対象アプリが変わったことを見る。あわせて **Workflow から1行消すと、その操作だけが実機で起きなくなり、runtime module は byte 単位で無変更のまま**であることを確認する
+- `test-inspector`: 録画中インスペクターを**実デスクトップの実 fixture 窓**に対して確認する。overlay が4窓とも App Studio 自身であること、**click-through で pointer 所有が fixture のままであること**（枠が押下を奪わない証明）、自分の窓を説明しないこと、撮影時に画面から消えること、OFF で消えること、**終了後に残留しないこと**。合わせて `tests/.build/inspector/inspector.png` に実描画を残す
+- `test-vba-host`: 生成した VBA を **5 module すべて**実際の VBA ホストへ取り込んで走らせる。ホストが無い／VBA プロジェクトへのアクセスが信頼されていない／走って停止した、の**どれであっても名指しで報告されること**を確認し、どれも「合格」に丸めない。あわせて全 `Declare` が `Alias` を持つこと、呼出しに上限があること、**ホストを残さないこと**を見る
 - `test-diagnostics` / `test-acq-diagnostics`: 診断 code が全投影へ届くこと、画像0のとき PDF 不在の理由が出ること
 - `test-hang-recovery`: 恒久 hang 20回、直後正常取得、resource/orphan/queue/UI
 - `test-live-basic`: Win32/WPF、deep tree、画像と黒塗り表明
@@ -160,6 +164,37 @@ fixture だけを build:
 
 `test-ui-flow` は実 GUI を起動し、**物理カーソルを動かさず UI Automation の pattern でボタンを押す**。App Studio 窓の画像が要るときだけ `APPSTUDIO_UI_SHOTS=1` を立てる（画像には利用者の窓一覧が写るため既定では撮らない）。
 
+## 独立した AI との往復を確かめる（blind end to end）
+
+`tests/blind-e2e.ps1` は、**この製品を知らない相手**が依頼文と添付2ファイルだけから答えられるか、そしてその答えを実 GUI が取り込めるかを確かめる手順である。実装者が「通る形」を書いて通すのは検証にならないので、**回答を書く側と、parser を書いた側を分ける**ことがこの手順の全部である。
+
+```powershell
+# 1. 実 GUI を動かし、利用者がクリップボードに得るのと同じ依頼文を作る。
+#    依頼文と添付2ファイルだけが inbox/ に出る。
+powershell -File tests/blind-e2e.ps1 -Phase request
+powershell -File tests/blind-e2e.ps1 -Phase request -Request '<利用者が書く依頼内容>'
+
+# 2. inbox/ の3ファイルだけを、この repository を見ていない相手へ渡す。
+#    渡してよいのは PASTED-INTO-THE-CHAT.md / session.md / screens.pdf の3つだけ。
+#    protocol の解説、正解例、source、期待出力を **渡さない**。
+#    返ってきた本文を一字も直さず raw-response-*.txt へ保存する。
+
+# 3. 実 GUI へその生返答を貼り、差分→反映→検証まで走らせる。
+powershell -File tests/blind-e2e.ps1 -Phase intake -Run <run> -Answer <file>
+# 分割返答は届いた順に、同じ画面へ続けて貼る（利用者の依頼送信は1回だけ）。
+powershell -File tests/blind-e2e.ps1 -Phase intake -Run <run> -Answer '<p00>,<p01>,<p02>'
+```
+
+`artifacts/blind-e2e/<run>/`（バージョン管理外）に残るもの: `inbox/` の3ファイルと SHA-256、`workflow-before.ps1`、無改変の `raw-response-*.txt`、`intake-*.txt`（貼付けごとの画面表示・判定・ハッシュ）、`workflow-after.ps1`。**何を改変していないかが hash で追える。** 端末固有情報と秘密は入らない（fixture の録画しか使わない）。
+
+request id は phase をまたいで script が持ち回らない。製品が `code.json` に保存し、セッションを開き直したときに読み戻す。だから **アプリを再起動しても古い返答は拒否できる**。
+
+**合否のどこが機械的で、どこがそうでないか。**
+
+- 機械的に判定できる: 依頼文が1ペーストに収まること、添付2ファイルが実在すること、返答が parse できること、request id が一致すること、分割の欠落・重複・総数不一致を検出すること、差分が反映前に出ること、反映後に parse が通ること、**どのモジュールが変わりどのモジュールが byte 単位で無変更か**。
+- 機械的に判定できない: AI が毎回同じ文面を返すこと。**返答内容は決定的ではない。** 同じ依頼でも、改修を返すか `NOCHANGE UNNECESSARY` を返すかは相手の判断であり、両方とも protocol 上正しい。したがってこの手順は「特定の出力が出ること」ではなく「**返ってきたものを製品が正しく扱えること**」を合格条件にする。`outcome=` は `applied` / `assistantRefused` / `partAccepted` / `notTakenIn` のどれかとして記録され、`notTakenIn` だけが失敗である。
+- 規定外の返答が来た場合、それ自体が証拠として `intake-*.txt` に残る。直して通すのではなく、依頼文・添付・protocol を直し、**それまでの失敗を知らない新しい相手**で再試験する。
+
 ## 出力を目で確かめる
 
 自動試験は `report.html` の外部参照0や `screens.pdf` の xref 健全性までは固定するが、**読めるかどうかは実際に開かないと分からない**。受け入れの前に、生成された `runtime/sessions/<id>/out/` の3ファイルを実ブラウザと実 PDF 表示で開き、表・画像・ページ番号・黒塗りを目で確認すること。
@@ -183,6 +218,8 @@ WP-S 成果は `artifacts/wp-s/<run>/` に出る。WP-S 文書の数値と製品
 - 色・余白・角丸・型スケールは `src/00_Theme.cs` の token だけを使う。`Color.FromRgb` や `Brushes.White` を UI コードへ直接書かない。
 - 画面は3形態。**ランチャ 660 x 356**（メニューと設定だけ、結果領域を持たない）、**結果画面 1120 x 840**（左レール＋詳細）、**コード編集画面 1120 x 840**（形式切替＋エディタ＋AI 相談）。いずれも topbar / progress track / 本体 / status bar の4帯。
 - コード編集画面は結果画面の［コード編集］からだけ入り、［← 戻る］は結果画面へ返す。ランチャへ一足飛びに戻さない。
+- コード編集画面は **module tree ＋ エディタ ＋ AI 相談** の3つを持ち、［全画面で編集］で **AI 相談を畳んでエディタが作業領域全部を使う layout** へ切り替える。OS のフルスクリーンにはしない。両 layout は**同じ editor object を持ち回す**ので、往復しても本文・選択 module・カーソル・スクロールが失われない。
+- エディタは行番号・等幅・PowerShell/VBA の色分け・検索を持つ。色は編集そのものに影響させない（透明前景の TextBox の背後に描く）ので、色付けが外れても本文は常に正しい。
 - **PowerShell と VBA は同じ大きさ・同じ位置・同じボタンで扱う。** 片方を既定にしたり、片方だけ「書き出し」の扱いにしたりしない。
 - 結果画面は上から **結論 → 数値 → 警告 → 次の一手 → 詳細** の順。結論は状態チップ＋1文で、主語と結果が曖昧にならないこと。
 - **折り畳みは1段だけ。** 折り畳みを開いた先に折り畳みを置かない。開いた先は平らな一覧を持つ1つのスクロール箱にする。

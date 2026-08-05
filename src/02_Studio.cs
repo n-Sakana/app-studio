@@ -66,6 +66,8 @@ namespace AppStudio
         private string valuePolicy = Privacy.PolicyRecordText;
         private int pdfBudgetKb = ScreensPdf.DefaultBudgetBytes / 1024;
         private CheckBox writeSwitch;
+        private CheckBox inspectSwitch;
+        private bool inspectEnabled;
 
         public StudioWindow(string directory, JsonObject startupDiagnostics, int autoCloseMs)
         {
@@ -226,6 +228,7 @@ namespace AppStudio
                     return;
                 }
                 codeScreen = new CodeScreen(this, current, project, Say, AskRunConsent);
+                codeScreen.PdfBudgetBytes = delegate { return pdfBudgetKb * 1024; };
                 codeSessionId = current.Id;
             }
             ApplyMode(ModeCode);
@@ -666,6 +669,14 @@ namespace AppStudio
             item.SetResourceReference(StyleProperty, "AppListItem");
             item.Content = stack;
             item.Tag = session;
+            // Without this every row in the list is announced as
+            // "System.Windows.Controls.ListBoxItem", which tells somebody
+            // reading the screen through an assistive tool - or through UI
+            // Automation - nothing at all about which session it is. The id is
+            // in it because two recordings made a minute apart otherwise read
+            // exactly alike.
+            System.Windows.Automation.AutomationProperties.SetName(item,
+                title.Text + "   " + (session.Id == null ? "" : session.Id) + "   " + meta.Text);
             return item;
         }
 
@@ -986,6 +997,18 @@ namespace AppStudio
             writeSwitch.Unchecked += delegate { writeEnabled = false; };
             body.Children.Add(PermissionBox(writeSwitch, Text("settings-write-note.txt", "Replay presses buttons and types into the applications on this machine.")));
 
+            // Off by default, because it draws over whatever is being recorded.
+            // It is click-through, so it cannot take a press that was meant for
+            // the application, and it is one of this product's own windows, so
+            // it never reaches a picture or the recording.
+            inspectSwitch = PermissionSwitch(Text("settings-inspect.txt", "Show what is under the pointer while recording"),
+                Text("settings-inspect-note.txt", "Outlines the control under the pointer and names it. It cannot be clicked and is never recorded."));
+            inspectSwitch.IsChecked = inspectEnabled;
+            inspectSwitch.Checked += delegate { inspectEnabled = true; ApplyInspect(); };
+            inspectSwitch.Unchecked += delegate { inspectEnabled = false; ApplyInspect(); };
+            body.Children.Add(PermissionBox(inspectSwitch,
+                Text("settings-inspect-note.txt", "Outlines the control under the pointer and names it. It cannot be clicked and is never recorded.")));
+
             if (!String.IsNullOrEmpty(hotkeyNotice))
             {
                 body.Children.Add(FieldLabel(Text("settings-hotkeys.txt", "Global keys")));
@@ -1164,6 +1187,7 @@ namespace AppStudio
             hud.ShowControl();
             recorder = new Recorder(baseDir, session, hud, Dispatcher);
             recorder.SetExcludedHandles(hud.OwnHandles);
+            recorder.Inspect = inspectEnabled;
             recorder.Progress += OnRecorderProgress;
             busy = true;
             busyLabel = Text("busy-record.txt", "Recording");
@@ -1673,6 +1697,14 @@ namespace AppStudio
             expander.Content = content;
             System.Windows.Automation.AutomationProperties.SetName(expander, caption);
             return expander;
+        }
+
+        // Turning the inspector off has to take it off the screen now, not at
+        // the end of the recording.
+        private void ApplyInspect()
+        {
+            if (recorder != null) recorder.Inspect = inspectEnabled;
+            if (!inspectEnabled && hud != null) hud.HideInspect();
         }
 
         private CheckBox PermissionSwitch(string label, string accessibleNote)

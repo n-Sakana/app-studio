@@ -26,6 +26,18 @@ namespace AppStudio
 
         public static SessionMdResult Write(StudioSession session, string path, ScreensPdfResult pdf)
         {
+            return Write(session, path, pdf, null);
+        }
+
+        // The automation goes in here rather than into the request text.
+        //
+        // The request the operator pastes into a chat says what is wanted and
+        // how to answer, and nothing else; everything the assistant has to read
+        // is attached, and this is the file it is attached in. Keeping the code
+        // here is also what keeps the handover exactly two files: there is no
+        // third attachment for the code and there is no second paste.
+        public static SessionMdResult Write(StudioSession session, string path, ScreensPdfResult pdf, CodeProject project)
+        {
             SessionMdResult result = new SessionMdResult();
             result.Path = path;
             StringBuilder text = new StringBuilder();
@@ -41,6 +53,7 @@ namespace AppStudio
                 Replay(text, session);
                 Coverage(text, session, pdf);
                 Guidance(text, session);
+                Automation(text, project);
                 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path)));
                 File.WriteAllText(path, text.ToString(), new UTF8Encoding(false));
                 result.Written = true;
@@ -433,6 +446,97 @@ namespace AppStudio
                     "Anything built on coordinates alone will break when the window moves or the layout changes; say so rather than presenting it as reliable.");
             }
             text.AppendLine();
+        }
+
+        // 10. The automation as it stands, whole, in both languages.
+        //
+        // This is what an assistant is asked to change, so it is here in full
+        // rather than in the message the operator pastes. The vocabulary and the
+        // rules are here too, beside the code they are about.
+        private static void Automation(StringBuilder text, CodeProject project)
+        {
+            text.AppendLine("## 10. The automation as it stands");
+            text.AppendLine();
+            if (project == null)
+            {
+                text.AppendLine("No automation has been generated for this session yet. It is written when the code screen is opened.");
+                text.AppendLine();
+                return;
+            }
+            List<CodeFile> files = project.All();
+            if (files.Count == 0)
+            {
+                text.AppendLine("No automation has been generated for this session yet.");
+                text.AppendLine();
+                return;
+            }
+            text.AppendLine("PowerShell and VBA are two spellings of one automation here. Neither is the real");
+            text.AppendLine("one with the other translated from it: both are written from the same list of");
+            text.AppendLine("steps, so they cannot disagree about what the recording meant.");
+            text.AppendLine();
+            text.AppendLine("Each language is five modules with the same five names:");
+            text.AppendLine();
+            text.AppendLine("| module | what it is for | edited by hand |");
+            text.AppendLine("|---|---|---|");
+            text.AppendLine("| `" + CodeModules.Workflow + "` | the recorded procedure. One line is one thing the operator did | yes, this is the one |");
+            text.AppendLine("| `" + CodeModules.RecordedFacts + "` | the addresses, the intervals and the text the recording captured | only to change what a step aims at |");
+            text.AppendLine("| `" + CodeModules.RuntimeCore + "` | the nine operations, the waiting and the stopping | no |");
+            text.AppendLine("| `" + CodeModules.RuntimeLocator + "` | turning a recorded address back into the element on screen now | no |");
+            text.AppendLine("| `" + CodeModules.RuntimeNative + "` | the declarations and the pointer | no |");
+            text.AppendLine();
+            text.AppendLine("The split is the point. Taking one step out of the procedure is deleting one line");
+            text.AppendLine("of `" + CodeModules.Workflow + "`, and the other four modules are not touched at all. Do not");
+            text.AppendLine("undo it by moving the machinery back into the workflow.");
+            text.AppendLine();
+            text.AppendLine("### The operations, shared by PowerShell and VBA");
+            text.AppendLine();
+            text.AppendLine("Both languages define the same nine operations. They are the whole surface an");
+            text.AppendLine("automation built from this recording is expected to use. Keep the names and the");
+            text.AppendLine("meanings; add helpers around them if you need to.");
+            text.AppendLine();
+            text.AppendLine("| operation | meaning |");
+            text.AppendLine("|---|---|");
+            text.AppendLine("| `FindWindow` | wait until exactly one window matches the recorded class and title, and bring it to the front. More than one match stops the run. |");
+            text.AppendLine("| `FocusElement` | put the keyboard on the element the recording says held it. |");
+            text.AppendLine("| `InvokeElement` | press the element. A pattern it publishes is preferred; synthetic input is the fallback and needs the window in front. |");
+            text.AppendLine("| `SetElementText` | write text into the element. Refused on a password field. |");
+            text.AppendLine("| `ReadElementText` | read the element back, to check an effect. |");
+            text.AppendLine("| `SendKeys` | send one recorded chord, after the keyboard has been put back. |");
+            text.AppendLine("| `WaitGap` | wait the interval the operator left, clamped to 120 ms - 4000 ms. |");
+            text.AppendLine("| `WaitIdle` | wait for the front window to stop changing, up to a stated ceiling. |");
+            text.AppendLine("| `AskSecret` | a value the recording deliberately never kept. Ask the operator; never write it anywhere. |");
+            text.AppendLine();
+            text.AppendLine("A line of the workflow names one of these and the id of a step. The wait before");
+            text.AppendLine("that step, putting the keyboard back where the recording had it, and settling");
+            text.AppendLine("afterwards are done by the runtime around that one line, which is why one step is");
+            text.AppendLine("one line and why deleting the line deletes the wait with it.");
+            text.AppendLine();
+            text.AppendLine("Rules that may not be traded away for convenience:");
+            text.AppendLine();
+            text.AppendLine("- **Never press a remembered screen coordinate.** An element is found again by its locators, in");
+            text.AppendLine("  the order they are listed. A place inside an element is a fraction of that element's rectangle");
+            text.AppendLine("  as it is now, never a stored point on the desktop.");
+            text.AppendLine("- A locator that matches more than one element decides nothing. Try the next one; when they are");
+            text.AppendLine("  all spent, stop and say so.");
+            text.AppendLine("- Window handles and process ids in this file are from the recorded run and mean nothing later.");
+            text.AppendLine("- A secret is asked for at the moment it is needed and is never written to a file or a log.");
+            text.AppendLine("- Do not swallow a failure. Stopping with a reason is a result; carrying on regardless is not.");
+            text.AppendLine();
+            text.AppendLine("VBA reaches controls through Win32 only: a class name with a dialog control id, or a class name");
+            text.AppendLine("with its index. Where the recording has no such address the VBA workflow says so at that point");
+            text.AppendLine("with `Unsupported`. Do not replace those with coordinates.");
+            text.AppendLine();
+            for (int index = 0; index < files.Count; index++)
+            {
+                CodeFile file = files[index];
+                text.AppendLine("### " + file.Language + " / " + file.FileName + " (" +
+                    CodeProject.LineCount(file.Text).ToString(CultureInfo.InvariantCulture) + " lines)");
+                text.AppendLine();
+                text.AppendLine("```" + (String.Equals(file.Language, ScriptLanguages.Vba, StringComparison.Ordinal) ? "vb" : "powershell"));
+                text.AppendLine(file.Text == null ? "" : file.Text.TrimEnd());
+                text.AppendLine("```");
+                text.AppendLine();
+            }
         }
 
         private static string AppNameFor(StudioSession session, ScreenRecord screen)

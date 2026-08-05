@@ -19,14 +19,21 @@ namespace AppStudio
     {
         private readonly Window frame;
         private readonly Window control;
+        private readonly Window glow;
+        private readonly Window chip;
         private readonly TextBlock clock;
         private readonly TextBlock dot;
+        private readonly TextBlock chipText;
         private readonly Button stop;
         private IntPtr frameHandle;
         private IntPtr controlHandle;
+        private IntPtr glowHandle;
+        private IntPtr chipHandle;
         private bool suppressed;
         private bool frameWanted;
         private RectValue frameRect;
+        private bool inspectWanted;
+        private RectValue inspectRect;
 
         public event Action StopRequested;
 
@@ -97,20 +104,65 @@ namespace AppStudio
             shell.Child = row;
             control.Content = shell;
 
+            // The inspector. Two more windows of this application, both of them
+            // click-through: the operator is recording, and a ring drawn round
+            // what they are about to press must not be the thing that gets
+            // pressed. They are in OwnHandles like everything else here, so they
+            // are excluded from the foreground tracking and taken off the screen
+            // before any picture is made.
+            glow = CreatePassiveWindow();
+            Border outer = new Border();
+            outer.BorderBrush = new SolidColorBrush(Color.FromArgb(70, 58, 160, 255));
+            outer.BorderThickness = new Thickness(4);
+            outer.CornerRadius = new CornerRadius(3);
+            outer.Background = Brushes.Transparent;
+            Border inner = new Border();
+            inner.BorderBrush = new SolidColorBrush(Color.FromArgb(190, 58, 160, 255));
+            inner.BorderThickness = new Thickness(2);
+            inner.CornerRadius = new CornerRadius(2);
+            inner.Background = new SolidColorBrush(Color.FromArgb(26, 58, 160, 255));
+            outer.Child = inner;
+            glow.Content = outer;
+
+            chip = CreatePassiveWindow();
+            chipText = new TextBlock();
+            chipText.Foreground = Brushes.White;
+            chipText.FontFamily = Theme.UiFont;
+            chipText.FontSize = 12;
+            chipText.TextWrapping = TextWrapping.NoWrap;
+            Border chipShell = new Border();
+            chipShell.Background = new SolidColorBrush(Color.FromArgb(226, 16, 22, 30));
+            chipShell.BorderBrush = new SolidColorBrush(Color.FromArgb(190, 58, 160, 255));
+            chipShell.BorderThickness = new Thickness(1);
+            chipShell.CornerRadius = new CornerRadius(Theme.RadiusSm);
+            chipShell.Padding = new Thickness(Theme.Space3, Theme.Space1, Theme.Space3, Theme.Space1);
+            chipShell.Child = chipText;
+            chip.Content = chipShell;
+
             frameHandle = new WindowInteropHelper(frame).EnsureHandle();
             controlHandle = new WindowInteropHelper(control).EnsureHandle();
+            glowHandle = new WindowInteropHelper(glow).EnsureHandle();
+            chipHandle = new WindowInteropHelper(chip).EnsureHandle();
             MakePassive(frameHandle, true);
             MakePassive(controlHandle, false);
+            MakePassive(glowHandle, true);
+            MakePassive(chipHandle, true);
         }
 
         public long[] OwnHandles
         {
-            get { return new long[] { frameHandle.ToInt64(), controlHandle.ToInt64() }; }
+            get { return new long[] { frameHandle.ToInt64(), controlHandle.ToInt64(), glowHandle.ToInt64(), chipHandle.ToInt64() }; }
         }
 
         public bool Hidden
         {
-            get { return !WindowTools.IsVisible(frameHandle.ToInt64()) && !WindowTools.IsVisible(controlHandle.ToInt64()); }
+            get
+            {
+                return !WindowTools.IsVisible(frameHandle.ToInt64()) &&
+                    !WindowTools.IsVisible(controlHandle.ToInt64()) &&
+                    !WindowTools.IsVisible(glowHandle.ToInt64()) &&
+                    !WindowTools.IsVisible(chipHandle.ToInt64());
+            }
         }
 
         public void ShowControl()
@@ -128,6 +180,77 @@ namespace AppStudio
                 ((int)elapsed.TotalMinutes).ToString("00", CultureInfo.InvariantCulture) + ":" +
                 elapsed.Seconds.ToString("00", CultureInfo.InvariantCulture);
             OnUi(new Action(delegate { clock.Text = text; }), false);
+        }
+
+        // What is under the pointer, or nothing. Called from the recording
+        // thread on its own poll; a fact that could not be read is shown as one
+        // rather than leaving the last one up as if it were still true.
+        public void ShowInspect(InspectFact fact, int pointerX, int pointerY)
+        {
+            InspectFact copy = fact;
+            int px = pointerX;
+            int py = pointerY;
+            OnUi(new Action(delegate
+            {
+                if (copy == null || !copy.Known)
+                {
+                    inspectWanted = false;
+                    inspectRect = null;
+                    ApplyInspect(px, py);
+                    return;
+                }
+                inspectWanted = true;
+                inspectRect = copy.Rect;
+                chipText.Text = copy.Chip();
+                ApplyInspect(px, py);
+            }), false);
+        }
+
+        public void HideInspect()
+        {
+            OnUi(new Action(delegate
+            {
+                inspectWanted = false;
+                inspectRect = null;
+                ApplyInspect(0, 0);
+            }), false);
+        }
+
+        private void ApplyInspect(int pointerX, int pointerY)
+        {
+            if (suppressed) return;
+            if (!inspectWanted || inspectRect == null)
+            {
+                glow.Hide();
+                chip.Hide();
+                NativeMethods.ShowWindow(glowHandle, NativeMethods.SW_HIDE);
+                NativeMethods.ShowWindow(chipHandle, NativeMethods.SW_HIDE);
+                return;
+            }
+            if (!glow.IsVisible) glow.Show();
+            if (!chip.IsVisible) chip.Show();
+            NativeMethods.SetWindowPos(glowHandle, new IntPtr(-1), inspectRect.X, inspectRect.Y,
+                Math.Max(1, inspectRect.Width), Math.Max(1, inspectRect.Height),
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+
+            // The chip sits just below the pointer, and is nudged back onto
+            // whichever display the pointer is on rather than being allowed to
+            // run off the edge of it.
+            chip.Measure(new Size(1200, 200));
+            int width = (int)Math.Ceiling(chip.DesiredSize.Width) + 2;
+            int height = (int)Math.Ceiling(chip.DesiredSize.Height) + 2;
+            if (width < 40) width = 40;
+            if (height < 18) height = 18;
+            System.Drawing.Rectangle bounds =
+                System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point(pointerX, pointerY)).WorkingArea;
+            int x = pointerX + 18;
+            int y = pointerY + 24;
+            if (x + width > bounds.Right) x = bounds.Right - width;
+            if (y + height > bounds.Bottom) y = pointerY - height - 12;
+            if (x < bounds.Left) x = bounds.Left;
+            if (y < bounds.Top) y = bounds.Top;
+            NativeMethods.SetWindowPos(chipHandle, new IntPtr(-1), x, y, width, height,
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
         }
 
         public void FollowWindow(RectValue rect)
@@ -160,14 +283,24 @@ namespace AppStudio
                 {
                     frame.Hide();
                     control.Hide();
+                    glow.Hide();
+                    chip.Hide();
                     NativeMethods.ShowWindow(frameHandle, NativeMethods.SW_HIDE);
                     NativeMethods.ShowWindow(controlHandle, NativeMethods.SW_HIDE);
+                    NativeMethods.ShowWindow(glowHandle, NativeMethods.SW_HIDE);
+                    NativeMethods.ShowWindow(chipHandle, NativeMethods.SW_HIDE);
                 }
                 else
                 {
                     control.Show();
                     PlaceControl();
                     ApplyFrame();
+                    // The inspector does not come back on its own after a
+                    // picture: it comes back on the next poll, with what is
+                    // under the pointer then rather than what was under it
+                    // before the shutter.
+                    inspectWanted = false;
+                    inspectRect = null;
                 }
             }), true);
         }
@@ -198,10 +331,15 @@ namespace AppStudio
             return Contains(controlHandle, x, y);
         }
 
+        // Every window this made is closed, including the two the inspector
+        // draws. Something left on top of somebody's desktop after a recording
+        // has finished is not a small fault.
         public void Dispose()
         {
             try { frame.Close(); } catch { }
             try { control.Close(); } catch { }
+            try { glow.Close(); } catch { }
+            try { chip.Close(); } catch { }
         }
 
         private void ApplyFrame()

@@ -16,9 +16,18 @@ namespace AppStudio
     // with the same buttons; neither is the real one with the other offered as
     // an export.
     //
+    // The automation is five modules per language now, so this screen has a tree
+    // of them and says which one is on screen and what it is for. It also has a
+    // second layout: the same editor with the whole work area to itself, for
+    // when reading the code is the job rather than one of three things on a
+    // screen. Both layouts hold the same editor object, so moving between them
+    // cannot lose what was typed, where the caret was or how far down it was
+    // scrolled.
+    //
     // Talking to an assistant is part of this screen rather than a mode of its
-    // own. One button copies the request, one button takes an answer in, and
-    // what comes back is shown as a difference before anything is replaced.
+    // own. One button copies the request - once, whole - one button opens the
+    // folder holding the two files to attach with it, and one takes an answer
+    // in. What comes back is shown as a difference before anything is replaced.
     public sealed class CodeScreen
     {
         private readonly Window owner;
@@ -27,24 +36,34 @@ namespace AppStudio
         private readonly Action<string, string> say;
         private readonly Func<bool> askRunConsent;
 
-        private readonly TextBox editor = new TextBox();
+        private readonly CodeEditor editor = new CodeEditor();
         private readonly TextBox requestBox = new TextBox();
         private readonly TextBlock stateLine = new TextBlock();
         private readonly TextBlock languageNote = new TextBlock();
+        private readonly TextBlock moduleLine = new TextBlock();
         private readonly TextBlock intakeLine = new TextBlock();
+        private readonly TextBlock attachLine = new TextBlock();
         private readonly StackPanel diffHost = new StackPanel();
-        private readonly ComboBox fileBox = new ComboBox();
+        private readonly TreeView tree = new TreeView();
         private readonly Button copyButton = new Button();
         private Button psButton;
         private Button vbaButton;
+        private Button fullButton;
+
+        // The picture budget lives in the settings dialog, which this screen
+        // does not own. It is asked for rather than copied, so changing it there
+        // reaches the attachment written here.
+        public Func<int> PdfBudgetBytes;
 
         private HandoffResult handoff;
-        private int nextChunk;
+        private bool copied;
+        private bool folderOpened;
         private IntakeParts parts = new IntakeParts();
         private List<IntakeFile> pending;
         private List<FileDiff> pendingDiff;
-        private string currentFile = CodeProject.GeneratedName;
+        private string currentFile = CodeModules.Workflow;
         private bool loading;
+        private bool full;
         private Grid root;
         // Nothing is written back from the editor until the editor has been
         // filled at least once. Without this the first pass writes an empty box
@@ -59,6 +78,12 @@ namespace AppStudio
             project = codeProject;
             say = status;
             askRunConsent = runConsent;
+            editor.Changed = delegate
+            {
+                if (loading) return;
+                Remember();
+                PaintState();
+            };
         }
 
         public CodeProject Project { get { return project; } }
@@ -91,7 +116,13 @@ namespace AppStudio
                 Detach(root);
                 return root;
             }
-            root = BuildBody();
+            root = new Grid();
+            root.Margin = new Thickness(Theme.Space5, Theme.Space4, Theme.Space5, Theme.Space4);
+            Compose();
+            ShowLanguage(project.Language);
+            // The status bar still holds whatever the last screen said. Left
+            // alone it tells somebody looking at code to start a recording.
+            Say(Text("code-opened.txt", "The recording, as code."), null);
             return root;
         }
 
@@ -114,37 +145,93 @@ namespace AppStudio
             if (holder != null) holder.Content = null;
         }
 
-        private Grid BuildBody()
+        private static void Release(UIElement child)
         {
-            Grid body = new Grid();
-            body.RowDefinitions.Add(AutoRow());
-            body.RowDefinitions.Add(StarRow());
-            body.RowDefinitions.Add(AutoRow());
-            body.Margin = new Thickness(Theme.Space5, Theme.Space4, Theme.Space5, Theme.Space4);
+            if (child == null) return;
+            Detach(child);
+        }
+
+        // ---------- the two layouts ----------
+
+        // Laying the screen out again, keeping every control that holds state.
+        // The editor, the tree, the request box and the difference are the same
+        // objects in both layouts; only where they sit changes.
+        private void Compose()
+        {
+            double scroll = ready ? editor.VerticalOffset : 0;
+            double across = ready ? editor.HorizontalOffset : 0;
+            int caret = ready ? editor.CaretIndex : 0;
+
+            // Every control that carries state is the same object in both
+            // layouts, and WPF refuses to give an element a second parent. They
+            // are taken out of the layout they were in before the next one is
+            // built; rebuilding them instead would throw away the text, the
+            // selection and the difference that is waiting to be read.
+            Release(stateLine);
+            Release(languageNote);
+            Release(moduleLine);
+            Release(tree);
+            Release(requestBox);
+            Release(copyButton);
+            Release(attachLine);
+            Release(intakeLine);
+            Release(diffHost);
+
+            root.Children.Clear();
+            root.RowDefinitions.Clear();
+            root.RowDefinitions.Add(AutoRow());
+            root.RowDefinitions.Add(StarRow());
 
             UIElement head = Head();
             Grid.SetRow(head, 0);
-            body.Children.Add(head);
+            root.Children.Add(head);
 
-            UIElement editorCard = Editor();
-            Grid.SetRow(editorCard, 1);
-            body.Children.Add(editorCard);
+            UIElement work = Work();
+            Grid.SetRow(work, 1);
+            root.Children.Add(work);
 
-            // The editor may never be squeezed out of existence by whatever the
-            // assistant sent back. The editor keeps a floor and the assistant
-            // keeps a ceiling and scrolls inside it, so both are always on
-            // screen whatever arrives.
-            body.RowDefinitions[1].MinHeight = 200;
-            ScrollViewer assistantScroll = new ScrollViewer();
-            assistantScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            assistantScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-            assistantScroll.MaxHeight = 340;
-            assistantScroll.Content = Assistant();
-            Grid.SetRow(assistantScroll, 2);
-            body.Children.Add(assistantScroll);
+            if (!full)
+            {
+                root.RowDefinitions.Add(AutoRow());
+                // The editor keeps a floor and the assistant keeps a ceiling, so
+                // both are always on screen whatever arrives. The two together
+                // have to leave room for each other: a floor plus a ceiling that
+                // add up to more than the window has is not a layout, it is two
+                // controls both being clipped, which is what it looked like when
+                // the numbers were 200 and 340.
+                root.RowDefinitions[1].MinHeight = 160;
+                ScrollViewer assistantScroll = new ScrollViewer();
+                assistantScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+                assistantScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+                assistantScroll.MaxHeight = 244;
+                assistantScroll.Content = Assistant();
+                Grid.SetRow(assistantScroll, 2);
+                root.Children.Add(assistantScroll);
+            }
 
-            ShowLanguage(project.Language);
-            return body;
+            PaintFullButton();
+            // The language buttons are made fresh by Head(), so which one is
+            // chosen has to be said again. Without this both come back looking
+            // like the one that is not on screen.
+            PaintSwitcher();
+            if (!ready) return;
+            // Put the operator back where they were. The editor is the same
+            // control, so the text and the selection came across on their own;
+            // the scroll offset is the one thing a re-parent drops.
+            editor.CaretIndex = caret;
+            owner.Dispatcher.BeginInvoke(new Action(delegate { editor.ScrollTo(scroll, across); }),
+                System.Windows.Threading.DispatcherPriority.Loaded);
+        }
+
+        private void ToggleFull()
+        {
+            Remember();
+            full = !full;
+            Compose();
+            editor.FocusEditor();
+            Say(full
+                ? Text("code-full-on.txt", "The editor has the whole window. Press the same button to bring the rest back.")
+                : Text("code-full-off.txt", "The rest of the screen is back."), null);
         }
 
         // ---------- the top: what this is, in which language, and what can be done to it ----------
@@ -164,11 +251,19 @@ namespace AppStudio
             DockPanel.SetDock(switcher, Dock.Left);
             line.Children.Add(switcher);
 
+            fullButton = new Button();
+            fullButton.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonCompact");
+            fullButton.MinWidth = 132;
+            fullButton.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            fullButton.Click += delegate { ToggleFull(); };
+            DockPanel.SetDock(fullButton, Dock.Right);
+            line.Children.Add(fullButton);
+
             stateLine.FontSize = Theme.BodySize;
             stateLine.FontWeight = FontWeights.SemiBold;
             stateLine.Foreground = Theme.Text;
             stateLine.VerticalAlignment = VerticalAlignment.Center;
-            stateLine.Margin = new Thickness(Theme.Space4, 0, 0, 0);
+            stateLine.Margin = new Thickness(Theme.Space4, 0, Theme.Space4, 0);
             stateLine.TextWrapping = TextWrapping.Wrap;
             line.Children.Add(stateLine);
             stack.Children.Add(line);
@@ -191,13 +286,21 @@ namespace AppStudio
             return Card(stack);
         }
 
-        private Button LanguageButton(string label, string language)
+        private void PaintFullButton()
+        {
+            if (fullButton == null) return;
+            fullButton.Content = full
+                ? Text("code-full-exit.txt", "Leave full width editing")
+                : Text("code-full-enter.txt", "Edit at full width");
+        }
+
+        private Button LanguageButton(string label, string languageName)
         {
             Button button = new Button();
             button.Content = label;
             button.MinWidth = 132;
             button.Margin = new Thickness(0, 0, Theme.Space2, 0);
-            button.Click += delegate { ShowLanguage(language); };
+            button.Click += delegate { ShowLanguage(languageName); };
             return button;
         }
 
@@ -210,53 +313,72 @@ namespace AppStudio
             vbaButton.SetResourceReference(FrameworkElement.StyleProperty, ps ? "AppButtonCompact" : "AppButtonPrimary");
         }
 
-        // ---------- the editor ----------
+        // ---------- the work area: which module, and the module ----------
 
-        private UIElement Editor()
+        private UIElement Work()
         {
             Grid grid = new Grid();
-            grid.RowDefinitions.Add(AutoRow());
-            grid.RowDefinitions.Add(StarRow());
+            grid.ColumnDefinitions.Add(FixedColumn(244));
+            grid.ColumnDefinitions.Add(StarColumn());
 
-            DockPanel header = new DockPanel();
-            header.Margin = new Thickness(0, 0, 0, Theme.Space2);
-            fileBox.SetResourceReference(FrameworkElement.StyleProperty, "AppComboBox");
-            fileBox.Width = 320;
-            fileBox.HorizontalAlignment = HorizontalAlignment.Left;
-            fileBox.SelectionChanged += delegate
-            {
-                if (loading) return;
-                ComboBoxItem item = fileBox.SelectedItem as ComboBoxItem;
-                if (item == null) return;
-                Remember();
-                currentFile = Convert.ToString(item.Tag, CultureInfo.InvariantCulture);
-                LoadEditor();
-            };
-            DockPanel.SetDock(fileBox, Dock.Left);
-            header.Children.Add(fileBox);
-            grid.Children.Add(header);
+            Border rail = new Border();
+            rail.Background = Theme.Surface;
+            rail.BorderBrush = Theme.Border;
+            rail.BorderThickness = new Thickness(1);
+            rail.CornerRadius = new CornerRadius(Theme.RadiusMd);
+            rail.Padding = new Thickness(Theme.Space2);
+            rail.Margin = new Thickness(0, 0, Theme.Space3, Theme.Space3);
+            TextBlock railHead = new TextBlock();
+            railHead.Text = Text("code-modules.txt", "Modules");
+            railHead.FontSize = Theme.LabelSize;
+            railHead.FontWeight = FontWeights.SemiBold;
+            railHead.Foreground = Theme.TextSub;
+            railHead.Margin = new Thickness(Theme.Space2, Theme.Space1, Theme.Space2, Theme.Space2);
+            tree.BorderThickness = new Thickness(0);
+            tree.Background = System.Windows.Media.Brushes.Transparent;
+            tree.FontSize = Theme.LabelSize;
+            System.Windows.Automation.AutomationProperties.SetName(tree, Text("code-modules.txt", "Modules"));
+            // Ten modules do not fit in a short window, and a list that is
+            // simply cut off at the bottom hides the other language.
+            ScrollViewer railScroll = new ScrollViewer();
+            railScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            railScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            railScroll.Content = tree;
+            Grid railGrid = new Grid();
+            railGrid.RowDefinitions.Add(AutoRow());
+            railGrid.RowDefinitions.Add(StarRow());
+            Grid.SetRow(railHead, 0);
+            Grid.SetRow(railScroll, 1);
+            railGrid.Children.Add(railHead);
+            railGrid.Children.Add(railScroll);
+            rail.Child = railGrid;
+            Grid.SetColumn(rail, 0);
+            grid.Children.Add(rail);
 
-            editor.SetResourceReference(FrameworkElement.StyleProperty, "AppTextBox");
-            editor.FontFamily = Theme.CodeFont;
-            editor.FontSize = Theme.MetaSize;
-            editor.AcceptsReturn = true;
-            editor.AcceptsTab = true;
-            editor.TextWrapping = TextWrapping.NoWrap;
-            editor.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            editor.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
-            editor.VerticalContentAlignment = VerticalAlignment.Top;
-            editor.MinHeight = 240;
-            editor.TextChanged += delegate
-            {
-                if (loading) return;
-                Remember();
-                PaintState();
-            };
-            System.Windows.Automation.AutomationProperties.SetName(editor, Text("code-editor-name.txt", "The automation, as code"));
-            Grid.SetRow(editor, 1);
-            grid.Children.Add(editor);
+            Grid pane = new Grid();
+            pane.RowDefinitions.Add(AutoRow());
+            pane.RowDefinitions.Add(StarRow());
+            moduleLine.FontSize = Theme.MetaSize;
+            moduleLine.Foreground = Theme.TextMuted;
+            moduleLine.TextWrapping = TextWrapping.Wrap;
+            moduleLine.Margin = new Thickness(0, 0, 0, Theme.Space2);
+            Grid.SetRow(moduleLine, 0);
+            pane.Children.Add(moduleLine);
+            UIElement box = editor.Build();
+            Grid.SetRow(box, 1);
+            pane.Children.Add(box);
 
-            return Card(grid);
+            Border card = new Border();
+            card.Background = Theme.Surface;
+            card.BorderBrush = Theme.Border;
+            card.BorderThickness = new Thickness(1);
+            card.CornerRadius = new CornerRadius(Theme.RadiusMd);
+            card.Padding = new Thickness(Theme.Space4);
+            card.Margin = new Thickness(0, 0, 0, Theme.Space3);
+            card.Child = pane;
+            Grid.SetColumn(card, 1);
+            grid.Children.Add(card);
+            return grid;
         }
 
         // ---------- the assistant ----------
@@ -266,7 +388,7 @@ namespace AppStudio
             StackPanel stack = new StackPanel();
             stack.Children.Add(Heading(Text("code-ai-title.txt", "Ask an assistant")));
             stack.Children.Add(Note(Text("code-ai-note.txt",
-                "One text and one picture document go out. The text carries the request, the recording, the ledger and the code as it stands.")));
+                "The request is one copy and one paste. It carries what you are asking for and how to answer; the code, the recording and the ledger are in the two files you attach with it.")));
 
             requestBox.SetResourceReference(FrameworkElement.StyleProperty, "AppTextBox");
             requestBox.AcceptsReturn = true;
@@ -274,22 +396,34 @@ namespace AppStudio
             requestBox.Height = 56;
             requestBox.Margin = new Thickness(0, Theme.Space2, 0, 0);
             requestBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            requestBox.Text = Text("code-ai-request-default.txt",
-                "Make this run reliably against the recorded application. Keep every safety rule in section 3.");
+            if (requestBox.Text.Length == 0)
+            {
+                requestBox.Text = Text("code-ai-request-default.txt",
+                    "Make this run reliably against the recorded application. Keep every safety rule in section 10 of the attached file.");
+            }
             System.Windows.Automation.AutomationProperties.SetName(requestBox, Text("code-ai-request-name.txt", "What to ask for"));
             stack.Children.Add(requestBox);
 
+            // The order is the order of the job: copy the request, open the
+            // folder holding what goes with it, then bring the answer back.
             WrapPanel row = new WrapPanel();
             row.Margin = new Thickness(0, Theme.Space3, 0, 0);
             copyButton.Content = Text("code-ai-copy.txt", "Copy the request");
-            copyButton.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonPrimary");
             copyButton.Margin = new Thickness(0, 0, Theme.Space2, Theme.Space2);
             copyButton.Click += delegate { CopyRequest(); };
             row.Children.Add(copyButton);
+            Button(row, Text("code-ai-folder.txt", "Open the folder with the two files to attach"), delegate { OpenAttachments(); }, false);
             Button(row, Text("code-ai-paste.txt", "Take the answer in from the clipboard"), delegate { TakeIn(); }, false);
             Button(row, Text("code-ai-restart.txt", "Start the intake again"), delegate { RestartIntake(); }, false);
-            Button(row, Text("code-ai-pdf.txt", "The picture document"), delegate { Open(session == null ? null : session.ScreensPdfPath); }, false);
             stack.Children.Add(row);
+            PaintCopy();
+
+            attachLine.FontSize = Theme.MetaSize;
+            attachLine.TextWrapping = TextWrapping.Wrap;
+            attachLine.Foreground = Theme.TextMuted;
+            attachLine.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            stack.Children.Add(attachLine);
+            PaintAttachments();
 
             intakeLine.FontSize = Theme.MetaSize;
             intakeLine.TextWrapping = TextWrapping.Wrap;
@@ -303,7 +437,45 @@ namespace AppStudio
             return Card(stack);
         }
 
-        // ---------- language and file state ----------
+        // Says which two files go with the request and whether they are on disk.
+        // A request that names an attachment nobody can attach is a request that
+        // cannot be answered, and that is worth knowing before it is pasted.
+        private void PaintAttachments()
+        {
+            List<HandoffAttachment> attachments = Handoff.Build(session, project, "", Handoff.NewRequestId()).Attachments;
+            StringBuilder text = new StringBuilder();
+            text.Append(folderOpened
+                ? Text("code-ai-attach-opened.txt", "The folder is open. These are the two files to attach")
+                : Text("code-ai-attach.txt", "Attach these two files with the request"));
+            text.Append(": ");
+            bool missing = false;
+            for (int index = 0; index < attachments.Count; index++)
+            {
+                if (index != 0) text.Append("   ");
+                HandoffAttachment attachment = attachments[index];
+                text.Append(attachment.Name).Append(" ");
+                if (attachment.Exists)
+                {
+                    text.Append("(").Append(Kb(attachment.Bytes)).Append(")");
+                }
+                else
+                {
+                    missing = true;
+                    text.Append("- ").Append(Text("code-ai-attach-missing.txt", "not written yet"));
+                }
+            }
+            attachLine.Text = text.ToString();
+            attachLine.Foreground = missing ? Theme.CautionText : Theme.TextMuted;
+        }
+
+        private static string Kb(long bytes)
+        {
+            long kb = bytes / 1024;
+            if (kb < 1) kb = 1;
+            return kb.ToString(CultureInfo.InvariantCulture) + " KB";
+        }
+
+        // ---------- language, module and file state ----------
 
         // Redraws from what the project now holds. Switching language keeps
         // whatever was typed, but putting a different version in place must not:
@@ -315,31 +487,111 @@ namespace AppStudio
             ShowLanguage(project.Language);
         }
 
-        private void ShowLanguage(string language)
+        private void ShowLanguage(string languageName)
         {
             Remember();
-            project.Language = language;
-            PaintSwitcher();
-            loading = true;
-            fileBox.Items.Clear();
-            List<CodeFile> files = project.Files(language);
-            int selected = 0;
+            project.Language = languageName;
+            List<CodeFile> files = project.Files(languageName);
+            bool here = false;
             for (int index = 0; index < files.Count; index++)
             {
-                ComboBoxItem item = new ComboBoxItem();
-                item.Content = files[index].FileName;
-                item.Tag = files[index].Name;
-                fileBox.Items.Add(item);
-                if (String.Equals(files[index].Name, currentFile, StringComparison.OrdinalIgnoreCase)) selected = index;
+                if (String.Equals(files[index].Name, currentFile, StringComparison.OrdinalIgnoreCase)) here = true;
             }
-            if (fileBox.Items.Count > 0)
-            {
-                fileBox.SelectedIndex = selected;
-                ComboBoxItem chosen = fileBox.SelectedItem as ComboBoxItem;
-                if (chosen != null) currentFile = Convert.ToString(chosen.Tag, CultureInfo.InvariantCulture);
-            }
-            fileBox.Visibility = fileBox.Items.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+            if (!here && files.Count > 0) currentFile = files[0].Name;
+            PaintSwitcher();
+            PaintTree();
+            LoadEditor();
+        }
+
+        // Both languages are in the tree, both open, in the order the modules
+        // are meant to be read. Choosing one is choosing a language and a module
+        // in one move; the two buttons above do the same thing for whoever is
+        // already looking at them.
+        private void PaintTree()
+        {
+            loading = true;
+            tree.Items.Clear();
+            AddLanguage(ScriptLanguages.PowerShell, Text("code-lang-ps.txt", "PowerShell"));
+            AddLanguage(ScriptLanguages.Vba, Text("code-lang-vba.txt", "VBA"));
             loading = false;
+        }
+
+        private void AddLanguage(string languageName, string label)
+        {
+            TreeViewItem head = new TreeViewItem();
+            head.Header = label;
+            head.IsExpanded = true;
+            head.FontWeight = FontWeights.SemiBold;
+            head.Foreground = Theme.TextSub;
+            List<CodeFile> files = project.Files(languageName);
+            for (int index = 0; index < files.Count; index++)
+            {
+                CodeFile file = files[index];
+                TreeViewItem item = new TreeViewItem();
+                item.Header = ModuleHeader(file);
+                item.FontWeight = FontWeights.Normal;
+                item.Foreground = Theme.Text;
+                item.Tag = file.Language + "/" + file.Name;
+                System.Windows.Automation.AutomationProperties.SetName(item, file.FileName);
+                item.Selected += delegate(object sender, RoutedEventArgs args)
+                {
+                    args.Handled = true;
+                    if (loading) return;
+                    Choose(file.Language, file.Name);
+                };
+                if (String.Equals(file.Language, project.Language, StringComparison.Ordinal) &&
+                    String.Equals(file.Name, currentFile, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.IsSelected = true;
+                }
+                head.Items.Add(item);
+            }
+            tree.Items.Add(head);
+        }
+
+        private UIElement ModuleHeader(CodeFile file)
+        {
+            StackPanel stack = new StackPanel();
+            stack.MaxWidth = 178;
+            TextBlock name = new TextBlock();
+            name.Text = file.FileName;
+            name.FontSize = Theme.LabelSize;
+            name.Foreground = Theme.Text;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            stack.Children.Add(name);
+            TextBlock role = new TextBlock();
+            role.Text = RoleWord(file.Role) + "  " +
+                CodeProject.LineCount(file.Text).ToString(CultureInfo.InvariantCulture) + " " + Text("code-lines.txt", "lines");
+            role.FontSize = Theme.MicroSize;
+            role.Foreground = file.IsWorkflow ? Theme.AccentText : Theme.TextMuted;
+            // The rail is narrow on purpose, so the second line wraps rather
+            // than being cut off in the middle of the line count.
+            role.TextWrapping = TextWrapping.Wrap;
+            role.Margin = new Thickness(0, 1, 0, Theme.Space1);
+            stack.Children.Add(role);
+            return stack;
+        }
+
+        private static string RoleWord(string role)
+        {
+            if (String.Equals(role, CodeRoles.Workflow, StringComparison.Ordinal))
+            {
+                return Messages.Text("code-role-workflow.txt", "the procedure - edit this one");
+            }
+            if (String.Equals(role, CodeRoles.Recorded, StringComparison.Ordinal))
+            {
+                return Messages.Text("code-role-recorded.txt", "what the recording saw");
+            }
+            return Messages.Text("code-role-runtime.txt", "runtime");
+        }
+
+        private void Choose(string languageName, string name)
+        {
+            Remember();
+            bool switched = !String.Equals(languageName, project.Language, StringComparison.Ordinal);
+            project.Language = languageName;
+            currentFile = name;
+            if (switched) PaintSwitcher();
             LoadEditor();
         }
 
@@ -347,10 +599,31 @@ namespace AppStudio
         {
             loading = true;
             CodeFile file = project.Find(project.Language, currentFile);
+            editor.SetLanguage(project.Language);
             editor.Text = file == null ? "" : file.Text;
             loading = false;
             ready = true;
+            PaintModuleLine(file);
             PaintState();
+        }
+
+        private void PaintModuleLine(CodeFile file)
+        {
+            if (file == null)
+            {
+                moduleLine.Text = Text("code-module-none.txt", "This module is not in the project.");
+                moduleLine.Foreground = Theme.CautionText;
+                return;
+            }
+            StringBuilder text = new StringBuilder();
+            text.Append(file.FileName).Append("   ").Append(RoleWord(file.Role));
+            if (file.IsWorkflow)
+            {
+                text.Append("   ").Append(Text("code-workflow-hint.txt",
+                    "one line is one step - deleting a line takes that step out and leaves the other modules alone"));
+            }
+            moduleLine.Text = text.ToString();
+            moduleLine.Foreground = file.IsWorkflow ? Theme.AccentText : Theme.TextMuted;
         }
 
         private void Remember()
@@ -394,12 +667,13 @@ namespace AppStudio
         private void Check()
         {
             Remember();
-            string language = project.Language;
+            string languageName = project.Language;
             string text = editor.Text;
+            string module = currentFile;
             Say(Text("code-checking.txt", "Checking..."), null);
             System.Threading.Thread work = new System.Threading.Thread(delegate()
             {
-                CheckResult result = ScriptRun.Check(language, text);
+                CheckResult result = ScriptRun.Check(languageName, text, module);
                 owner.Dispatcher.BeginInvoke(new Action(delegate
                 {
                     ShowCheck(result);
@@ -428,6 +702,9 @@ namespace AppStudio
             Say(result.Headline, result.Ok ? "Success" : "Danger");
         }
 
+        // Runs the whole automation, not the module that happens to be on
+        // screen. A workflow on its own is a list of calls into a runtime that
+        // is not there, so every module of the language goes to the runner.
         private void RunIt()
         {
             Remember();
@@ -436,15 +713,15 @@ namespace AppStudio
                 Say(Text("code-run-declined.txt", "The script was not started."), "Caution");
                 return;
             }
-            string language = project.Language;
-            string text = editor.Text;
+            string languageName = project.Language;
+            List<CodeFile> modules = project.Files(languageName);
             string folder = Path.Combine(project.Folder == null ? Path.GetTempPath() : project.Folder, "run");
             Say(Text("code-running.txt", "Running..."), null);
             System.Threading.Thread work = new System.Threading.Thread(delegate()
             {
-                RunResult result = String.Equals(language, ScriptLanguages.Vba, StringComparison.Ordinal)
-                    ? ScriptRun.RunVba(text, folder, "RunRecordedProcedure", 180000)
-                    : ScriptRun.RunPowerShell(text, folder, 180000);
+                RunResult result = String.Equals(languageName, ScriptLanguages.Vba, StringComparison.Ordinal)
+                    ? ScriptRun.RunVba(modules, folder, VbaGen.EntryPoint, 180000)
+                    : ScriptRun.RunPowerShellProject(modules, folder, 180000);
                 owner.Dispatcher.BeginInvoke(new Action(delegate
                 {
                     ShowRun(result);
@@ -518,6 +795,9 @@ namespace AppStudio
 
         // ---------- out to the assistant ----------
 
+        // One copy. The request is short because everything the assistant has to
+        // read is in the two files attached with it, and those are written again
+        // here so that what is attached is what is on screen.
         private void CopyRequest()
         {
             Remember();
@@ -528,50 +808,56 @@ namespace AppStudio
             if (handoff == null)
             {
                 project.RequestId = Handoff.NewRequestId();
+                Outputs.WriteAll(session, PdfBudgetBytes == null ? ScreensPdf.DefaultBudgetBytes : PdfBudgetBytes(), project);
                 handoff = Handoff.Build(session, project, requestBox.Text, project.RequestId);
                 Handoff.Write(project, handoff);
                 parts = new IntakeParts();
-                nextChunk = 0;
                 Save();
+                PaintAttachments();
             }
-            if (nextChunk >= handoff.Chunks.Count) nextChunk = 0;
-            string chunk = handoff.Chunks[nextChunk];
+            if (!handoff.AttachmentsReady)
+            {
+                intakeLine.Text = Text("code-ai-attach-failed.txt",
+                    "The files the request tells the assistant to read were not written, so the request was not copied.") +
+                    " " + handoff.MissingText();
+                intakeLine.Foreground = Theme.DangerText;
+                Say(intakeLine.Text, "Danger");
+                handoff = null;
+                return;
+            }
             try
             {
-                Clipboard.SetText(chunk);
+                Clipboard.SetText(handoff.Text);
             }
             catch (Exception exception)
             {
                 Say(Text("code-copy-failed.txt", "The clipboard refused the request") + ": " + exception.Message, "Danger");
                 return;
             }
-            nextChunk++;
+            copied = true;
             PaintCopy();
-            if (handoff.Split)
-            {
-                Say(Text("code-copy-part.txt", "Part copied. Paste it, then press this again for the next one.") +
-                    "  " + nextChunk.ToString(CultureInfo.InvariantCulture) + " / " +
-                    handoff.Chunks.Count.ToString(CultureInfo.InvariantCulture), "Success");
-                return;
-            }
-            Say(Text("code-copy-done.txt", "The request is on the clipboard. Attach the picture document with it."), "Success");
+            Say(Text("code-copy-done.txt",
+                "The request is on the clipboard. Paste it into the chat and attach the two files beside it."), "Success");
         }
 
         private void PaintCopy()
         {
-            if (handoff == null || !handoff.Split)
+            copyButton.Content = copied
+                ? Text("code-ai-copied.txt", "Request copied - copy it again")
+                : Text("code-ai-copy.txt", "Copy the request");
+            copyButton.SetResourceReference(FrameworkElement.StyleProperty, copied ? "AppButtonCompact" : "AppButtonPrimary");
+        }
+
+        private void OpenAttachments()
+        {
+            if (session == null || session.AiFolder == null || !Directory.Exists(session.AiFolder))
             {
-                copyButton.Content = Text("code-ai-copy.txt", "Copy the request");
+                Say(Text("code-ai-attach-missing.txt", "not written yet"), "Caution");
                 return;
             }
-            if (nextChunk >= handoff.Chunks.Count)
-            {
-                copyButton.Content = Text("code-ai-copy-again.txt", "Copy the request again from the start");
-                return;
-            }
-            copyButton.Content = Text("code-ai-copy-next.txt", "Copy part") + " " +
-                (nextChunk + 1).ToString(CultureInfo.InvariantCulture) + " / " +
-                handoff.Chunks.Count.ToString(CultureInfo.InvariantCulture);
+            folderOpened = true;
+            PaintAttachments();
+            Open(session.AiFolder);
         }
 
         // ---------- back in from the assistant ----------
@@ -584,7 +870,7 @@ namespace AppStudio
             // Starting the intake again means the next copy is a new request.
             // This is the one place the id is deliberately let go of.
             handoff = null;
-            nextChunk = 0;
+            copied = false;
             PaintCopy();
             diffHost.Children.Clear();
             intakeLine.Text = Text("code-intake-restart.txt", "The intake starts again. Nothing on screen was changed.");
@@ -766,6 +1052,7 @@ namespace AppStudio
                 CodeFile file = new CodeFile();
                 file.Language = pending[index].Language;
                 file.Name = pending[index].Name;
+                file.Role = CodeRoles.Of(pending[index].Name);
                 file.Text = pending[index].Text;
                 incoming.Add(file);
             }
@@ -827,6 +1114,20 @@ namespace AppStudio
             RowDefinition row = new RowDefinition();
             row.Height = new GridLength(1, GridUnitType.Star);
             return row;
+        }
+
+        private static ColumnDefinition StarColumn()
+        {
+            ColumnDefinition column = new ColumnDefinition();
+            column.Width = new GridLength(1, GridUnitType.Star);
+            return column;
+        }
+
+        private static ColumnDefinition FixedColumn(double width)
+        {
+            ColumnDefinition column = new ColumnDefinition();
+            column.Width = new GridLength(width);
+            return column;
         }
 
         private static Border Card(UIElement content)

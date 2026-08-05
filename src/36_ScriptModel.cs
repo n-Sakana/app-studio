@@ -32,6 +32,64 @@ namespace AppStudio
         }
     }
 
+    // The modules an automation is written in, and what each of them is for.
+    //
+    // The same five names in both languages, because PowerShell and VBA are two
+    // spellings of one automation here and a person who has learned where to
+    // look in one has learned it for the other.
+    //
+    // Only the first one is written to be edited. Splitting them is not tidiness:
+    // a recording of nine things has nine lines in Workflow, so taking the fifth
+    // one out is deleting the fifth line, and the four files beside it are not
+    // touched at all. In one file that same change means finding nine steps
+    // inside several hundred lines of machinery.
+    public static class CodeModules
+    {
+        public const string Workflow = "Workflow";
+        public const string RecordedFacts = "RecordedFacts";
+        public const string RuntimeCore = "RuntimeCore";
+        public const string RuntimeLocator = "RuntimeLocator";
+        public const string RuntimeNative = "RuntimeNative";
+
+        // The order they are shown and written in: what is edited first, what it
+        // reads second, the machinery last.
+        public static string[] Order()
+        {
+            return new string[] { Workflow, RecordedFacts, RuntimeCore, RuntimeLocator, RuntimeNative };
+        }
+
+        public static int Rank(string name)
+        {
+            string[] order = Order();
+            for (int index = 0; index < order.Length; index++)
+            {
+                if (String.Equals(order[index], name, StringComparison.OrdinalIgnoreCase)) return index;
+            }
+            return order.Length;
+        }
+
+        public static bool IsWorkflow(string name)
+        {
+            return String.Equals(name, Workflow, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    // What a file is for. The screen says it, so nobody edits the machinery by
+    // accident and nobody goes looking for the procedure in it.
+    public static class CodeRoles
+    {
+        public const string Workflow = "workflow";
+        public const string Recorded = "recorded";
+        public const string Runtime = "runtime";
+
+        public static string Of(string moduleName)
+        {
+            if (CodeModules.IsWorkflow(moduleName)) return Workflow;
+            if (String.Equals(moduleName, CodeModules.RecordedFacts, StringComparison.OrdinalIgnoreCase)) return Recorded;
+            return Runtime;
+        }
+    }
+
     // One operation of the automation, named the same in both languages.
     //
     // Nothing here carries a screen coordinate as an address. A place inside an
@@ -104,6 +162,46 @@ namespace AppStudio
                 return false;
             }
         }
+    }
+
+    // One line of the workflow module - one thing the operator did.
+    //
+    // A recording becomes a list of these once, here, and both generators write
+    // from that list. The waiting before a step, the keyboard being put back
+    // before a chord, and the address the step is reached by are carried on the
+    // line rather than spelled out beside it, because the workflow module is the
+    // file a person edits and a person reading it wants the procedure, not the
+    // machinery.
+    public sealed class ScriptLine
+    {
+        public string Id;
+        public string StepId;
+        public string Op;
+        public string Comment;
+        public int GapMs;
+        public string WindowClass;
+        public string WindowTitle;
+        public string ElementLabel;
+        public List<ElementLocator> Locators = new List<ElementLocator>();
+        public List<ElementLocator> FocusLocators = new List<ElementLocator>();
+        public List<ElementLocator> DropLocators = new List<ElementLocator>();
+        public double RelX = -1;
+        public double RelY = -1;
+        public double DropRelX = -1;
+        public double DropRelY = -1;
+        public string Text;
+        public bool TextKnown;
+        public string Keys;
+        public string Chord;
+        public string Button = MouseButtons.Left;
+        public int Times = 1;
+        public int WheelDelta;
+        public string Reason;
+        public string SecretPrompt;
+
+        // Whether VBA has an address for this line. The rule is the one on
+        // ScriptOp; it is answered once here so both generators agree.
+        public bool VbaReachable;
     }
 
     public sealed class ScriptPlan
@@ -189,6 +287,116 @@ namespace AppStudio
                     " step(s) are addressed only through UI Automation. VBA has no Win32 address for them and says so where they occur.");
             }
             return plan;
+        }
+
+        // The operation list, collapsed to one line per thing the operator did.
+        //
+        // The plan holds the waiting and the focus restoring as separate
+        // operations because that is what the run has to carry out. A person
+        // reading the workflow module does not want three lines for one press,
+        // and - more to the point - deleting one press has to be deleting one
+        // line. So the interval, the keyboard restore and the settle that belong
+        // to a step are carried on that step's line and performed by the runtime
+        // around it. Removing the line removes all of them together, which is
+        // what removing that step means.
+        public static List<ScriptLine> Lines(ScriptPlan plan)
+        {
+            List<ScriptLine> lines = new List<ScriptLine>();
+            if (plan == null) return lines;
+            Dictionary<string, int> used = new Dictionary<string, int>(StringComparer.Ordinal);
+            int pendingGap = 0;
+            List<ElementLocator> pendingFocus = null;
+            for (int index = 0; index < plan.Ops.Count; index++)
+            {
+                ScriptOp op = plan.Ops[index];
+                if (op.Op == ScriptOp.WaitGap) { pendingGap = op.GapMs; continue; }
+                if (op.Op == ScriptOp.WaitIdle) continue;
+                // A focus restore is never a step of its own. It belongs to the
+                // typing or the chord that follows it, and the runtime does it
+                // there.
+                if (op.Op == ScriptOp.FocusElement && Follows(plan, index))
+                {
+                    pendingFocus = op.Locators;
+                    continue;
+                }
+                ScriptLine line = new ScriptLine();
+                line.Id = Unique(used, op.StepId, Synthesized(plan, index));
+                line.StepId = op.StepId;
+                line.Op = op.Op;
+                line.Comment = op.Headline;
+                line.GapMs = pendingGap;
+                line.WindowClass = op.WindowClass;
+                line.WindowTitle = op.WindowTitle;
+                line.ElementLabel = op.ElementLabel;
+                line.Locators = op.Locators;
+                line.FocusLocators = pendingFocus == null ? new List<ElementLocator>() : pendingFocus;
+                line.DropLocators = op.DropLocators;
+                line.RelX = op.RelX;
+                line.RelY = op.RelY;
+                line.DropRelX = op.DropRelX;
+                line.DropRelY = op.DropRelY;
+                line.Text = op.Text;
+                line.TextKnown = op.TextKnown;
+                line.Keys = op.Keys;
+                line.Chord = PowerShellGen.SendKeysChord(op.Keys);
+                line.Button = op.Button;
+                line.Times = op.Times;
+                line.WheelDelta = op.WheelDelta;
+                line.Reason = op.Reason;
+                line.SecretPrompt = op.Op == ScriptOp.AskSecret ? PowerShellGen.SecretPrompt(op) : null;
+                line.VbaReachable = op.ReachableFromVba;
+                lines.Add(line);
+                pendingGap = 0;
+                pendingFocus = null;
+            }
+            return lines;
+        }
+
+        // Whether the operation after this focus restore is the one it was put
+        // there for. A focus restore with nothing behind it stays a line of its
+        // own rather than being dropped.
+        private static bool Follows(ScriptPlan plan, int index)
+        {
+            for (int next = index + 1; next < plan.Ops.Count; next++)
+            {
+                string op = plan.Ops[next].Op;
+                if (op == ScriptOp.WaitGap || op == ScriptOp.WaitIdle) continue;
+                if (!String.Equals(plan.Ops[next].StepId, plan.Ops[index].StepId, StringComparison.Ordinal)) return false;
+                return op == ScriptOp.SendKeys || op == ScriptOp.SetElementText || op == ScriptOp.AskSecret;
+            }
+            return false;
+        }
+
+        // A recording that walks into a window without switching to it first
+        // gets a FindWindow the recording never had, and it carries the step id
+        // of the step that needed it. That step is still to come, so it is the
+        // window line that takes the suffix and the recorded step keeps its own
+        // id. The suffixed id still has the recorded id inside it, so the id in
+        // the workflow is still the id in the report.
+        private static bool Synthesized(ScriptPlan plan, int index)
+        {
+            if (plan.Ops[index].Op != ScriptOp.FindWindow) return false;
+            for (int next = index + 1; next < plan.Ops.Count; next++)
+            {
+                string op = plan.Ops[next].Op;
+                if (op == ScriptOp.WaitGap || op == ScriptOp.WaitIdle) continue;
+                return String.Equals(plan.Ops[next].StepId, plan.Ops[index].StepId, StringComparison.Ordinal);
+            }
+            return false;
+        }
+
+        private static string Unique(Dictionary<string, int> used, string stepId, bool synthesizedWindow)
+        {
+            string baseId = String.IsNullOrEmpty(stepId) ? "S" : stepId;
+            if (synthesizedWindow) baseId = baseId + "w";
+            if (!used.ContainsKey(baseId))
+            {
+                used[baseId] = 1;
+                return baseId;
+            }
+            int count = used[baseId] + 1;
+            used[baseId] = count;
+            return baseId + "_" + count.ToString(CultureInfo.InvariantCulture);
         }
 
         private static string Key(StepRecord step)

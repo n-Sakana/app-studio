@@ -65,7 +65,13 @@ function Shoot($window, $name) {
 }
 function Editor-Text($window) {
     $box = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 15000
-    if ($null -eq $box) { throw 'the code editor is not on screen' }
+    if ($null -eq $box) {
+        # Say what was on screen instead. "It is not there" on its own sends the
+        # next person looking in the wrong place.
+        $seen = @()
+        foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::Edit)) { $seen += ('"' + $item.Current.Name + '"') }
+        throw ('the code editor is not on screen. Edit controls found: ' + (($seen -join ', ')) + '. Screen says: ' + (Screen-Text $window))
+    }
     return $box.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value
 }
 function Screen-Text($window) {
@@ -92,9 +98,22 @@ function Get-Board() {
 function Seed($root) {
     $session = [AppStudio.SessionStore]::Create($root, 'record', 'code screen fixture')
     $session.ValuePolicy = 'recordText'
+    # One of the two files the request tells an assistant to read is the picture
+    # document, and there is no picture document without a picture. The fixture
+    # has one so the handover this test drives is a real one.
+    New-Item -ItemType Directory -Path $session.ShotsFolder -Force | Out-Null
+    $shot = Join-Path $session.ShotsFolder 'S1.png'
+    $bitmap = New-Object Drawing.Bitmap(320, 240)
+    try {
+        $g = [Drawing.Graphics]::FromImage($bitmap)
+        try { $g.Clear([Drawing.Color]::White); $g.FillRectangle([Drawing.Brushes]::SteelBlue, 20, 20, 140, 70) } finally { $g.Dispose() }
+        $bitmap.Save($shot, [Drawing.Imaging.ImageFormat]::Png)
+    } finally { $bitmap.Dispose() }
     $screen = New-Object AppStudio.ScreenRecord
     $screen.ScanId = 'sc-1'; $screen.ScreenId = 'S1'; $screen.Title = 'Fixture Window'; $screen.ClassName = 'FixtureWindow'
     $screen.Rect = New-Object AppStudio.RectValue; $screen.Rect.Width = 900; $screen.Rect.Height = 700
+    $screen.ShotFile = $shot; $screen.CapturedAt = [DateTimeOffset]::Now; $screen.CaptureMethod = 'BitBlt'
+    $screen.Sha256 = (Get-FileHash $shot -Algorithm SHA256).Hash
     $session.Screens.Screens.Add($screen)
     $null = [AppStudio.SessionStore]::Append($session, 'screens', $screen.ToJson())
     for ($index = 1; $index -le 3; $index++) {
@@ -157,17 +176,44 @@ try {
     $null = Press $window (Message 'detail-code.txt' 'Edit as code')
     $null = Shoot $window '03-code-powershell'
 
-    # --- 2. it opens with the recording already written out, and it runs ------
+    # --- 2. it opens on the module a person edits, and it is short ------------
     $ps = Editor-Text $window
     if ($ps.Length -lt 400) { throw ('the code screen opened with almost nothing in it: ' + $ps.Length + ' characters') }
-    foreach ($op in @('FindWindow', 'FocusElement', 'InvokeElement', 'SetElementText', 'SendKeys', 'WaitGap', 'WaitIdle', 'AskSecret')) {
-        if ($ps.IndexOf($op, [StringComparison]::Ordinal) -lt 0) { throw ('the PowerShell on screen is missing ' + $op) }
-    }
     if ($ps.IndexOf('A1', [StringComparison]::Ordinal) -lt 0) { throw 'the PowerShell on screen does not carry the recorded steps' }
+    # The workflow is the procedure, not the machinery. Three recorded steps are
+    # a handful of lines, and no address or literal is written into it.
+    $workflowLines = @(($ps -split "`r`n|`n") | Where-Object { $_ -match "^\s*(FindWindow|InvokeElement|SetElementText|SendKeys|AskSecret|Unsupported)\s+'" })
+    if ($workflowLines.Count -lt 3) { throw ('the workflow on screen has ' + $workflowLines.Count + ' step lines') }
+    if ($ps.IndexOf('uia.automationId', [StringComparison]::Ordinal) -ge 0) { throw 'the workflow on screen carries an address, which belongs in RecordedFacts' }
     $parsed = [AppStudio.ScriptRun]::CheckPowerShell($ps)
     if (-not $parsed.Ok) { throw ('what the screen opened with does not parse: ' + (($parsed.Problems) -join ' / ')) }
 
-    # --- 3. both languages, same place, same buttons --------------------------
+    # --- 3. the module tree names every module of both languages --------------
+    $expected = @('Workflow.ps1', 'RecordedFacts.ps1', 'RuntimeCore.ps1', 'RuntimeLocator.ps1', 'RuntimeNative.ps1',
+        'Workflow.bas', 'RecordedFacts.bas', 'RuntimeCore.bas', 'RuntimeLocator.bas', 'RuntimeNative.bas')
+    foreach ($module in $expected) {
+        if ($null -eq (Wait-Named $window ([System.Windows.Automation.ControlType]::TreeItem) $module 8000)) {
+            throw ('the module tree does not list ' + $module)
+        }
+    }
+    $null = Shoot $window '03b-module-tree'
+
+    # Choosing the runtime shows the runtime, and that is where the nine
+    # operations live now.
+    $core = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'RuntimeCore.ps1'
+    $core.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    Start-Sleep -Milliseconds 900
+    $runtime = Editor-Text $window
+    if ($runtime -eq $ps) { throw 'choosing another module did not change what is in the editor' }
+    foreach ($op in @('FindWindow', 'FocusElement', 'InvokeElement', 'SetElementText', 'ReadElementText', 'SendKeys', 'WaitGap', 'WaitIdle', 'AskSecret')) {
+        if ($runtime.IndexOf($op, [StringComparison]::Ordinal) -lt 0) { throw ('the PowerShell runtime on screen is missing ' + $op) }
+    }
+    $back = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.ps1'
+    $back.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    Start-Sleep -Milliseconds 900
+    if ((Editor-Text $window) -ne $ps) { throw 'going back to the workflow did not bring it back' }
+
+    # --- 3b. both languages, same place, same buttons -------------------------
     foreach ($label in @((Message 'code-lang-ps.txt' 'PowerShell'), (Message 'code-lang-vba.txt' 'VBA'))) {
         if ($null -eq (Find-Named $window ([System.Windows.Automation.ControlType]::Button) $label)) {
             throw ('the code screen does not offer ' + $label)
@@ -179,32 +225,72 @@ try {
     if ($vba -eq $ps) { throw 'switching the language did not change what is in the editor' }
     if ($vba.IndexOf('Attribute VB_Name', [StringComparison]::Ordinal) -lt 0) { throw 'the VBA on screen is not a module' }
     if ($vba.IndexOf('RunRecordedProcedure', [StringComparison]::Ordinal) -lt 0) { throw 'the VBA on screen has nothing to start from' }
-    foreach ($op in @('FindWindow', 'FocusElement', 'InvokeElement', 'SetElementText', 'SendKeys', 'WaitGap', 'WaitIdle', 'AskSecret')) {
-        if ($vba.IndexOf($op, [StringComparison]::Ordinal) -lt 0) { throw ('the VBA on screen is missing ' + $op) }
-    }
     $null = Press $window (Message 'code-lang-ps.txt' 'PowerShell')
     if ((Editor-Text $window) -ne $ps) { throw 'switching back did not bring the PowerShell back' }
 
-    # --- 4. one copy carries the whole request --------------------------------
+    # --- 3c. full width editing, there and back, losing nothing ---------------
+    $editBox = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 15000
+    $typed = $ps + "`r`n# typed before going full width"
+    $editBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($typed)
+    Start-Sleep -Milliseconds 700
+    $null = Press $window (Message 'code-full-enter.txt' 'Edit at full width')
+    Start-Sleep -Milliseconds 900
+    $null = Shoot $window '04b-full-width'
+    if ($null -ne (Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'code-ai-copy.txt' 'Copy the request'))) {
+        throw 'full width editing did not give the editor the work area'
+    }
+    if ((Editor-Text $window) -ne $typed) { throw 'going to full width lost what had been typed' }
+    if ($null -eq (Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.ps1')) {
+        throw 'full width editing dropped the module tree'
+    }
+    $null = Press $window (Message 'code-full-exit.txt' 'Leave full width editing')
+    Start-Sleep -Milliseconds 900
+    if ((Editor-Text $window) -ne $typed) { throw 'coming back from full width lost what had been typed' }
+    # Put it back the way it was, so the rest of the run compares against the
+    # generated version rather than against something this test typed.
+    $null = Press $window (Message 'code-baseline.txt' 'Back to the generated version')
+    Start-Sleep -Milliseconds 900
+    if ((Editor-Text $window) -ne $ps) { throw 'the generated version could not be brought back after the full width round trip' }
+
+    # --- 4. one copy, and nothing of the code in it ---------------------------
     $null = Press $window (Message 'code-ai-copy.txt' 'Copy the request')
-    Start-Sleep -Milliseconds 600
+    Start-Sleep -Milliseconds 1500
     $request = Get-Board
     if ($request.Length -lt 2000) { throw ('the clipboard did not get the request: ' + $request.Length + ' characters') }
-    $match = [regex]::Match($request, '#@APPSTUDIO ([0-9a-fA-F-]{36}) REQUEST (\d\d) OF (\d\d)')
-    if (-not $match.Success) { throw 'the copied request is not numbered and carries no request id' }
+    if ($request.Length -gt 20000) { throw ('the request is ' + $request.Length + ' characters, which is not one paste') }
+    $match = [regex]::Match($request, '#@APPSTUDIO ([0-9a-fA-F-]{36}) SUMMARY BEGIN')
+    if (-not $match.Success) { throw 'the copied request does not state the answer format with its own request id' }
     $requestId = $match.Groups[1].Value
-    if ($match.Groups[3].Value -ne '01') { throw ('an ordinary session took ' + $match.Groups[3].Value + ' copies instead of one') }
-    foreach ($section in @('## 1. What is being asked', '## 5. What the operator did', '## 8. The code as it stands')) {
+    if ($request -match '#@APPSTUDIO [0-9a-fA-F-]{36} REQUEST ') { throw 'the request still numbers itself as one of several copies' }
+    foreach ($section in @('## The two files attached with this message', '## What is being asked', '## The modules', '## How to answer')) {
         if ($request.IndexOf($section, [StringComparison]::Ordinal) -lt 0) { throw ('the copied request is missing ' + $section) }
+    }
+    foreach ($name in @('session.md', 'screens.pdf')) {
+        if ($request.IndexOf($name, [StringComparison]::Ordinal) -lt 0) { throw ('the copied request does not name the attachment ' + $name) }
+    }
+    foreach ($leak in @('Set-StrictMode', 'Attribute VB_Name', 'uia.automationId')) {
+        if ($request.IndexOf($leak, [StringComparison]::Ordinal) -ge 0) { throw ('the copied request embeds ' + $leak + ', which belongs in the attachment') }
+    }
+    # The two files the request tells the assistant to read have to be there.
+    $aiFolder = Join-Path (Join-Path $seedFolder 'out') 'ai'
+    foreach ($name in @('session.md', 'screens.pdf')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $aiFolder $name))) { throw ('the request was copied although ' + $name + ' was not written') }
+    }
+    $attached = [IO.File]::ReadAllText((Join-Path $aiFolder 'session.md'), (New-Object Text.UTF8Encoding($false)))
+    if ($attached.IndexOf('## 10. The automation as it stands', [StringComparison]::Ordinal) -lt 0) {
+        throw 'the attached file does not carry the automation the request points at'
+    }
+    if ($null -eq (Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'code-ai-folder.txt' 'Open the folder with the two files to attach'))) {
+        throw 'there is no way to get to the two files that go with the request'
     }
     $null = Shoot $window '05-request-copied'
 
     # --- 5. an answer to somebody else's request is refused -------------------
     $stranger = [Guid]::NewGuid().ToString('D')
     Set-Board (@(
-        ('#@APPSTUDIO ' + $stranger + ' BEGIN powershell RecordedProcedure'),
+        ('#@APPSTUDIO ' + $stranger + ' BEGIN powershell Workflow'),
         'Write-Output ''this must never be applied''',
-        ('#@APPSTUDIO ' + $stranger + ' END powershell RecordedProcedure'),
+        ('#@APPSTUDIO ' + $stranger + ' END powershell Workflow'),
         ('#@APPSTUDIO ' + $stranger + ' COMPLETE 1')) -join "`r`n")
     $null = Press $window (Message 'code-ai-paste.txt' 'Take the answer in from the clipboard')
     Start-Sleep -Milliseconds 700
@@ -224,9 +310,9 @@ try {
         ('#@APPSTUDIO ' + $requestId + ' SUMMARY BEGIN'),
         'replaced the body so the difference is obvious',
         ('#@APPSTUDIO ' + $requestId + ' SUMMARY END'),
-        ('#@APPSTUDIO ' + $requestId + ' BEGIN powershell RecordedProcedure')) +
+        ('#@APPSTUDIO ' + $requestId + ' BEGIN powershell Workflow')) +
         $answerBody +
-        @(('#@APPSTUDIO ' + $requestId + ' END powershell RecordedProcedure'),
+        @(('#@APPSTUDIO ' + $requestId + ' END powershell Workflow'),
         ('#@APPSTUDIO ' + $requestId + ' COMPLETE 1')) -join "`r`n")
     $null = Press $window (Message 'code-ai-paste.txt' 'Take the answer in from the clipboard')
     Start-Sleep -Milliseconds 900
