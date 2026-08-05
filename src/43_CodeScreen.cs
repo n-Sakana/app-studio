@@ -460,11 +460,11 @@ namespace AppStudio
             foot.Children.Add(languageNote);
             if (!full)
             {
-                WrapPanel versions = new WrapPanel();
-                Button(versions, Text("code-baseline.txt", "Back to the generated version"), delegate { Baseline(); }, false);
-                Button(versions, Text("code-undo.txt", "Undo the last change taken in"), delegate { Undo(); }, false);
-                Button(versions, Text("code-folder.txt", "Code folder"), delegate { Open(project.Folder); }, false);
-                Button(versions, Text("code-build-folder.txt", "Built file folder"), delegate { OpenBuild(); }, false);
+                StackPanel versions = new StackPanel();
+                Stretch(Button(versions, Text("code-baseline.txt", "Back to the generated version"), delegate { Baseline(); }, false));
+                Stretch(Button(versions, Text("code-undo.txt", "Undo the last change taken in"), delegate { Undo(); }, false));
+                Stretch(Button(versions, Text("code-folder.txt", "Code folder"), delegate { Open(project.Folder); }, false));
+                Stretch(Button(versions, Text("code-build-folder.txt", "Built file folder"), delegate { OpenBuild(); }, false));
                 foot.Children.Add(versions);
             }
             Grid.SetRow(foot, 2);
@@ -1496,6 +1496,19 @@ namespace AppStudio
             button.SetResourceReference(FrameworkElement.StyleProperty, primary ? "AppButtonPrimary" : "AppButtonCompact");
             button.Click += delegate { action(); };
             panel.Children.Add(button);
+            return button;
+        }
+
+        // The moves in the module pane are a column, not a paragraph of buttons.
+        // Left to size themselves they end in a ragged right edge, which reads as
+        // four unrelated things rather than as one list - and the pane beside
+        // them already states its buttons the other way, so the screen would be
+        // holding two rules at once.
+        private static Button Stretch(Button button)
+        {
+            button.HorizontalAlignment = HorizontalAlignment.Stretch;
+            button.HorizontalContentAlignment = HorizontalAlignment.Center;
+            button.Margin = new Thickness(0, 0, 0, Theme.Space2);
             return button;
         }
 
