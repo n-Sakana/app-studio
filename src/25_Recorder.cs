@@ -68,6 +68,7 @@ namespace AppStudio
         private long focusedControl;
 
         private TargetWindowInfo currentWindow;
+        private RectValue framedRect;
         private string currentScreenId;
         private List<ScanNode> currentNodes = new List<ScanNode>();
 
@@ -90,6 +91,7 @@ namespace AppStudio
 
         public bool Paused { get { return paused; } }
         private const int InspectMinGapMs = 150;
+        private int namingElement;
         private DateTime lastInspectAt = DateTime.MinValue;
         private int lastInspectX = Int32.MinValue;
         private int lastInspectY = Int32.MinValue;
@@ -419,6 +421,7 @@ namespace AppStudio
                     else if (IsForeign(front)) currentWindow.Rect = front.Rect;
                     FollowFocus("the keyboard moved to another control", false);
                     ReportTick();
+                    FrameTick();
                     InspectTick();
                 }
                 catch (Exception exception)
@@ -1366,10 +1369,107 @@ namespace AppStudio
                 if (fact == null) hud.HideInspect();
                 else hud.ShowInspect(fact, x, y);
             }));
+            if (fact != null && fact.Known) NameElement(fact, x, y);
+        }
+
+        // Asking the accessibility layers what is actually under the pointer.
+        //
+        // Win32 answers instantly and, in an application that draws its own
+        // controls, answers "the window" for every one of them. The layers that
+        // can tell the calculator's 7 from its 8 take hundreds of milliseconds
+        // and run in the worker, so the answer is fetched on a thread of its own
+        // and folded into the chip when it arrives. The poll that must not fall
+        // behind never waits for it, one is in flight at a time, and a stale
+        // answer for a point the pointer has already left is thrown away.
+        private void NameElement(InspectFact fact, int x, int y)
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref namingElement, 1, 0) != 0) return;
+            InspectFact target = fact;
+            Thread work = new Thread(delegate()
+            {
+                try
+                {
+                    Snapshot snapshot = Probe.At(x, y, 450);
+                    target.ElementAsked = true;
+                    if (snapshot != null)
+                    {
+                        if (snapshot.Uia != null && (!String.IsNullOrEmpty(snapshot.Uia.Name) || !String.IsNullOrEmpty(snapshot.Uia.ControlType)))
+                        {
+                            target.ElementName = snapshot.Uia.Name;
+                            // The localised name where there is one: the reader
+                            // of this chip is reading their own language on
+                            // every other line of it.
+                            target.ElementType = String.IsNullOrEmpty(snapshot.Uia.LocalizedControlType)
+                                ? snapshot.Uia.ControlType
+                                : snapshot.Uia.LocalizedControlType;
+                            target.AutomationId = snapshot.Uia.AutomationId;
+                            target.ElementSource = "uia";
+                        }
+                        else if (snapshot.Msaa != null && !String.IsNullOrEmpty(snapshot.Msaa.Name))
+                        {
+                            target.ElementName = snapshot.Msaa.Name;
+                            target.ElementType = snapshot.Msaa.Role;
+                            target.ElementSource = "msaa";
+                        }
+                    }
+                    if (!Inspect || !running) return;
+                    // Only if the pointer is still where this was asked about.
+                    PointValue where = WindowTools.CursorPosition();
+                    if (where == null || Math.Abs(where.X - x) > 3 || Math.Abs(where.Y - y) > 3) return;
+                    RecordHud hud = guard as RecordHud;
+                    if (hud == null || dispatcher == null) return;
+                    dispatcher.BeginInvoke(new Action(delegate { hud.ShowInspect(target, x, y); }));
+                }
+                catch (Exception)
+                {
+                    // A reader that cannot answer is not a fault in the
+                    // recording. The chip keeps what Win32 gave it.
+                }
+                finally
+                {
+                    System.Threading.Interlocked.Exchange(ref namingElement, 0);
+                }
+            });
+            work.IsBackground = true;
+            work.SetApartmentState(ApartmentState.STA);
+            work.Start();
+        }
+
+        // The frame is drawn round the window in front, and that window moves.
+        // It was only redrawn when the foreground changed, when the title
+        // changed, or after an action, so dragging the application being
+        // recorded left the frame behind on the desktop, sitting where the
+        // window used to be. It is a frame round a window: it goes where the
+        // window goes, which means asking where the window is.
+        private void FrameTick()
+        {
+            TargetWindowInfo window = currentWindow;
+            if (window == null || window.Hwnd == 0) return;
+            RectValue now = WindowTools.GetPhysicalRect(new IntPtr(window.Hwnd));
+            if (now == null)
+            {
+                // The window has gone. A frame round nothing is worse than no
+                // frame, so it is taken off rather than left where it was.
+                if (framedRect != null)
+                {
+                    framedRect = null;
+                    UpdateFrame(null);
+                }
+                return;
+            }
+            if (framedRect != null && framedRect.X == now.X && framedRect.Y == now.Y &&
+                framedRect.Width == now.Width && framedRect.Height == now.Height)
+            {
+                return;
+            }
+            framedRect = now;
+            window.Rect = now;
+            UpdateFrame(now);
         }
 
         private void UpdateFrame(RectValue rect)
         {
+            framedRect = rect;
             if (dispatcher == null) return;
             RectValue copy = rect;
             dispatcher.BeginInvoke(new Action(delegate

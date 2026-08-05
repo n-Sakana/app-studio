@@ -78,13 +78,13 @@ if($text.Contains('SCAN-TIMEOUT')){throw 'the request embeds what could not be o
 if($text.Contains('| A1 |')){throw 'the request embeds the action log'}
 if($text.Contains('| 420 |')){throw 'the request embeds the recorded intervals'}
 if($text.Contains('saveButton')){throw 'the request embeds the element ledger'}
-if($text.Contains('Set-StrictMode')){throw 'the request embeds the generated PowerShell'}
+if($text.Contains('namespace AppStudioRun')){throw 'the request embeds the generated engine'}
 if($text.Contains('Attribute VB_Name')){throw 'the request embeds the generated VBA'}
 if($text.Contains('```powershell')-or$text.Contains('```vb')){throw 'the request carries a code block of the automation'}
 
 # ---- the modules are named, so an answer can say which one it is --------------
 foreach($module in @('Workflow','RecordedFacts','RuntimeCore','RuntimeLocator','RuntimeNative')){
- if(-not$text.Contains('`'+$module+'`')-and-not$text.Contains($module+'.ps1')){throw ('the request does not name the module '+$module)}
+ if(-not$text.Contains('`'+$module+'`')-and-not$text.Contains($module+'.cs')){throw ('the request does not name the module '+$module)}
 }
 
 # ---- the return format, in full, with the id already filled in ---------------
@@ -110,7 +110,7 @@ if($gone.MissingText()-ne'screens.pdf'){throw ('the missing attachment was named
 # ---- the code really is in the attachment ------------------------------------
 $markdown=[IO.File]::ReadAllText($session.SessionMdPath,(New-Object Text.UTF8Encoding($false)))
 if(-not$markdown.Contains('## 10. The automation as it stands')){throw 'session.md does not carry the automation'}
-foreach($module in @('Workflow.ps1','RecordedFacts.ps1','RuntimeCore.ps1','Workflow.bas','RuntimeCore.bas')){
+foreach($module in @('Workflow.cs','RecordedFacts.cs','RuntimeCore.cs','Workflow.bas','RuntimeCore.bas')){
  if(-not$markdown.Contains($module)){throw ('session.md does not carry '+$module)}
 }
 foreach($op in @('FindWindow','FocusElement','InvokeElement','SetElementText','ReadElementText','SendKeys','WaitGap','WaitIdle','AskSecret')){
@@ -119,7 +119,7 @@ foreach($op in @('FindWindow','FocusElement','InvokeElement','SetElementText','R
 foreach($claim in @('Never press a remembered screen coordinate','physical screen pixels','not a proof of completeness')){
  if(-not$markdown.Contains($claim)){throw ('session.md dropped the rule: '+$claim)}
 }
-if(-not$markdown.Contains('Set-StrictMode')){throw 'session.md does not carry the PowerShell as it stands'}
+if(-not$markdown.Contains('namespace AppStudioRun')){throw 'session.md does not carry the engine as it stands'}
 if(-not$markdown.Contains('Attribute VB_Name')){throw 'session.md does not carry the VBA as it stands'}
 
 # ---- the handover is still exactly two files ---------------------------------

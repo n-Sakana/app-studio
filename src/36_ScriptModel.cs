@@ -19,16 +19,27 @@ namespace AppStudio
                 String.Equals(value, Vba, StringComparison.Ordinal);
         }
 
+        // What one module of this language is written in. The PowerShell side
+        // is C#: nobody writes several hundred lines of PowerShell by hand, so
+        // the flow and the machinery are C# modules and PowerShell is left as
+        // the wrapper the build folds into a single .cmd.
         public static string Extension(string language)
         {
-            return String.Equals(language, Vba, StringComparison.Ordinal) ? "bas" : "ps1";
+            return String.Equals(language, Vba, StringComparison.Ordinal) ? "bas" : "cs";
+        }
+
+        // What one language's finished artefact is: the single file somebody is
+        // given, rather than the modules it was assembled from.
+        public static string ArtefactExtension(string language)
+        {
+            return String.Equals(language, Vba, StringComparison.Ordinal) ? "xlsm" : "cmd";
         }
 
         // The mark a line comment starts with. The generators write their own
         // notes with it, so a caller never has to know which language it holds.
         public static string Comment(string language)
         {
-            return String.Equals(language, Vba, StringComparison.Ordinal) ? "'" : "#";
+            return String.Equals(language, Vba, StringComparison.Ordinal) ? "'" : "//";
         }
     }
 
@@ -338,12 +349,12 @@ namespace AppStudio
                 line.Text = op.Text;
                 line.TextKnown = op.TextKnown;
                 line.Keys = op.Keys;
-                line.Chord = PowerShellGen.SendKeysChord(op.Keys);
+                line.Chord = EngineGen.SendKeysChord(op.Keys);
                 line.Button = op.Button;
                 line.Times = op.Times;
                 line.WheelDelta = op.WheelDelta;
                 line.Reason = op.Reason;
-                line.SecretPrompt = op.Op == ScriptOp.AskSecret ? PowerShellGen.SecretPrompt(op) : null;
+                line.SecretPrompt = op.Op == ScriptOp.AskSecret ? EngineGen.SecretPrompt(op) : null;
                 line.VbaReachable = op.ReachableFromVba;
                 lines.Add(line);
                 pendingGap = 0;

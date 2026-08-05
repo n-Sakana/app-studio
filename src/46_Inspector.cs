@@ -20,6 +20,24 @@ namespace AppStudio
         // that says nothing looks the same as a chip that found nothing.
         public string Problem;
 
+        // What the accessibility layers said about the element under the
+        // pointer, when they have answered yet.
+        //
+        // Win32 alone cannot tell one control from another in an application
+        // that draws its own: a XAML window is one window handle, so the
+        // calculator's every digit and every operator reads back as the window
+        // itself. Hovering over nine different buttons and being told
+        // "Calculator" nine times is not information. These fields come from the
+        // same acquisition layers the rest of the product uses, asked for one
+        // point, bounded, and off the thread that must not fall behind.
+        public string ElementName;
+        public string ElementType;
+        public string AutomationId;
+        public string ElementSource;
+        // Set once the deeper read has been attempted, so "nothing was found
+        // here" can be told apart from "nothing has been looked for yet".
+        public bool ElementAsked;
+
         public bool Known
         {
             get { return Rect != null && Rect.Width > 0 && Rect.Height > 0; }
@@ -33,6 +51,8 @@ namespace AppStudio
         //
         // Only what was actually obtained goes in either: an empty field is left
         // out rather than printed as a dash.
+        // The element under the pointer, named. This is the line the operator
+        // is actually reading.
         public string Headline()
         {
             if (Problem != null)
@@ -40,35 +60,62 @@ namespace AppStudio
                 return Messages.Text("inspect-unknown.txt", "nothing could be read here") + "  (" + Problem + ")";
             }
             StringBuilder text = new StringBuilder();
+            if (!String.IsNullOrEmpty(ElementName) || !String.IsNullOrEmpty(ElementType))
+            {
+                Append(text, String.IsNullOrEmpty(ElementType)
+                    ? Messages.Text("inspect-control.txt", "control")
+                    : ElementType);
+                if (!String.IsNullOrEmpty(ElementName)) Append(text, "\"" + Shorten(ElementName, 40) + "\"");
+                return text.ToString();
+            }
             Append(text, TopLevel
                 ? Messages.Text("inspect-window.txt", "window")
                 : Messages.Text("inspect-control.txt", "control"));
-            if (!String.IsNullOrEmpty(Caption)) Append(text, "\"" + Shorten(Caption, 48) + "\"");
+            if (!String.IsNullOrEmpty(Caption)) Append(text, "\"" + Shorten(Caption, 40) + "\"");
+            if (ElementAsked) Append(text, Messages.Text("inspect-noelement.txt", "(this application publishes no element here)"));
             return text.ToString();
         }
 
+        // The window it belongs to. Always shown: whatever else can or cannot be
+        // read, the operator can always be told which window they are over, what
+        // class it is and which handle it has. Hiding this behind a second
+        // switch is what left the chip saying one word.
+        public string WindowLine()
+        {
+            StringBuilder text = new StringBuilder();
+            if (!String.IsNullOrEmpty(Caption)) Append(text, Shorten(Caption, 34));
+            string shown = String.IsNullOrEmpty(RealClass) ? ClassName : RealClass;
+            if (!String.IsNullOrEmpty(shown)) Append(text, Shorten(shown, 30));
+            if (Hwnd != 0) Append(text, "hwnd 0x" + Hwnd.ToString("X", CultureInfo.InvariantCulture));
+            return text.ToString();
+        }
+
+        // What identifies it to a program, and where it sits.
         public string Detail()
         {
             if (Problem != null) return "";
             StringBuilder text = new StringBuilder();
-            string shown = String.IsNullOrEmpty(RealClass) ? ClassName : RealClass;
-            if (!String.IsNullOrEmpty(shown)) Append(text, Shorten(shown, 40));
-            if (CtrlId != 0 && CtrlId != -1) Append(text, "id " + CtrlId.ToString(CultureInfo.InvariantCulture));
+            if (!String.IsNullOrEmpty(AutomationId)) Append(text, "id " + Shorten(AutomationId, 28));
+            else if (CtrlId != 0 && CtrlId != -1) Append(text, "id " + CtrlId.ToString(CultureInfo.InvariantCulture));
             if (!String.IsNullOrEmpty(ProcessName)) Append(text, ProcessName);
             if (Rect != null)
             {
                 Append(text, Rect.Width.ToString(CultureInfo.InvariantCulture) + "x" + Rect.Height.ToString(CultureInfo.InvariantCulture));
             }
+            if (!String.IsNullOrEmpty(ElementSource)) Append(text, ElementSource);
             return text.ToString();
         }
 
         // Everything on one line, for anywhere that has one line to say it in.
         public string Chip()
         {
-            string head = Headline();
+            StringBuilder text = new StringBuilder();
+            text.Append(Headline());
+            string window = WindowLine();
+            if (window.Length > 0) text.Append("   ").Append(window);
             string more = Detail();
-            if (more.Length == 0) return head;
-            return head + "   " + more;
+            if (more.Length > 0) text.Append("   ").Append(more);
+            return text.ToString();
         }
 
         private static void Append(StringBuilder text, string piece)

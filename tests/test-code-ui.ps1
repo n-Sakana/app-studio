@@ -182,75 +182,51 @@ try {
     if ($ps.IndexOf('A1', [StringComparison]::Ordinal) -lt 0) { throw 'the PowerShell on screen does not carry the recorded steps' }
     # The workflow is the procedure, not the machinery. Three recorded steps are
     # a handful of lines, and no address or literal is written into it.
-    $workflowLines = @(($ps -split "`r`n|`n") | Where-Object { $_ -match "^\s*(FindWindow|InvokeElement|SetElementText|SendKeys|AskSecret|Unsupported)\s+'" })
+    $workflowLines = @(($ps -split "`r`n|`n") | Where-Object { $_ -match "^\s*(Runtime\.)?(FindWindow|InvokeElement|SetElementText|SendKeys|AskSecret|Unsupported)\s*\(?\s*['`"]" })
     if ($workflowLines.Count -lt 3) { throw ('the workflow on screen has ' + $workflowLines.Count + ' step lines') }
     if ($ps.IndexOf('uia.automationId', [StringComparison]::Ordinal) -ge 0) { throw 'the workflow on screen carries an address, which belongs in RecordedFacts' }
-    $parsed = [AppStudio.ScriptRun]::CheckPowerShell($ps)
-    if (-not $parsed.Ok) { throw ('what the screen opened with does not parse: ' + (($parsed.Problems) -join ' / ')) }
+    # The engine is one program in five files, so a single module is not
+    # compiled on its own here - what the screen opened with is checked for
+    # being the entry point it claims to be. test-codegen compiles the set.
+    foreach ($marker in @('namespace AppStudioRun', 'public static class Workflow', 'Runtime.Start(', 'Runtime.Complete()')) {
+        if ($ps.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+            throw ('what the screen opened with is not the engine entry point: ' + $marker + ' is missing')
+        }
+    }
 
     # --- 3. the module tree is a shape, and every module is reachable in it ---
     # The procedure a person edits is first and on its own; the three modules
     # that carry operations out are gathered under one heading that is shut when
     # the screen opens. Nothing is removed by being folded, so every one of the
     # ten is still reachable - after opening the heading that says it is there.
-    # The language that is not on screen is shut, so only the current one's
-    # heading is in the tree at this point. That is the shape being asserted.
-    $runtimeGroup = Message 'code-group-runtime.txt' 'The machinery'
-    $groups = @()
-    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
-        if ($item.Current.Name -eq $runtimeGroup) { $groups += $item }
+    # The tree is the project tree of the form being edited: its modules, by
+    # their file names, and nothing else. The other form is chosen with the
+    # button above, so listing its modules here as well - folded or not - would
+    # be the same choice offered twice.
+    function TreeNames($window) {
+        $names = @()
+        foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) { $names += $item.Current.Name }
+        return $names
     }
-    if ($groups.Count -ne 1) { throw ('the runtime modules are not gathered under one heading: found ' + $groups.Count) }
-    foreach ($group in $groups) {
-        $state = $group.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
-        if ($state.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Collapsed) {
-            throw 'the runtime heading is already open when the screen opens'
-        }
+    $psModules = @('Workflow.cs', 'RecordedFacts.cs', 'RuntimeCore.cs', 'RuntimeLocator.cs', 'RuntimeNative.cs')
+    $vbaModules = @('Workflow.bas', 'RecordedFacts.bas', 'RuntimeCore.bas', 'RuntimeLocator.bas', 'RuntimeNative.bas')
+    $names = TreeNames $window
+    foreach ($module in $psModules) {
+        if ($names -notcontains $module) { throw ('the module tree does not list ' + $module + ': ' + ($names -join ', ')) }
     }
-    # Nor is the other language's set of modules on screen before it is asked
-    # for: the tree opens on the one being edited.
-    if ($null -ne (Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.bas')) {
-        throw 'the other language is already unfolded when the screen opens'
+    foreach ($module in $vbaModules) {
+        if ($names -contains $module) { throw ('the tree lists the other form''s module ' + $module + ' while PowerShell is the one being edited') }
     }
-    # The first module under the current language is the one to edit.
-    $firstModule = $null
-    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
-        if ($item.Current.Name -like '*.ps1' -or $item.Current.Name -like '*.bas') {
-            if ($null -eq $firstModule) { $firstModule = $item.Current.Name }
-        }
+    if ($names.Count -ne $psModules.Count) {
+        throw ('the tree holds ' + $names.Count + ' rows for ' + $psModules.Count + ' modules: ' + ($names -join ', '))
     }
-    if ($firstModule -ne 'Workflow.ps1') { throw ('the tree opens on ' + $firstModule + ' rather than on the procedure') }
-    # A row says what the module is for in the reader's own words, not only what
-    # the file is called.
-    $treeWords = @()
-    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::Text)) { $treeWords += $item.Current.Name }
-    $treeJoined = ($treeWords -join ' | ')
-    foreach ($word in @((Message 'code-role-workflow.txt' 'the procedure'), (Message 'code-role-recorded.txt' 'what the recording found'), $runtimeGroup)) {
-        if ($treeJoined.IndexOf($word, [StringComparison]::Ordinal) -lt 0) {
-            throw ('the module tree does not say what a module is for: "' + $word + '" is not on screen')
-        }
-    }
-    foreach ($group in $groups) {
-        $group.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-        Start-Sleep -Milliseconds 400
-    }
-    # The other language's group has to be opened too, which means opening the
-    # language first.
-    $vbaNode = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) (Message 'code-lang-vba.txt' 'VBA')
-    if ($null -ne $vbaNode) {
-        $vbaNode.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-        Start-Sleep -Milliseconds 500
-        foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
-            if ($item.Current.Name -ne $runtimeGroup) { continue }
-            $item.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-        }
-        Start-Sleep -Milliseconds 500
-    }
-    $expected = @('Workflow.ps1', 'RecordedFacts.ps1', 'RuntimeCore.ps1', 'RuntimeLocator.ps1', 'RuntimeNative.ps1',
-        'Workflow.bas', 'RecordedFacts.bas', 'RuntimeCore.bas', 'RuntimeLocator.bas', 'RuntimeNative.bas')
-    foreach ($module in $expected) {
-        if ($null -eq (Wait-Named $window ([System.Windows.Automation.ControlType]::TreeItem) $module 8000)) {
-            throw ('the module tree does not list ' + $module)
+    if ($names[0] -ne 'Workflow.cs') { throw ('the tree opens on ' + $names[0] + ' rather than on the procedure') }
+    # A row is a file name and nothing else. The count above already says there
+    # are exactly as many rows as modules; this says each row is the module's
+    # name rather than a description of it dressed up as one.
+    foreach ($name in $names) {
+        if (-not ($name -like '*.cs')) {
+            throw ('a module row is not a file name: "' + $name + '"')
         }
     }
     # Every row has to fit the pane it is in. A tree whose text runs out past
@@ -268,7 +244,7 @@ try {
 
     # Choosing the runtime shows the runtime, and that is where the nine
     # operations live now.
-    $core = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'RuntimeCore.ps1'
+    $core = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'RuntimeCore.cs'
     $core.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
     Start-Sleep -Milliseconds 900
     $runtime = Editor-Text $window
@@ -276,7 +252,7 @@ try {
     foreach ($op in @('FindWindow', 'FocusElement', 'InvokeElement', 'SetElementText', 'ReadElementText', 'SendKeys', 'WaitGap', 'WaitIdle', 'AskSecret')) {
         if ($runtime.IndexOf($op, [StringComparison]::Ordinal) -lt 0) { throw ('the PowerShell runtime on screen is missing ' + $op) }
     }
-    $back = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.ps1'
+    $back = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.cs'
     $back.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
     Start-Sleep -Milliseconds 900
     if ((Editor-Text $window) -ne $ps) { throw 'going back to the workflow did not bring it back' }
@@ -365,19 +341,17 @@ try {
             return $marked
         } finally { $bitmap.Dispose() }
     }
-    $lastLine = ''
-    $allLines = @($ps -split "`r`n|`n")
-    for ($index = $allLines.Count - 1; $index -ge 0; $index--) {
-        if ($allLines[$index].Trim().Length -gt 0) { $lastLine = $allLines[$index].Trim(); break }
-    }
-    if ($lastLine.Length -lt 4) { throw 'the generated procedure has no last line to look for' }
     $inkAtTop = Ink $handle $editRect (Join-Path $shotDir 'editor-at-top.png')
     if ($inkAtTop -lt 100) { throw ('the editor draws almost nothing even at the top of the file: ' + $inkAtTop) }
-    $findBox = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-find.txt' 'Find') 8000
-    if ($null -eq $findBox) { throw 'the editor has no find box' }
-    $findBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($lastLine)
-    Start-Sleep -Milliseconds 600
-    $null = Press $window (Message 'code-find-next.txt' 'Next')
+    # Find is not a permanent bar over every file any more - it appears on
+    # Ctrl+F - so the way to the end of the file here is the scroll bar, which
+    # is also the way a person gets there.
+    $restingFind = Find-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-find.txt' 'Find')
+    if ($null -ne $restingFind -and -not $restingFind.Current.IsOffscreen) {
+        throw 'the find box is on screen before anybody asked for it'
+    }
+    $scroll = $editBox.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
+    $scroll.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll, 100)
     Start-Sleep -Milliseconds 900
     $scrolled = (Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 8000).Current.BoundingRectangle
     $scrolledInk = Ink $handle $scrolled (Join-Path $shotDir 'editor-scrolled.png')
@@ -386,7 +360,7 @@ try {
             ' marked pixels against ' + $inkAtTop + ' at the top of the same file. The colour layer is ' +
             'being cut off at the viewport, so the code stops being drawn where the first screenful ended.')
     }
-    $findBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
+    $scroll.SetScrollPercent([System.Windows.Automation.ScrollPattern]::NoScroll, 0)
     Start-Sleep -Milliseconds 400
 
     # --- 3c. concentrating, there and back, losing nothing --------------------
@@ -415,7 +389,7 @@ try {
     $fullShare = ($fullRect.Width * $fullRect.Height) / ($winRect.Width * $winRect.Height)
     if ($fullShare -lt 0.45) { throw ('the concentrated editor holds ' + [int]($fullShare * 100) + '% of the window') }
     if ((Editor-Text $window) -ne $typed) { throw 'going to full width lost what had been typed' }
-    if ($null -eq (Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.ps1')) {
+    if ($null -eq (Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.cs')) {
         throw 'full width editing dropped the module tree'
     }
     $null = Press $window (Message 'code-full-exit.txt' 'Leave full width editing')
@@ -502,7 +476,7 @@ try {
     $null = Shoot $window '06-stale-answer-refused'
 
     # --- 6. a real answer is shown as a difference before it replaces anything -
-    $answerBody = @('# rewritten by the assistant', 'FindWindow -Class ''FixtureWindow'' -Title ''Fixture Window''', 'WaitIdle -BudgetMs 2500')
+    $answerBody = @('// rewritten by the assistant', 'namespace AppStudioRun', '{', '    public static class Workflow', '    {', '        public static void Run(int settleMs)', '        {', '            Runtime.Start(settleMs);', '            Runtime.Complete();', '        }', '    }', '}')
     Set-Board (@(
         ('#@APPSTUDIO ' + $requestId + ' SUMMARY BEGIN'),
         'replaced the body so the difference is obvious',

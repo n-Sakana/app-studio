@@ -39,14 +39,14 @@ if($before.Count-ne10){throw ('the project holds '+$before.Count+' modules inste
 function Step-Lines([string]$text){
  $found=New-Object System.Collections.ArrayList
  foreach($line in ($text -split "`r`n|`n")){
-  if($line -match "^\s*(FindWindow|FocusElement|InvokeElement|SetElementText|ReadElementText|SendKeys|AskSecret|Unsupported)\s+['`"]"){[void]$found.Add($line)}
+  if($line -match "^\s*(Runtime\.)?(FindWindow|FocusElement|InvokeElement|SetElementText|ReadElementText|SendKeys|AskSecret|Unsupported)\s*\(?\s*['`"]"){[void]$found.Add($line)}
  }
  return ,$found
 }
 function Press-Lines([string]$text){
  $found=New-Object System.Collections.ArrayList
  foreach($line in ($text -split "`r`n|`n")){
-  if($line -match "^\s*InvokeElement\s+['`"]"){[void]$found.Add($line)}
+  if($line -match "^\s*(Runtime\.)?InvokeElement\s*\(?\s*['`"]"){[void]$found.Add($line)}
  }
  return ,$found
 }
@@ -54,7 +54,8 @@ function Press-Lines([string]$text){
 # The recording never switched to the window, so the plan states the window the
 # first step expects before it. That is one line on top of the nine presses.
 foreach($language in @('powershell','vba')){
- $quote=if($language -eq 'vba'){'"'}else{"'"}
+ # Both languages quote a step id the same way now: the engine is C#.
+ $quote='"'
  $workflow=$project.Find($language,'Workflow').Text
  $steps=Press-Lines $workflow
  if($steps.Count-ne9){throw ($language+' workflow has '+$steps.Count+' press lines instead of 9')}
@@ -79,7 +80,8 @@ foreach($language in @('powershell','vba')){
 
 # Eight steps left, in order, with 5 gone and nothing else disturbed.
 foreach($language in @('powershell','vba')){
- $quote=if($language -eq 'vba'){'"'}else{"'"}
+ # Both languages quote a step id the same way now: the engine is C#.
+ $quote='"'
  $workflow=$project.Find($language,'Workflow').Text
  $steps=Press-Lines $workflow
  if($steps.Count-ne8){throw ($language+' workflow has '+$steps.Count+' press lines after the deletion instead of 8')}
@@ -105,12 +107,12 @@ if($untouched-ne8){throw ('only '+$untouched+' modules were checked for being un
 
 # The address of step 5 is still on file. Leaving it there is what makes the
 # deletion one line: nothing has to be renumbered and nothing has to be found.
-if(-not$project.Find('powershell','RecordedFacts').Text.Contains("'A5'")){throw 'the PowerShell RecordedFacts lost the block for the deleted step'}
+if(-not$project.Find('powershell','RecordedFacts').Text.Contains('"A5"')){throw 'the engine RecordedFacts lost the block for the deleted step'}
 if(-not$project.Find('vba','RecordedFacts').Text.Contains('Case "A5"')){throw 'the VBA RecordedFacts lost the Case for the deleted step'}
 
 # What is left still has to be code.
-$check=[AppStudio.ScriptRun]::CheckPowerShell($project.Find('powershell','Workflow').Text)
-if(-not$check.Ok){throw ('the edited PowerShell workflow does not parse: '+(($check.Problems)-join' / '))}
+$check=[AppStudio.ScriptRun]::CheckEngine($project.Files('powershell'))
+if(-not$check.Ok){throw ('the edited engine does not compile: '+(($check.Problems)-join' / '))}
 $vbaCheck=[AppStudio.ScriptRun]::CheckVba($project.Find('vba','Workflow').Text,'Workflow')
 if(-not$vbaCheck.Ok){throw ('the edited VBA workflow is not structurally sound: '+(($vbaCheck.Problems)-join' / '))}
 
@@ -119,8 +121,8 @@ if(-not$vbaCheck.Ok){throw ('the edited VBA workflow is not structurally sound: 
 $runDir=Join-Path $temp 'run'
 $entry=[AppStudio.ScriptRun]::Write($project.Files('powershell'),$runDir,'powershell')
 if($null-eq$entry){throw 'the module set has nothing to start from'}
-if([IO.Path]::GetFileName($entry)-ne'Workflow.ps1'){throw ('the run starts from '+[IO.Path]::GetFileName($entry))}
-foreach($name in @('Workflow.ps1','RecordedFacts.ps1','RuntimeCore.ps1','RuntimeLocator.ps1','RuntimeNative.ps1')){
+if([IO.Path]::GetFileName($entry)-ne'Workflow.cs'){throw ('the run starts from '+[IO.Path]::GetFileName($entry))}
+foreach($name in @('Workflow.cs','RecordedFacts.cs','RuntimeCore.cs','RuntimeLocator.cs','RuntimeNative.cs')){
  if(-not(Test-Path (Join-Path $runDir $name))){throw ('the run folder is missing '+$name)}
 }
 

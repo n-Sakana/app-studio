@@ -39,45 +39,66 @@ namespace AppStudio
     {
         public static CheckResult Check(string language, string text)
         {
-            return Check(language, text, CodeModules.Workflow);
+            return Check(language, null, text, CodeModules.Workflow);
         }
 
         // Which module this is matters for VBA: only the workflow is expected to
         // carry the entry point, and reporting a runtime module as missing one
         // would be reporting a fault that is not there.
-        public static CheckResult Check(string language, string text, string moduleName)
+        //
+        // The engine language has no equivalent question. Its five modules are
+        // one program - a workflow on its own is a set of calls into the other
+        // four - so the whole automation is compiled and the module on screen is
+        // not checked apart from it.
+        public static CheckResult Check(string language, List<CodeFile> modules, string text, string moduleName)
         {
             if (String.Equals(language, ScriptLanguages.Vba, StringComparison.Ordinal)) return CheckVba(text, moduleName);
-            return CheckPowerShell(text);
+            return CheckEngine(modules);
         }
 
-        // Parsed by Windows PowerShell 5.1 itself. Nothing here re-implements
-        // its grammar.
-        public static CheckResult CheckPowerShell(string text)
+        // Compiled by the same C# compiler a run uses, in a separate process, so
+        // a mistake is the real one with the real line number. Nothing here
+        // re-implements the grammar, and nothing here compiles a different text
+        // from the one a run would: the check and the run are assembled by the
+        // same builder.
+        public static CheckResult CheckEngine(List<CodeFile> modules)
         {
             CheckResult result = new CheckResult();
-            result.Method = "parsed by Windows PowerShell 5.1";
+            result.Method = "compiled by the C# compiler a run uses";
             string folder = null;
             try
             {
+                List<CodeFile> mine = CodeBuild.OfLanguage(modules, ScriptLanguages.PowerShell);
+                if (mine.Count == 0)
+                {
+                    result.Problems.Add("There are no modules to compile, so nothing is known about this automation.");
+                    result.Headline = "Nothing was checked.";
+                    return result;
+                }
+                string broken = CodeBuild.HereStringBreak(mine);
+                if (broken != null)
+                {
+                    result.Problems.Add(broken);
+                    result.Headline = "The engine could not be assembled.";
+                    return result;
+                }
                 folder = TempFolder();
                 string path = Path.Combine(folder, "check.ps1");
-                File.WriteAllText(path, text == null ? "" : text, new UTF8Encoding(false));
-                string command =
-                    "$errors = $null; " +
-                    "[void][System.Management.Automation.Language.Parser]::ParseFile('" + path.Replace("'", "''") + "', [ref]$null, [ref]$errors); " +
-                    "if ($errors -and $errors.Count -gt 0) { foreach ($e in $errors) { Write-Output ('line ' + $e.Extent.StartLineNumber + ': ' + $e.Message) }; exit 1 } else { exit 0 }";
-                ProcessResult run = Run(PowerShellPath(), "-NoProfile -ExecutionPolicy Bypass -NonInteractive -Command \"" + command.Replace("\"", "\\\"") + "\"", null, 30000);
+                // With a byte order mark. PowerShell 5.1 reads a file without one
+                // as ANSI, and a window title that is not ASCII would arrive at
+                // the compiler as something else.
+                File.WriteAllText(path, CodeBuild.CheckScript(mine), new UTF8Encoding(true));
+                ProcessResult run = Run(PowerShellPath(), "-NoProfile -ExecutionPolicy Bypass -NonInteractive -File \"" + path + "\"", folder, 60000);
                 if (run.TimedOut)
                 {
-                    result.Problems.Add("The parser did not finish within 30 seconds, so nothing is known about this script.");
+                    result.Problems.Add("The compiler did not finish within 60 seconds, so nothing is known about this automation.");
                     result.Headline = "The check did not finish.";
                     return result;
                 }
                 if (run.ExitCode == 0)
                 {
                     result.Ok = true;
-                    result.Headline = "PowerShell parsed this without an error.";
+                    result.Headline = "The C# compiler accepted all " + mine.Count.ToString(CultureInfo.InvariantCulture) + " modules.";
                     return result;
                 }
                 string[] lines = (run.Output + run.Error).Replace("\r\n", "\n").Split('\n');
@@ -85,8 +106,8 @@ namespace AppStudio
                 {
                     if (lines[index].Trim().Length > 0) result.Problems.Add(lines[index].Trim());
                 }
-                if (result.Problems.Count == 0) result.Problems.Add("The parser reported a failure but said nothing about it.");
-                result.Headline = result.Problems.Count.ToString(CultureInfo.InvariantCulture) + " problem(s) in the PowerShell.";
+                if (result.Problems.Count == 0) result.Problems.Add("The compiler reported a failure but said nothing about it.");
+                result.Headline = result.Problems.Count.ToString(CultureInfo.InvariantCulture) + " problem(s) in the engine.";
                 return result;
             }
             catch (Exception exception)
@@ -235,21 +256,31 @@ namespace AppStudio
         // The whole automation, not one file of it.
         //
         // A workflow on its own is a list of calls to a runtime that is not
-        // there. Every module of the language is written into the same folder
-        // and the workflow is the one that is started, exactly the way the
-        // operator would run it from the code folder.
+        // there. Every module of the language is written into the same folder,
+        // and beside them goes the wrapper that compiles them and calls the
+        // entry point - the same wrapper the build folds into the .cmd, so a run
+        // proves the artefact rather than something adjacent to it.
         public static RunResult RunPowerShellProject(List<CodeFile> modules, string folder, int timeoutMs)
         {
             RunResult result = new RunResult();
-            result.Method = "Windows PowerShell 5.1, separate process";
+            result.Method = "the C# engine, compiled and run by Windows PowerShell 5.1 in a separate process";
             try
             {
-                string entry = Write(modules, folder, ScriptLanguages.PowerShell);
-                if (entry == null)
+                List<CodeFile> mine = CodeBuild.OfLanguage(modules, ScriptLanguages.PowerShell);
+                string written = Write(modules, folder, ScriptLanguages.PowerShell);
+                if (written == null)
                 {
                     result.Problem = "There is no " + CodeModules.Workflow + " module to start from, so nothing was run.";
                     return result;
                 }
+                string broken = CodeBuild.HereStringBreak(mine);
+                if (broken != null)
+                {
+                    result.Problem = broken;
+                    return result;
+                }
+                string entry = Path.Combine(folder, CodeModules.Workflow + ".ps1");
+                File.WriteAllText(entry, CodeBuild.Script(mine), new UTF8Encoding(true));
                 result.Started = true;
                 ProcessResult run = Run(PowerShellPath(), "-NoProfile -ExecutionPolicy Bypass -STA -File \"" + entry + "\"", folder, timeoutMs);
                 result.ExitCode = run.ExitCode;
@@ -321,7 +352,7 @@ namespace AppStudio
             return result;
         }
 
-        private static bool WaitForExit(int processId, int timeoutMs)
+        public static bool WaitForExit(int processId, int timeoutMs)
         {
             if (processId <= 0) return true;
             try
@@ -338,7 +369,7 @@ namespace AppStudio
             }
         }
 
-        private static void Kill(int processId)
+        public static void Kill(int processId)
         {
             if (processId <= 0) return;
             try
@@ -460,7 +491,7 @@ namespace AppStudio
         // Which process this instance of the host actually is, so a host that
         // has to be closed is the one this started and not somebody's open
         // workbook.
-        private static int ProcessOf(object application)
+        public static int ProcessOf(object application)
         {
             try
             {
@@ -475,24 +506,24 @@ namespace AppStudio
             }
         }
 
-        private static string Innermost(Exception exception)
+        public static string Innermost(Exception exception)
         {
             Exception current = exception;
             while (current.InnerException != null) current = current.InnerException;
             return current.Message;
         }
 
-        private static object Get(object target, string name)
+        public static object Get(object target, string name)
         {
             return target.GetType().InvokeMember(name, System.Reflection.BindingFlags.GetProperty, null, target, null);
         }
 
-        private static void Set(object target, string name, object value)
+        public static void Set(object target, string name, object value)
         {
             target.GetType().InvokeMember(name, System.Reflection.BindingFlags.SetProperty, null, target, new object[] { value });
         }
 
-        private static object Call(object target, string name, params object[] args)
+        public static object Call(object target, string name, params object[] args)
         {
             return target.GetType().InvokeMember(name, System.Reflection.BindingFlags.InvokeMethod, null, target, args);
         }

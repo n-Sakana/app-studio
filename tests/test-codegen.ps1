@@ -56,7 +56,7 @@ if($plan.SecretCount-ne1){throw ('secret steps counted wrongly: '+$plan.SecretCo
 if($plan.Unsupported-ne1){throw ('the step with only a position should be the one refused, got '+$plan.Unsupported)}
 if($plan.UnreachableFromVba-lt1){throw 'the UIA only element was not counted as out of reach for VBA'}
 
-$psFiles=[AppStudio.PowerShellGen]::BuildFiles($plan,$session)
+$psFiles=[AppStudio.EngineGen]::BuildFiles($plan,$session)
 $vbaFiles=[AppStudio.VbaGen]::BuildFiles($plan,$session)
 
 # One line of the plan is one line of the workflow. The waits and the focus
@@ -117,8 +117,8 @@ foreach($pair in @(@('powershell',$ps),@('vba',$vba))){
 
 # What the recording refused to keep is asked for, not invented.
 if(-not$psWorkflow.Contains("AskSecret")){throw 'the PowerShell does not ask the operator for the secret'}
-if(-not$psFacts.Contains('prompt =')){throw 'the PowerShell kept no prompt for the secret step'}
-if($psFacts.Contains("text = 'A4'")){throw 'the secret step was turned into a write'}
+if(-not$psFacts.Contains('.Asks("')){throw 'the engine kept no prompt for the secret step'}
+if($psFacts.Contains('.Types("A4")')){throw 'the secret step was turned into a write'}
 if(-not$vbaWorkflow.Contains('AskSecret ')){throw 'the VBA does not stop for the secret'}
 
 # The element that only ever existed in the accessibility tree is reachable from
@@ -128,22 +128,23 @@ if(-not$vbaFacts.Contains('addressed only through UI Automation')){throw 'the VB
 if(-not$vbaWorkflow.Contains('Unsupported     "A6"')){throw 'the VBA workflow does not refuse the UIA only step where it happens'}
 
 # The step with no address at all stops both, with a reason.
-if(-not$psWorkflow.Contains("Unsupported     'A7'")){throw 'the PowerShell does not stop at the step it cannot address'}
+if($psWorkflow-notmatch'Runtime\.Unsupported\(\s*"A7"\);'){throw 'the engine does not stop at the step it cannot address'}
 if(-not$vbaWorkflow.Contains('Unsupported     "A7"')){throw 'the VBA does not stop at the step it cannot address'}
-if(-not$psFacts.Contains('reason =')){throw 'the PowerShell kept no reason for the step it refuses'}
+if(-not$psFacts.Contains('.Refuses("')){throw 'the engine kept no reason for the step it refuses'}
 
 # A recorded chord reaches the script in a form that can actually be sent.
-if(-not$psFacts.Contains("chord    = '^s'")){throw 'the recorded chord was not translated'}
+if(-not$psFacts.Contains('.Sends("^s"')){throw 'the recorded chord was not translated'}
 if(-not$vbaFacts.Contains('gChord = "^s"')){throw 'the recorded chord was not translated into the VBA'}
-if([AppStudio.PowerShellGen]::SendKeysChord('Ctrl+Shift+F5')-ne'^+{F5}'){throw 'a modified function key was translated wrongly'}
-if([AppStudio.PowerShellGen]::SendKeysChord('Win+D')-ne''){throw 'a key with no equivalent was not reported as having none'}
+if([AppStudio.EngineGen]::SendKeysChord('Ctrl+Shift+F5')-ne'^+{F5}'){throw 'a modified function key was translated wrongly'}
+if([AppStudio.EngineGen]::SendKeysChord('Win+D')-ne''){throw 'a key with no equivalent was not reported as having none'}
 
 # Every generated module has to be what it claims to be, not something that
 # looks like it. A runtime module is not expected to carry the entry point.
-foreach($f in $psFiles){
- $check=[AppStudio.ScriptRun]::CheckPowerShell($f.Text)
- if(-not$check.Ok){throw ('the generated '+$f.FileName+' does not parse: '+(($check.Problems)-join' / '))}
-}
+# The engine is one program in five files, so it is compiled as one. A module
+# on its own is a set of calls into the other four and says nothing by itself.
+$check=[AppStudio.ScriptRun]::CheckEngine($psFiles)
+if(-not$check.Ok){throw ('the generated engine does not compile: '+(($check.Problems)-join' / '))}
+if(-not$check.Method.Contains('compil')){throw 'the engine check does not say that it compiled anything'}
 foreach($f in $vbaFiles){
  $vbaCheck=[AppStudio.ScriptRun]::CheckVba($f.Text,$f.Name)
  if(-not$vbaCheck.Ok){throw ('the generated '+$f.FileName+' is not structurally sound: '+(($vbaCheck.Problems)-join' / '))}
@@ -164,10 +165,10 @@ if($project.Files('powershell')[0].Name-ne'Workflow'){throw 'the module a person
 if(-not$project.Files('powershell')[0].IsWorkflow){throw 'the workflow module does not say it is the workflow'}
 if($project.Entry('vba').Name-ne'Workflow'){throw 'the VBA entry point module is not Workflow'}
 if($project.DiffersFromBaseline('powershell')){throw 'a freshly opened project already differs from the generated version'}
-$project.SetText('powershell','Workflow',$psWorkflow+"`r`n# edited by hand")
+$project.SetText('powershell','Workflow',$psWorkflow+"`r`n// edited by hand")
 if(-not$project.DiffersFromBaseline('powershell')){throw 'an edit was not noticed'}
 $incoming=New-Object 'System.Collections.Generic.List[AppStudio.CodeFile]'
-$file=New-Object AppStudio.CodeFile;$file.Language='powershell';$file.Name='Workflow';$file.Text="# from an assistant`r`nWrite-Output 'x'"
+$file=New-Object AppStudio.CodeFile;$file.Language='powershell';$file.Name='Workflow';$file.Text="// from an assistant`r`nnamespace AppStudioRun { internal static class Spare { } }"
 $incoming.Add($file)
 $project.Apply($incoming)
 if($project.Find('powershell','Workflow').Text-notmatch'from an assistant'){throw 'the answer was not applied'}
@@ -179,7 +180,7 @@ $project.RestoreBaseline('powershell')
 if($project.DiffersFromBaseline('powershell')){throw 'restoring the generated version left a difference'}
 $saveProblem=$project.Save()
 if($null-ne$saveProblem){throw ('the code folder could not be written: '+$saveProblem)}
-foreach($name in @('current\Workflow.ps1','current\RecordedFacts.ps1','current\RuntimeCore.ps1','current\RuntimeLocator.ps1','current\RuntimeNative.ps1','current\Workflow.bas','current\RuntimeCore.bas','baseline\Workflow.ps1','code.json')){
+foreach($name in @('current\Workflow.cs','current\RecordedFacts.cs','current\RuntimeCore.cs','current\RuntimeLocator.cs','current\RuntimeNative.cs','current\Workflow.bas','current\RuntimeCore.bas','baseline\Workflow.cs','code.json')){
  if(-not(Test-Path (Join-Path $project.Folder $name))){throw ('the code folder is missing '+$name)}
 }
 

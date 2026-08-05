@@ -87,16 +87,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `33_ScreensPdf` | AI へ渡す `screens.pdf` と容量予算 |
 | `34_Acquire` | 取得と撮影の共通処理、秘密欄の黒塗り、出力の書き出し口 |
 | `36_ScriptModel` | 録画 step を両言語共通の操作列へ落とす唯一の場所。PowerShell と VBA が同じ録画について食い違わない根拠。`ScriptModel.Lines` が「1操作＝1行」の workflow 行列へ畳み、module 名と役割（`CodeModules` / `CodeRoles`）もここで決める |
-| `37_PowerShellGen` | PowerShell の初期コード生成。`Workflow` / `RecordedFacts` / `RuntimeCore` / `RuntimeLocator` / `RuntimeNative` の5 module を書く。UIA でウィンドウと要素を解決し、位置は要素矩形に対する割合で扱う |
+| `37_EngineGen` | PowerShell モードの初期コード生成。中身は **C#** で、`Workflow` / `RecordedFacts` / `RuntimeCore` / `RuntimeLocator` / `RuntimeNative` の5 module（`.cs`）を書く。UIA でウィンドウと要素を解決し、位置は要素矩形に対する割合で扱う。PowerShell を手書きさせないための層であり、PowerShell 側は `47_CodeBuild` が被せる最小ラッパーだけになる |
 | `38_VbaGen` | VBA の初期コード生成。**同じ5 module 名**で書く。Win32 だけで届く範囲を書き、届かない step は workflow 上で `Unsupported` として理由付きで停止させる |
 | `39_CodeProject` | 生成版・現行版・取り込み直前版の3版保持と `runtime/sessions/<id>/code/` への保存・読み戻し。複数 module を module 順に並べ、`Workflow` を entry point として扱う |
 | `40_Handoff` | AI へ渡す依頼文1個の組み立て。**1回のコピー・1回の貼り付け**で、コード・操作ログ・台帳は入れず添付2ファイルへ回す。添付の実在検査もここ |
 | `41_Intake` | 返答の解析。request id 照合、BEGIN/END/COMPLETE/PART、装飾除去、拒否理由 |
 | `42_Diff` | 行単位の差分。反映前に何が変わるのかを見せるためだけに使う |
 | `43_CodeScreen` | コード編集の専用ワークスペース。自前の workspace bar、役割で階層化した module tree、形式切替、通常／集中の2 layout、検証、実行、AI への送りと受け、差分と復帰 |
-| `44_ScriptRun` | PowerShell の構文検証と module 一式での実行、VBA の構造検証（module 別）と VBA ホストへの全 module 取り込み実行 |
+| `44_ScriptRun` | engine（C#）を**実際にコンパイル**しての検証と module 一式での実行、VBA の構造検証（module 別）と VBA ホストへの全 module 取り込み実行。検証と実行は `47_CodeBuild` が組む同一のテキストを使う |
 | `45_CodeEditor` | コードを読み書きする箱。行番号、PowerShell/VBA の色分け、検索。色は透明前景の TextBox の背後へ描き、編集そのものは素の TextBox のまま保つ |
 | `46_Inspector` | 録画中の任意インスペクター用に、ポインタ下の1点を **Win32 だけで有界に**読む。UIA は使わない（数百 ms かかり、応答しないアプリで止まるため）。例外を投げず、読めなかったことを事実として返す |
+| `47_CodeBuild` | module を**渡せる1本**へ畳む層。PowerShell モードは batch ヘッダ + 最小 PowerShell ラッパー + C# engine を1つの `.cmd` にまとめる（実行時に `Add-Type` でコンパイルするので、追加ランタイムも未署名 EXE も生まない）。VBA モードは Excel を late binding で使って5 module を取り込んだ `.xlsm` を書き、ホストは必ず閉じる。VBA ホストが無い／VBA プロジェクトへのアクセスが許可されていない場合は名指しで失敗させ、迂回しない |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |

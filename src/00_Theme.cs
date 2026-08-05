@@ -646,11 +646,16 @@ namespace AppStudio
 "  <Setter Property='Foreground' Value='{DynamicResource DangerText}'/>" +
 "</Style>" +
 
+// One button, one height, everywhere. This used to be a second size, and the
+// result was rows in which the two buttons that do the same kind of thing were
+// visibly different objects - "replay" and "edit as code" at forty units beside
+// "open the report" at thirty four, and, worse, the PowerShell and VBA buttons
+// at two different sizes while the product's own rule is that the two languages
+// are treated identically. Importance is said with colour. It is never said
+// with size, because size is what tells a reader that two things are different
+// kinds of thing.
 "<Style x:Key='AppButtonCompact' TargetType='Button' BasedOn='{StaticResource AppButton}'>" +
-"  <Setter Property='Height' Value='34'/>" +
 "  <Setter Property='MinWidth' Value='0'/>" +
-"  <Setter Property='Padding' Value='12,0,12,0'/>" +
-"  <Setter Property='FontSize' Value='12'/>" +
 "</Style>" +
 
 "<Style x:Key='AppIconButton' TargetType='Button' BasedOn='{StaticResource AppButton}'>" +
@@ -668,9 +673,9 @@ namespace AppStudio
 // pressing it will do. Used where a feature has to show that it exists
 // and whether it is on, in one control.
 "<Style x:Key='AppToggleButton' TargetType='ToggleButton'>" +
-"  <Setter Property='Height' Value='34'/>" +
-"  <Setter Property='Padding' Value='12,0,12,0'/>" +
-"  <Setter Property='FontSize' Value='12'/>" +
+"  <Setter Property='Height' Value='40'/>" +
+"  <Setter Property='Padding' Value='16,0,16,0'/>" +
+"  <Setter Property='FontSize' Value='13'/>" +
 "  <Setter Property='FontWeight' Value='SemiBold'/>" +
 "  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
 "  <Setter Property='Template'>" +

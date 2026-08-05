@@ -287,6 +287,7 @@ namespace AppStudio
             right.Orientation = Orientation.Horizontal;
             right.VerticalAlignment = VerticalAlignment.Center;
             BarButton(right, Text("code-check.txt", "Check"), delegate { Check(); }, false);
+            BarButton(right, Text("code-build.txt", "Build"), delegate { BuildIt(); }, false);
             BarButton(right, Text("code-run.txt", "Run"), delegate { RunIt(); }, true);
             fullButton = new Button();
             fullButton.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonCompact");
@@ -347,13 +348,24 @@ namespace AppStudio
             return button;
         }
 
-        // Neither language is styled as the lesser one. The one on screen is
-        // shown as chosen, the other as available, and nothing else differs.
+        // Neither language is styled as the lesser one. Swapping between two
+        // styles made the chosen one a different size from the other, which is
+        // exactly the thing the rule about these two forbids: they are the same
+        // size, in the same place, with the same shape, and only the colour says
+        // which one is on screen.
         private void PaintSwitcher()
         {
             bool ps = String.Equals(project.Language, ScriptLanguages.PowerShell, StringComparison.Ordinal);
-            psButton.SetResourceReference(FrameworkElement.StyleProperty, ps ? "AppButtonPrimary" : "AppButtonCompact");
-            vbaButton.SetResourceReference(FrameworkElement.StyleProperty, ps ? "AppButtonCompact" : "AppButtonPrimary");
+            PaintChosen(psButton, ps);
+            PaintChosen(vbaButton, !ps);
+        }
+
+        private static void PaintChosen(Button button, bool chosen)
+        {
+            if (button == null) return;
+            button.Background = chosen ? Theme.Accent : Theme.Surface;
+            button.BorderBrush = chosen ? Theme.Accent : Theme.Border;
+            button.Foreground = chosen ? Theme.TextOnAccent : Theme.TextSub;
         }
 
         // ---------- the work area: which module, and the module ----------
@@ -452,6 +464,7 @@ namespace AppStudio
                 Button(versions, Text("code-baseline.txt", "Back to the generated version"), delegate { Baseline(); }, false);
                 Button(versions, Text("code-undo.txt", "Undo the last change taken in"), delegate { Undo(); }, false);
                 Button(versions, Text("code-folder.txt", "Code folder"), delegate { Open(project.Folder); }, false);
+                Button(versions, Text("code-build-folder.txt", "Built file folder"), delegate { OpenBuild(); }, false);
                 foot.Children.Add(versions);
             }
             Grid.SetRow(foot, 2);
@@ -664,73 +677,26 @@ namespace AppStudio
         {
             loading = true;
             tree.Items.Clear();
-            AddLanguage(ScriptLanguages.PowerShell, Text("code-lang-ps.txt", "PowerShell"));
-            AddLanguage(ScriptLanguages.Vba, Text("code-lang-vba.txt", "VBA"));
+            // Only the form that is on screen. There are two buttons above this
+            // that choose the form; listing the other form's modules here as
+            // well - folded or not - is the same choice offered twice, and
+            // answering it in one place did nothing to the other.
+            AddLanguage(project.Language);
             loading = false;
         }
 
-        private void AddLanguage(string languageName, string label)
+        // A project tree, of the kind an editor has: the modules of the form
+        // being edited, by their file names, in the order they are meant to be
+        // read. Nothing is grouped, tinted, or renamed into a description of
+        // itself. What each module is for is written at the top of the module,
+        // which is where somebody reading code looks for it.
+        private void AddLanguage(string languageName)
         {
-            bool here = String.Equals(languageName, project.Language, StringComparison.Ordinal);
-            TreeViewItem head = Node();
-            head.Header = GroupHeader(label, null);
-            head.IsExpanded = here;
-            System.Windows.Automation.AutomationProperties.SetName(head, label);
-
-            TreeViewItem runtimeGroup = null;
-            int runtimeFiles = 0;
-            int runtimeLines = 0;
-            TreeViewItem first = null;
             List<CodeFile> files = project.Files(languageName);
             for (int index = 0; index < files.Count; index++)
             {
-                CodeFile file = files[index];
-                TreeViewItem item = ModuleItem(file);
-                if (first == null) first = item;
-                if (String.Equals(file.Role, CodeRoles.Runtime, StringComparison.Ordinal))
-                {
-                    if (runtimeGroup == null)
-                    {
-                        runtimeGroup = Node();
-                        runtimeGroup.IsExpanded = false;
-                        System.Windows.Automation.AutomationProperties.SetName(runtimeGroup,
-                            Text("code-group-runtime.txt", "The machinery"));
-                        head.Items.Add(runtimeGroup);
-                    }
-                    runtimeFiles++;
-                    runtimeLines += CodeProject.LineCount(file.Text);
-                    runtimeGroup.Items.Add(item);
-                }
-                else
-                {
-                    head.Items.Add(item);
-                }
+                tree.Items.Add(ModuleItem(files[index]));
             }
-            if (runtimeGroup != null)
-            {
-                runtimeGroup.Header = GroupHeader(Text("code-group-runtime.txt", "The machinery"),
-                    runtimeFiles.ToString(CultureInfo.InvariantCulture) + " " + Text("code-intake-files.txt", "file(s)"));
-                // Choosing the heading is choosing the first thing under it,
-                // rather than choosing nothing and leaving the rail on a row
-                // that is not what the editor is showing.
-                TreeViewItem group = runtimeGroup;
-                group.Selected += delegate(object sender, RoutedEventArgs args)
-                {
-                    args.Handled = true;
-                    if (loading) return;
-                    group.IsExpanded = true;
-                    if (group.Items.Count > 0) ((TreeViewItem)group.Items[0]).IsSelected = true;
-                };
-            }
-            TreeViewItem opener = first;
-            head.Selected += delegate(object sender, RoutedEventArgs args)
-            {
-                args.Handled = true;
-                if (loading || opener == null) return;
-                head.IsExpanded = true;
-                opener.IsSelected = true;
-            };
-            tree.Items.Add(head);
         }
 
         private TreeViewItem ModuleItem(CodeFile file)
@@ -801,61 +767,19 @@ namespace AppStudio
             return head;
         }
 
-        // The row a person reads: what this module is for, in their language,
-        // and under it the file name and its size for when they need to name it
-        // to somebody else.
+        // One row, one file name. Nothing else fits on a row in a tree and
+        // nothing else belongs there: a person who cannot tell what
+        // RuntimeLocator is from its name is not the person about to edit it,
+        // and a row that explains itself in two lines and a coloured dot helps
+        // neither them nor anybody else.
         private UIElement ModuleHeader(CodeFile file)
         {
-            Grid row = new Grid();
-            row.ColumnDefinitions.Add(AutoColumn());
-            row.ColumnDefinitions.Add(StarColumn());
-
-            // The one to edit is marked with a dot rather than by being written
-            // in a different colour. A tinted word on a tinted selected row is
-            // the pair that goes wrong; a dot beside a plain word is legible
-            // whichever of the two the row happens to be.
-            Border dot = new Border();
-            dot.Width = Theme.Space2;
-            dot.Height = Theme.Space2;
-            dot.CornerRadius = new CornerRadius(Theme.RadiusPill);
-            dot.VerticalAlignment = VerticalAlignment.Top;
-            dot.Margin = new Thickness(0, 6, Theme.Space2, 0);
-            dot.Background = file.IsWorkflow ? Theme.Accent : Theme.BorderStrong;
-            Grid.SetColumn(dot, 0);
-            row.Children.Add(dot);
-
-            StackPanel stack = new StackPanel();
-            TextBlock role = new TextBlock();
-            role.Text = RoleWord(file);
-            role.FontSize = Theme.LabelSize;
-            role.FontWeight = file.IsWorkflow ? FontWeights.Bold : FontWeights.Normal;
-            role.Foreground = Theme.Text;
-            role.TextTrimming = TextTrimming.CharacterEllipsis;
-            stack.Children.Add(role);
-            TextBlock note = new TextBlock();
-            StringBuilder text = new StringBuilder();
-            text.Append(file.FileName);
-            // The count on the procedure is the number of things the operator
-            // did, which is what they counted while doing them. The number of
-            // calls the plan makes is larger - it includes the waits and the
-            // window checks - and reporting that as "steps" makes a recording of
-            // nine presses read as twenty eight.
-            if (file.IsWorkflow && session != null)
-            {
-                text.Append("  ").Append(session.Steps.Count.ToString(CultureInfo.InvariantCulture))
-                    .Append(" ").Append(Text("list-steps.txt", "actions"));
-            }
-            text.Append("  ").Append(CodeProject.LineCount(file.Text).ToString(CultureInfo.InvariantCulture))
-                .Append(" ").Append(Text("code-lines.txt", "lines"));
-            note.Text = text.ToString();
-            note.FontSize = Theme.MicroSize;
-            note.Foreground = Theme.TextMuted;
-            note.TextTrimming = TextTrimming.CharacterEllipsis;
-            note.Margin = new Thickness(0, 1, 0, 0);
-            stack.Children.Add(note);
-            Grid.SetColumn(stack, 1);
-            row.Children.Add(stack);
-            return row;
+            TextBlock name = new TextBlock();
+            name.Text = file.FileName;
+            name.FontSize = Theme.LabelSize;
+            name.Foreground = Theme.Text;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            return name;
         }
 
         // What the module is for, said as a job rather than as a class name. The
@@ -928,12 +852,11 @@ namespace AppStudio
                 moduleLead.Text = "";
                 return;
             }
-            moduleLine.Text = RoleWord(file) + "   " + file.FileName;
-            moduleLine.Foreground = file.IsWorkflow ? Theme.AccentText : Theme.Text;
-            // One sentence, said once. The rule about deleting a line is in the
-            // lead already; adding the older hint after it said the same thing
-            // twice in a row, in two slightly different wordings.
-            moduleLead.Text = RoleLead(file);
+            // The file being edited, named. What it is for is written at the top
+            // of the file itself.
+            moduleLine.Text = file.FileName;
+            moduleLine.Foreground = Theme.Text;
+            moduleLead.Text = "";
         }
 
         private void Remember()
@@ -982,10 +905,11 @@ namespace AppStudio
             string languageName = project.Language;
             string text = editor.Text;
             string module = currentFile;
+            List<CodeFile> modules = project.Files(languageName);
             Say(Text("code-checking.txt", "Checking..."), null);
             System.Threading.Thread work = new System.Threading.Thread(delegate()
             {
-                CheckResult result = ScriptRun.Check(languageName, text, module);
+                CheckResult result = ScriptRun.Check(languageName, modules, text, module);
                 owner.Dispatcher.BeginInvoke(new Action(delegate
                 {
                     ShowCheck(result);
@@ -1012,6 +936,80 @@ namespace AppStudio
             intakeLine.Text = text.ToString();
             intakeLine.Foreground = result.Ok ? Theme.SuccessText : Theme.DangerText;
             Say(result.Headline, result.Ok ? "Success" : "Danger");
+        }
+
+        // ---------- build ----------
+
+        // Where the one file goes. Beside the modules it was made from rather
+        // than among them, so nobody has to work out which of six files is the
+        // one to hand over.
+        private string BuildFolder()
+        {
+            string folder = project.Folder == null ? Path.GetTempPath() : project.Folder;
+            return Path.Combine(folder, "build");
+        }
+
+        // Folds the modules into the single file somebody is given. It is its own
+        // move, not something a run does on the way past: the VBA artefact is a
+        // workbook written byte by byte, and paying for that on every run would
+        // make running the thing you are editing slow for no reason.
+        private void BuildIt()
+        {
+            Remember();
+            string languageName = project.Language;
+            List<CodeFile> modules = project.Files(languageName);
+            string folder = BuildFolder();
+            Say(Text("code-building.txt", "Building..."), null);
+            System.Threading.Thread work = new System.Threading.Thread(delegate()
+            {
+                BuildResult result = String.Equals(languageName, ScriptLanguages.Vba, StringComparison.Ordinal)
+                    ? CodeBuild.BuildVba(modules, folder)
+                    : CodeBuild.BuildPowerShell(modules, folder);
+                owner.Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    ShowBuild(result);
+                }));
+            });
+            work.IsBackground = true;
+            work.SetApartmentState(System.Threading.ApartmentState.STA);
+            work.Start();
+        }
+
+        private void ShowBuild(BuildResult result)
+        {
+            StringBuilder text = new StringBuilder();
+            if (!result.Ok)
+            {
+                text.Append(Text("code-build-failed.txt", "Nothing was built.")).Append("  ").Append(result.Problem);
+                intakeLine.Text = text.ToString();
+                intakeLine.Foreground = Theme.DangerText;
+                Say(Text("code-build-failed.txt", "Nothing was built."), "Danger");
+                return;
+            }
+            text.Append(Text("code-build-done.txt", "Built one file.")).Append("  ").Append(result.Path);
+            text.Append("  (").Append(result.Bytes.ToString(CultureInfo.InvariantCulture)).Append(" bytes, ")
+                .Append(result.Method).Append(")");
+            if (result.Modules.Count > 0)
+            {
+                text.Append(Environment.NewLine).Append(String.Join("  ", result.Modules.ToArray()));
+            }
+            intakeLine.Text = text.ToString();
+            intakeLine.Foreground = Theme.SuccessText;
+            Say(Text("code-build-done.txt", "Built one file."), "Success");
+        }
+
+        // The folder the built file is in. A folder that is not there yet is said
+        // to be not there yet, rather than opened empty as if a build had
+        // happened.
+        private void OpenBuild()
+        {
+            string folder = BuildFolder();
+            if (!Directory.Exists(folder))
+            {
+                Say(Text("code-build-none.txt", "Nothing has been built yet."), "Caution");
+                return;
+            }
+            Open(folder);
         }
 
         // Runs the whole automation, not the module that happens to be on

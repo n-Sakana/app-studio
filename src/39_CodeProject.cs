@@ -81,7 +81,7 @@ namespace AppStudio
         {
             CodeProject project = new CodeProject(FolderFor(session));
             project.Plan = ScriptModel.Build(session);
-            Add(project.baseline, PowerShellGen.BuildFiles(project.Plan, session));
+            Add(project.baseline, EngineGen.BuildFiles(project.Plan, session));
             Add(project.baseline, VbaGen.BuildFiles(project.Plan, session));
             for (int index = 0; index < project.baseline.Count; index++) project.current.Add(project.baseline[index].Copy());
             project.Load();

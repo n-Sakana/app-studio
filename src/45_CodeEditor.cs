@@ -23,11 +23,29 @@ namespace AppStudio
     // no caret jumping when the colours are recomputed, no undo history that
     // belongs to a document rather than to the operator - and if the painting
     // were ever wrong the text underneath would still be right.
+    // A text block that is not there as far as anything reading the screen is
+    // concerned.
+    //
+    // The colour layer holds the same characters as the box being typed into,
+    // and the gutter holds a column of numbers. Both are decoration for the eye.
+    // Left in the automation tree they are announced as text, so a reader of the
+    // screen hears the whole file twice and then hears its line numbers, and
+    // anything measuring the window sees a text element hanging out past the
+    // bottom of it - because these layers are deliberately taller than the box
+    // that clips them.
+    public sealed class DecorationText : TextBlock
+    {
+        protected override System.Windows.Automation.Peers.AutomationPeer OnCreateAutomationPeer()
+        {
+            return null;
+        }
+    }
+
     public sealed class CodeEditor
     {
         private readonly TextBox input = new TextBox();
-        private readonly TextBlock paint = new TextBlock();
-        private readonly TextBlock gutter = new TextBlock();
+        private readonly DecorationText paint = new DecorationText();
+        private readonly DecorationText gutter = new DecorationText();
         private readonly TextBox findBox = new TextBox();
         private readonly TextBlock findCount = new TextBlock();
         private readonly TranslateTransform paintShift = new TranslateTransform();
@@ -40,6 +58,7 @@ namespace AppStudio
         private readonly Thickness inset = new Thickness(Theme.Space2, Theme.Space2, Theme.Space2, Theme.Space2 + Theme.CodeLine);
 
         private Grid root;
+        private FrameworkElement findBar;
         private string language = ScriptLanguages.PowerShell;
         private bool painting;
         private bool suppress;
@@ -90,6 +109,24 @@ namespace AppStudio
             input.Focus();
         }
 
+        public void ShowFind()
+        {
+            if (findBar == null) return;
+            findBar.Visibility = Visibility.Visible;
+            findBox.Focus();
+            findBox.SelectAll();
+        }
+
+        private void HideFind()
+        {
+            if (findBar == null) return;
+            findBar.Visibility = Visibility.Collapsed;
+            findBox.Text = "";
+            Repaint();
+            Count();
+            input.Focus();
+        }
+
         public void SetLanguage(string value)
         {
             language = ScriptLanguages.IsKnown(value) ? value : ScriptLanguages.PowerShell;
@@ -110,9 +147,13 @@ namespace AppStudio
             root = new Grid();
             root.RowDefinitions.Add(Auto());
             root.RowDefinitions.Add(Star());
-            UIElement bar = FindBar();
-            Grid.SetRow(bar, 0);
-            root.Children.Add(bar);
+            // Find is a thing you ask for, not a thing that sits above every
+            // file taking up the top of the editor. It appears on Ctrl+F, where
+            // it is in every editor, and Escape puts it away.
+            findBar = FindBar();
+            findBar.Visibility = Visibility.Collapsed;
+            Grid.SetRow(findBar, 0);
+            root.Children.Add(findBar);
             UIElement area = Area();
             Grid.SetRow(area, 1);
             root.Children.Add(area);
@@ -130,10 +171,11 @@ namespace AppStudio
             if (holder != null) holder.Content = null;
         }
 
-        private UIElement FindBar()
+        private FrameworkElement FindBar()
         {
             DockPanel bar = new DockPanel();
-            bar.LastChildFill = true;
+            bar.LastChildFill = false;
+            bar.HorizontalAlignment = HorizontalAlignment.Right;
             bar.Margin = new Thickness(0, 0, 0, Theme.Space2);
 
             TextBlock label = new TextBlock();
@@ -146,9 +188,15 @@ namespace AppStudio
             bar.Children.Add(label);
 
             findBox.SetResourceReference(FrameworkElement.StyleProperty, "AppTextBox");
-            findBox.Width = 220;
+            findBox.Width = 200;
             findBox.FontSize = Theme.MetaSize;
             findBox.VerticalAlignment = VerticalAlignment.Center;
+            findBox.KeyDown += delegate(object sender, System.Windows.Input.KeyEventArgs args)
+            {
+                if (args.Key != System.Windows.Input.Key.Escape) return;
+                HideFind();
+                args.Handled = true;
+            };
             System.Windows.Automation.AutomationProperties.SetName(findBox, Messages.Text("code-find.txt", "Find"));
             findBox.TextChanged += delegate { Repaint(); Count(); };
             findBox.KeyDown += delegate(object sender, System.Windows.Input.KeyEventArgs args)
@@ -264,6 +312,16 @@ namespace AppStudio
                 if (Changed != null) Changed();
             };
             input.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(delegate { Sync(); }));
+            input.KeyDown += delegate(object sender, System.Windows.Input.KeyEventArgs args)
+            {
+                bool control = (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) != 0;
+                if (control && args.Key == System.Windows.Input.Key.F) { ShowFind(); args.Handled = true; return; }
+                if (args.Key == System.Windows.Input.Key.Escape && findBar != null && findBar.Visibility == Visibility.Visible)
+                {
+                    HideFind();
+                    args.Handled = true;
+                }
+            };
             stack.Children.Add(input);
 
             Grid.SetColumn(stack, 1);

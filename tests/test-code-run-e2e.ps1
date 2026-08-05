@@ -92,10 +92,9 @@ try {
     $project = [AppStudio.CodeProject]::Open($session)
     $modules = $project.Files('powershell')
     if ($modules.Count -ne 5) { throw ('the automation is ' + $modules.Count + ' modules instead of 5') }
-    foreach ($module in $modules) {
-        $parsed = [AppStudio.ScriptRun]::CheckPowerShell($module.Text)
-        if (-not $parsed.Ok) { throw ('the generated ' + $module.FileName + ' does not parse: ' + (($parsed.Problems) -join ' / ')) }
-    }
+    # The engine is one program in five files, so it is compiled as one.
+    $parsed = [AppStudio.ScriptRun]::CheckEngine($modules)
+    if (-not $parsed.Ok) { throw ('the generated engine does not compile: ' + (($parsed.Problems) -join ' / ')) }
 
     # The whole module set is what runs, not the workflow on its own.
     $result = [AppStudio.ScriptRun]::RunPowerShellProject($modules, (Join-Path $temp 'run'), 120000)
@@ -129,7 +128,7 @@ try {
     $kept = New-Object System.Collections.ArrayList
     $removed = 0
     foreach ($line in ($workflow -split "`r`n|`n")) {
-        if ($line -match "^\s*InvokeElement\s+'") { $removed++; continue }
+        if ($line -match "^\s*(Runtime\.)?InvokeElement\s*\(?\s*['`"]") { $removed++; continue }
         [void]$kept.Add($line)
     }
     if ($removed -ne 1) { throw ('the press is ' + $removed + ' lines of the workflow instead of 1') }

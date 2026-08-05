@@ -140,7 +140,7 @@ try {
         # quotes. Nothing else in the file looks like this.
         # PowerShell quotes the step id with an apostrophe and VBA with a double
         # quote. Both are "an operation name, then the id of a recorded step".
-        $steps = @($lines | Where-Object { $_ -match "^\s*(FindWindow|FocusElement|InvokeElement|SetElementText|ReadElementText|SendKeys|WaitGap|WaitIdle|AskSecret|Unsupported)\s+['`"]" })
+        $steps = @($lines | Where-Object { $_ -match "^\s*(Runtime\.)?(FindWindow|FocusElement|InvokeElement|SetElementText|ReadElementText|SendKeys|WaitGap|WaitIdle|AskSecret|Unsupported)\s*\(?\s*['`"]" })
         if ($steps.Count -lt $pressed) {
             throw ('the ' + $language + ' procedure has ' + $steps.Count + ' step lines for ' + $pressed + ' recorded presses')
         }
@@ -148,7 +148,7 @@ try {
         # read is short, and the recorded steps are near the top of it.
         $firstStep = 0
         for ($index = 0; $index -lt $lines.Count; $index++) {
-            if ($lines[$index] -match "^\s*(FindWindow|InvokeElement|SetElementText|SendKeys|Unsupported)\s+['`"]") { $firstStep = $index + 1; break }
+            if ($lines[$index] -match "^\s*(Runtime\.)?(FindWindow|InvokeElement|SetElementText|SendKeys|Unsupported)\s*\(?\s*['`"]") { $firstStep = $index + 1; break }
         }
         if ($firstStep -eq 0) { throw ('the ' + $language + ' procedure has no recorded step in it at all') }
         if ($firstStep -gt 40) {
@@ -172,7 +172,7 @@ try {
     $beforeLines = @($before -split "`r`n|`n")
     $target = -1
     for ($index = 0; $index -lt $beforeLines.Count; $index++) {
-        if ($beforeLines[$index] -match "^\s*InvokeElement\s+'") { $target = $index; break }
+        if ($beforeLines[$index] -match "^\s*(Runtime\.)?InvokeElement\s*\(?\s*['`"]") { $target = $index; break }
     }
     if ($target -lt 0) { throw 'the recorded procedure has no press to take out' }
     $others = @()
@@ -185,8 +185,8 @@ try {
     }
     $project.SetText('powershell', 'Workflow', ($kept -join "`r`n"))
     $after = $project.Find('powershell', 'Workflow').Text
-    $afterSteps = @(($after -split "`r`n|`n") | Where-Object { $_ -match "^\s*InvokeElement\s+'" })
-    $beforeSteps = @($beforeLines | Where-Object { $_ -match "^\s*InvokeElement\s+'" })
+    $afterSteps = @(($after -split "`r`n|`n") | Where-Object { $_ -match "^\s*(Runtime\.)?InvokeElement\s*\(?\s*['`"]" })
+    $beforeSteps = @($beforeLines | Where-Object { $_ -match "^\s*(Runtime\.)?InvokeElement\s*\(?\s*['`"]" })
     if ($afterSteps.Count -ne ($beforeSteps.Count - 1)) {
         throw ('deleting one line changed the press count by ' + ($beforeSteps.Count - $afterSteps.Count))
     }
@@ -195,7 +195,7 @@ try {
             throw ('editing the procedure changed ' + $pair[0])
         }
     }
-    $parsed = [AppStudio.ScriptRun]::CheckPowerShell($after)
+    $parsed = [AppStudio.ScriptRun]::CheckEngine($project.Files('powershell'))
     if (-not $parsed.Ok) { throw ('the edited procedure does not parse: ' + (($parsed.Problems) -join ' / ')) }
 
     Write-Output ('PASS test-record-to-workflow pressed=' + $pressed + ' recorded=' + $session.Steps.Count +

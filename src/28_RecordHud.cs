@@ -36,7 +36,7 @@ namespace AppStudio
         private readonly Button stop;
         private readonly System.Windows.Controls.Primitives.ToggleButton pause;
         private readonly System.Windows.Controls.Primitives.ToggleButton inspect;
-        private readonly System.Windows.Controls.Primitives.ToggleButton detail;
+        // Removed: the chip says everything it has, so there is nothing to open.
         private readonly string inspectLabel;
         private readonly string onWord;
         private readonly string offWord;
@@ -136,16 +136,14 @@ namespace AppStudio
             inspect = HudToggle(inspectLabel);
             inspect.Checked += delegate { PaintInspectToggle(); Raise(InspectRequested, true); };
             inspect.Unchecked += delegate { PaintInspectToggle(); Raise(InspectRequested, false); };
-            detail = HudToggle(Messages.Text("hud-detail.txt", "Details"));
-            detail.Margin = new Thickness(Theme.Space2, 0, 0, 0);
-            detail.Checked += delegate { PaintChip(); };
-            detail.Unchecked += delegate { PaintChip(); };
-
+            // One switch, not two. Whether the chip appears and how much it says
+            // were separate controls, which asked the operator a question that
+            // has only one sensible answer: a chip says what it has room to say.
+            // There is no amount of information here worth a second switch.
             StackPanel second = new StackPanel();
             second.Orientation = Orientation.Horizontal;
             second.Margin = new Thickness(0, Theme.Space2, 0, 0);
             second.Children.Add(inspect);
-            second.Children.Add(detail);
 
             StackPanel stack = new StackPanel();
             stack.Children.Add(row);
@@ -351,22 +349,22 @@ namespace AppStudio
             // back to the system's own disabled look, which on this panel is a
             // near white block. There is nothing to show the properties of when
             // the reader is off, so it is out of reach either way.
-            bool usable = inspect.IsChecked == true;
-            detail.Opacity = usable ? 1.0 : 0.45;
-            detail.IsHitTestVisible = usable;
-            if (!usable && detail.IsChecked == true) detail.IsChecked = false;
             Reflow();
         }
 
+        // Three short lines: what it is, which window it is in, and what names
+        // it. All of it, always. This is a chip about one thing under the
+        // pointer - there is no volume of text here to protect anybody from.
         private void PaintChip()
         {
             if (lastFact == null) return;
             chipHead.Text = lastFact.Headline();
+            string window = lastFact.WindowLine();
+            chipDetail.Text = window;
+            chipDetail.Visibility = window.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             string more = lastFact.Detail();
-            bool open = detail.IsChecked == true;
-            chipDetail.Text = more;
-            chipDetail.Visibility = open && more.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-            chipHint.Visibility = !open && more.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            chipHint.Text = more;
+            chipHint.Visibility = more.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
 
         // Whether the recording is paused, and whether the hover reader is on,

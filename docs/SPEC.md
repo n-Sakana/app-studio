@@ -302,7 +302,22 @@ uia.InvokePattern:notSupported -> win32.BM_CLICK:success
 
 `Workflow` の1行は操作名と step id だけを持ち、住所も間隔も literal も書かれない。**直前の待ち・キーボードの復帰・直後の静止待ちはその行に属し、runtime がその1行の周りで行う。** したがって **1ステップを外すことは1行を消すことであり、他の4モジュールは1文字も変わらない。** 「1〜9を順に押す録画から5だけ外す」は Workflow の5行目を消すだけで済み、これは `test-workflow-edit` と `test-code-run-e2e` が固定する。
 
-PowerShell は `Workflow.ps1` が runtime を dot source する。VBA は5つの `.bas` を同じプロジェクトへ取り込み、`Workflow` の `RunRecordedProcedure` から始める。実行も検証も **module 一式**で扱い、workflow だけを単体で走らせない。runtime module に entry point を要求しない。
+PowerShell モードの5モジュールは **C# (`.cs`)** である。**PowerShell を手書きさせない。** 人が数百行の PowerShell を書くことはないので、フローも machinery も C# に置き、PowerShell には得意な仕事だけ ― アセンブリを名指し、コンパイルし、entry point を呼ぶ ― を残す。VBA は5つの `.bas` を同じプロジェクトへ取り込み、`Workflow` の `RunRecordedProcedure` から始める。実行も検証も **module 一式**で扱い、workflow だけを単体で走らせない。runtime module に entry point を要求しない。
+
+### 8.5.2 渡すときは1本にする
+
+編集は module で行い、**手渡しは1ファイルで行う**。別の仕事なので別の操作にしてある。［ビルド］は［実行］とは独立したボタンで、成果物は `runtime/sessions/<id>/code/build/` に置かれ、そのフォルダを開く導線が画面にある。
+
+| モード | 成果物 | 中身 |
+|---|---|---|
+| PowerShell | `Workflow.cmd` | batch ヘッダ + 最小 PowerShell ラッパー + C# engine を1つにした polyglot。cmd が先頭の ASCII 数行を読み、残りを Windows PowerShell へ渡し、`Add-Type` がその場でコンパイルする |
+| VBA | `Workflow.xlsm` | 5 module を取り込んだマクロ有効ブック |
+
+`.cmd` は**追加ランタイムも同梱 DLL も未署名 EXE も生まない**。ビルド時に csc で実行ファイルを吐くことはしない ― 配布フォルダに未署名 EXE を置かないという規約と両立しないためである。ウィンドウ名や要素名が ASCII でなくても壊れない: cmd 自身が解釈するのは先頭の ASCII ヘッダだけで、ヘッダが UTF-8 を名指して残りを PowerShell へ渡す。バイトオーダーマークは付けない（cmd が1行目の一部として読むため）。
+
+module は `#region <ファイル名>` を付けて連結される。C# は namespace の後に using を置けないので、**using だけは先頭へ集約する**。ビルドが生成コードに対して行う変更はこれだけで、それ以外は1文字も書き換えない。engine を運ぶリテラルを途中で終わらせてしまう module（`'@` で始まる行を持つもの）は、**名指しで拒否して何も作らない**。黙って直したファイルは誰も書いていないコードになるためである。
+
+VBA ホストが無い機械・VBA プロジェクトへのアクセスが信頼されていない機械では workbook を作れない。**その事実を名指しで報告し、迂回しない。** module 一式は出力フォルダに残るので、作れる機械で取り込める。
 
 両言語が持つ操作はこの9つで、名前も意味も同じである。
 
@@ -322,7 +337,7 @@ PowerShell は `Workflow.ps1` が runtime を dot source する。VBA は5つの
 
 VBA は UI Automation を前提にできないため、住所は `win32.ctrlId`（クラス名＋コントロール ID）と `win32.classIndex`（クラス名＋順番）の2つに限られる。UIA でしか届かない step は、その旨をコード中に書いて停止する。**座標で代用しない。** 秘密の step で VBA は値を受け取らない。フォーカスを合わせて操作者が直接入力するのを待つので、値がプロジェクトに存在しない。
 
-検証は言語ごとに実際に可能なことだけを行う。PowerShell は Windows PowerShell 5.1 自身の parser に読ませる。VBA は**構造検査のみ**であり、結果には常に「これはコンパイルではない」と書く。実行は PowerShell が別プロセス、VBA は VBA ホスト（Excel）が必要で、ホストが無い場合・VBA プロジェクトへのアクセスが信頼されていない場合は**その事実を名指しで報告する**。代替で済ませて合格にしない。
+検証は言語ごとに実際に可能なことだけを行う。PowerShell モードは **C# コンパイラに実際にコンパイルさせる**。検証と実行はビルダーが組む同一のテキストを使うので、検証したものと動かすものが食い違わない。engine は5ファイルで1つのプログラムなので、module 単体では検証しない。VBA は**構造検査のみ**であり、結果には常に「これはコンパイルではない」と書く。実行は PowerShell が別プロセス、VBA は VBA ホスト（Excel）が必要で、ホストが無い場合・VBA プロジェクトへのアクセスが信頼されていない場合は**その事実を名指しで報告する**。代替で済ませて合格にしない。
 
 ## 8.6 AI との往復
 
