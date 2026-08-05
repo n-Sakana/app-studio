@@ -42,6 +42,7 @@ $realInputTests = @(
     'test-input-probe.ps1',
     'test-packaged-target.ps1',
     'test-input-timeline.ps1',
+    'test-record-to-workflow.ps1',
     'test-gesture-e2e.ps1',
     'test-ime-e2e.ps1',
     'test-gui-e2e.ps1',

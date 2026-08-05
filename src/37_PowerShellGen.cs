@@ -59,15 +59,13 @@ namespace AppStudio
             text.AppendLine("# " + App.Name + " " + App.Version + " - the recorded procedure (PowerShell)");
             text.AppendLine("# session " + Comment(plan.SessionId) + "  " + Comment(plan.SessionTitle));
             text.AppendLine("#");
-            text.AppendLine("# THIS is the file to edit. One line below is one thing the operator did,");
-            text.AppendLine("# in the order they did it. Deleting a line takes that step out and nothing");
-            text.AppendLine("# else: the wait before it and the settle after it belong to the line and go");
-            text.AppendLine("# with it, and the four files beside this one do not change.");
-            text.AppendLine("#");
-            text.AppendLine("# The id in quotes is the recorded step. What that step is aimed at - the");
-            text.AppendLine("# address, the interval, the text - is in " + CodeModules.RecordedFacts + ".ps1.");
-            text.AppendLine("# How any of it is carried out is in the three Runtime files. You should not");
-            text.AppendLine("# need to open them to change what this procedure does.");
+            // What this file is, and the one rule for editing it. The rest of
+            // that explanation used to be another twelve lines here, which put
+            // the recorded steps - the reason anybody opens this file - below
+            // the bottom of the editor. It is on the screen beside the editor
+            // now, in the reader's own language, where an explanation belongs.
+            text.AppendLine("# One line below is one recorded step, in the order it happened. Deleting a");
+            text.AppendLine("# line takes that step out and changes nothing else.");
             text.AppendLine("#");
             text.AppendLine("# It drives the real applications on this machine. Read it before you run it.");
             text.AppendLine("#");

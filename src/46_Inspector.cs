@@ -25,22 +25,32 @@ namespace AppStudio
             get { return Rect != null && Rect.Width > 0 && Rect.Height > 0; }
         }
 
-        // The line on the chip. Only what was actually obtained goes in it: this
-        // is for telling one control from another by eye, so an empty field is
-        // left out rather than printed as a dash.
-        public string Chip()
+        // The chip in two parts. The first is what a person needs to tell one
+        // thing from another by eye - is it a window or a control, and what is
+        // it called - and is always shown. The second is what names it to a
+        // program, and is folded, because it is several fields long and putting
+        // it all on one line is what made the chip wider than the screen.
+        //
+        // Only what was actually obtained goes in either: an empty field is left
+        // out rather than printed as a dash.
+        public string Headline()
         {
-            StringBuilder text = new StringBuilder();
             if (Problem != null)
             {
-                text.Append(Messages.Text("inspect-unknown.txt", "nothing could be read here"));
-                text.Append("  (").Append(Problem).Append(")");
-                return text.ToString();
+                return Messages.Text("inspect-unknown.txt", "nothing could be read here") + "  (" + Problem + ")";
             }
+            StringBuilder text = new StringBuilder();
             Append(text, TopLevel
                 ? Messages.Text("inspect-window.txt", "window")
                 : Messages.Text("inspect-control.txt", "control"));
             if (!String.IsNullOrEmpty(Caption)) Append(text, "\"" + Shorten(Caption, 48) + "\"");
+            return text.ToString();
+        }
+
+        public string Detail()
+        {
+            if (Problem != null) return "";
+            StringBuilder text = new StringBuilder();
             string shown = String.IsNullOrEmpty(RealClass) ? ClassName : RealClass;
             if (!String.IsNullOrEmpty(shown)) Append(text, Shorten(shown, 40));
             if (CtrlId != 0 && CtrlId != -1) Append(text, "id " + CtrlId.ToString(CultureInfo.InvariantCulture));
@@ -50,6 +60,15 @@ namespace AppStudio
                 Append(text, Rect.Width.ToString(CultureInfo.InvariantCulture) + "x" + Rect.Height.ToString(CultureInfo.InvariantCulture));
             }
             return text.ToString();
+        }
+
+        // Everything on one line, for anywhere that has one line to say it in.
+        public string Chip()
+        {
+            string head = Headline();
+            string more = Detail();
+            if (more.Length == 0) return head;
+            return head + "   " + more;
         }
 
         private static void Append(StringBuilder text, string piece)

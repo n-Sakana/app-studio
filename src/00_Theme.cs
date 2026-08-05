@@ -32,11 +32,13 @@ namespace AppStudio
         public const double Space5 = 20;
         public const double Space6 = 24;
         public const double Space7 = 32;
+        public const double Space8 = 40;
 
         // ---- radius ----
         public const double RadiusSm = 4;
         public const double RadiusMd = 6;
         public const double RadiusLg = 10;
+        public const double RadiusPill = 999;
 
         // ---- type scale (design system --type-*) ----
         public const double TitleSize = 17;
@@ -46,15 +48,32 @@ namespace AppStudio
         public const double MetaSize = 12;
         public const double MicroSize = 11;
         public const double NumSize = 22;
-        public const double BodyLine = 1.55;
+        public const double BodyLine = 1.65;
         // Code is read line by line and compared column by column, so it gets a
         // size and a leading of its own rather than borrowing the body ones.
         public const double CodeSize = 13;
-        public const double CodeLine = 18;
+        public const double CodeLine = 20;
 
         // ---- fixed window metrics ----
-        public const double TopbarHeight = 46;
+        // These are the design system's own numbers rather than numbers chosen
+        // per screen. A window whose rows are each a little shorter than the
+        // system says is what "cheap" looks like from across a desk.
+        public const double TopbarHeight = 48;
         public const double ProgressTrackHeight = 4;
+        public const double ActionBarHeight = 68;
+        public const double ScreenHeaderHeight = 52;
+        public const double RowHeight = 40;
+        public const double PaneHeaderHeight = 28;
+        public const double ButtonHeight = 40;
+        public const double ButtonHeightSmall = 34;
+        public const double LineNumberWidth = 46;
+        // An editor is a place to read a file in. Below this it is a viewport on
+        // a file rather than a place, so no layout is allowed to take it lower;
+        // it takes a scrollbar instead.
+        public const double EditorMinHeight = 240;
+        public const double ModulePaneWidth = 248;
+        public const double ModulePaneMinWidth = 220;
+        public const double AssistantPaneWidth = 300;
 
         private static readonly Dictionary<string, SolidColorBrush> Brushes = new Dictionary<string, SolidColorBrush>(StringComparer.Ordinal);
         private static readonly List<ResourceDictionary> Installed = new List<ResourceDictionary>();
@@ -353,7 +372,7 @@ namespace AppStudio
 
         private static string[] FragmentNames()
         {
-            return new string[] { "scrollbar", "button", "textbox", "list", "accordion", "checkbox", "combobox", "wraptemplate" };
+            return new string[] { "scrollbar", "button", "textbox", "list", "accordion", "checkbox", "combobox", "wraptemplate", "tree" };
         }
 
         private static string Wrap(string body)
@@ -380,8 +399,113 @@ namespace AppStudio
             parts.Add(CheckBoxXaml());
             parts.Add(ComboBoxXaml());
             parts.Add(WrapTemplateXaml());
+            parts.Add(TreeXaml());
 
             return parts.ToArray();
+        }
+
+        // The project tree. The stock TreeViewItem paints the system highlight
+        // behind a selected row and expects the header to take its foreground
+        // from the template; a header that sets its own colours - which any
+        // header with two lines in two weights has to - therefore disappears
+        // into the highlight when it is chosen. This template marks a chosen row
+        // the way the rest of the product does, with a tinted surface and an
+        // accent rail, so a header keeps its own colours and stays readable.
+        private static string TreeXaml()
+        {
+            return
+"<Style x:Key='AppTreeToggle' TargetType='ToggleButton'>" +
+"  <Setter Property='OverridesDefaultStyle' Value='True'/>" +
+"  <Setter Property='Focusable' Value='False'/>" +
+"  <Setter Property='Width' Value='18'/>" +
+"  <Setter Property='Height' Value='18'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='ToggleButton'>" +
+"        <Grid Background='Transparent'>" +
+"          <Path x:Name='shut' HorizontalAlignment='Center' VerticalAlignment='Center' " +
+"                Data='M 0.5,0.5 L 4.5,4.5 L 0.5,8.5' Stroke='{DynamicResource TextMuted}' " +
+"                StrokeThickness='1.6' StrokeStartLineCap='Round' StrokeEndLineCap='Round' StrokeLineJoin='Round'/>" +
+"          <Path x:Name='open' HorizontalAlignment='Center' VerticalAlignment='Center' " +
+"                Data='M 0.5,1.5 L 4.5,5.5 L 8.5,1.5' Stroke='{DynamicResource AccentText}' " +
+"                StrokeThickness='1.6' StrokeStartLineCap='Round' StrokeEndLineCap='Round' StrokeLineJoin='Round' " +
+"                Visibility='Collapsed'/>" +
+"        </Grid>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsChecked' Value='True'>" +
+"            <Setter TargetName='shut' Property='Visibility' Value='Collapsed'/>" +
+"            <Setter TargetName='open' Property='Visibility' Value='Visible'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppTreeItem' TargetType='TreeViewItem'>" +
+"  <Setter Property='Padding' Value='0'/>" +
+"  <Setter Property='Foreground' Value='{DynamicResource Text}'/>" +
+"  <Setter Property='HorizontalContentAlignment' Value='Stretch'/>" +
+"  <Setter Property='VerticalContentAlignment' Value='Center'/>" +
+"  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='TreeViewItem'>" +
+"        <StackPanel>" +
+"          <Border x:Name='row' MinHeight='34' CornerRadius='4' Margin='0,1,0,1' Background='Transparent'>" +
+"            <Grid>" +
+"              <Grid.ColumnDefinitions>" +
+"                <ColumnDefinition Width='3'/>" +
+"                <ColumnDefinition Width='20'/>" +
+"                <ColumnDefinition Width='*'/>" +
+"              </Grid.ColumnDefinitions>" +
+"              <Border x:Name='rail' Grid.Column='0' CornerRadius='2' Margin='0,3,0,3' Background='Transparent'/>" +
+"              <ToggleButton x:Name='Expander' Grid.Column='1' ClickMode='Press' " +
+"                            Style='{StaticResource AppTreeToggle}' " +
+"                            IsChecked='{Binding IsExpanded, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}'/>" +
+"              <ContentPresenter x:Name='PART_Header' Grid.Column='2' ContentSource='Header' " +
+"                                Margin='2,5,8,5' VerticalAlignment='Center'/>" +
+"            </Grid>" +
+"          </Border>" +
+"          <ItemsPresenter x:Name='ItemsHost' Margin='16,0,0,0' Visibility='Collapsed'/>" +
+"        </StackPanel>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsExpanded' Value='True'>" +
+"            <Setter TargetName='ItemsHost' Property='Visibility' Value='Visible'/>" +
+"          </Trigger>" +
+"          <Trigger Property='HasItems' Value='False'>" +
+"            <Setter TargetName='Expander' Property='Visibility' Value='Hidden'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='row' Property='Background' Value='{DynamicResource SurfaceHover}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsSelected' Value='True'>" +
+"            <Setter TargetName='row' Property='Background' Value='{DynamicResource SurfaceSelected}'/>" +
+"            <Setter TargetName='rail' Property='Background' Value='{DynamicResource Accent}'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppTree' TargetType='TreeView'>" +
+"  <Setter Property='Background' Value='Transparent'/>" +
+"  <Setter Property='BorderThickness' Value='0'/>" +
+"  <Setter Property='Foreground' Value='{DynamicResource Text}'/>" +
+"  <Setter Property='ItemContainerStyle' Value='{StaticResource AppTreeItem}'/>" +
+"  <Setter Property='ScrollViewer.HorizontalScrollBarVisibility' Value='Disabled'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='TreeView'>" +
+"        <ScrollViewer Focusable='False' Padding='0' " +
+"                      VerticalScrollBarVisibility='Auto' HorizontalScrollBarVisibility='Disabled'>" +
+"          <ItemsPresenter SnapsToDevicePixels='True'/>" +
+"        </ScrollViewer>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>";
         }
 
         private static string ScrollBarXaml()
@@ -444,9 +568,9 @@ namespace AppStudio
 
             return
 "<Style x:Key='AppButton' TargetType='Button'>" +
-"  <Setter Property='Height' Value='34'/>" +
+"  <Setter Property='Height' Value='40'/>" +
 "  <Setter Property='MinWidth' Value='96'/>" +
-"  <Setter Property='Padding' Value='14,0,14,0'/>" +
+"  <Setter Property='Padding' Value='16,0,16,0'/>" +
 "  <Setter Property='FontSize' Value='13'/>" +
 "  <Setter Property='FontWeight' Value='SemiBold'/>" +
 "  <Setter Property='Background' Value='{DynamicResource Surface}'/>" +
@@ -523,20 +647,57 @@ namespace AppStudio
 "</Style>" +
 
 "<Style x:Key='AppButtonCompact' TargetType='Button' BasedOn='{StaticResource AppButton}'>" +
-"  <Setter Property='Height' Value='28'/>" +
+"  <Setter Property='Height' Value='34'/>" +
 "  <Setter Property='MinWidth' Value='0'/>" +
-"  <Setter Property='Padding' Value='10,0,10,0'/>" +
+"  <Setter Property='Padding' Value='12,0,12,0'/>" +
 "  <Setter Property='FontSize' Value='12'/>" +
 "</Style>" +
 
 "<Style x:Key='AppIconButton' TargetType='Button' BasedOn='{StaticResource AppButton}'>" +
 "  <Setter Property='Height' Value='28'/>" +
 "  <Setter Property='MinWidth' Value='30'/>" +
-"  <Setter Property='Padding' Value='6,0,6,0'/>" +
+"  <Setter Property='Padding' Value='8,0,8,0'/>" +
 "  <Setter Property='FontSize' Value='12'/>" +
 "  <Setter Property='FontWeight' Value='Normal'/>" +
 "  <Setter Property='Background' Value='Transparent'/>" +
 "  <Setter Property='Foreground' Value='{DynamicResource TextMuted}'/>" +
+"</Style>" +
+
+// A toggle that reads as a toggle: the same size and shape as a compact
+// button, but it says which of two states it is in rather than what
+// pressing it will do. Used where a feature has to show that it exists
+// and whether it is on, in one control.
+"<Style x:Key='AppToggleButton' TargetType='ToggleButton'>" +
+"  <Setter Property='Height' Value='34'/>" +
+"  <Setter Property='Padding' Value='12,0,12,0'/>" +
+"  <Setter Property='FontSize' Value='12'/>" +
+"  <Setter Property='FontWeight' Value='SemiBold'/>" +
+"  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='ToggleButton'>" +
+"        <Border x:Name='shell' CornerRadius='4' Background='{DynamicResource Surface}' " +
+"                BorderBrush='{DynamicResource Border}' BorderThickness='1' SnapsToDevicePixels='True'>" +
+"          <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center' " +
+"                            Margin='{TemplateBinding Padding}' " +
+"                            TextBlock.Foreground='{DynamicResource TextSub}'/>" +
+"        </Border>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsChecked' Value='True'>" +
+"            <Setter TargetName='shell' Property='Background' Value='{DynamicResource AccentSoft}'/>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource Accent}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource BorderStrong}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsKeyboardFocused' Value='True'>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource Focus}'/>" +
+"            <Setter TargetName='shell' Property='BorderThickness' Value='2'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
 "</Style>";
         }
 
@@ -550,7 +711,7 @@ namespace AppStudio
 "  <Setter Property='SelectionBrush' Value='{DynamicResource Focus}'/>" +
 "  <Setter Property='BorderBrush' Value='{DynamicResource Border}'/>" +
 "  <Setter Property='BorderThickness' Value='1'/>" +
-"  <Setter Property='Padding' Value='8,6,8,6'/>" +
+"  <Setter Property='Padding' Value='10,8,10,8'/>" +
 "  <Setter Property='FontSize' Value='13'/>" +
 "  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
 "  <Setter Property='Template'>" +
@@ -625,14 +786,14 @@ namespace AppStudio
 "  <Setter Property='Template'>" +
 "    <Setter.Value>" +
 "      <ControlTemplate TargetType='ListBoxItem'>" +
-"        <Border x:Name='row' Background='Transparent' BorderBrush='{DynamicResource BorderSubtle}' BorderThickness='0,0,0,1'>" +
+"        <Border x:Name='row' MinHeight='40' Background='Transparent' BorderBrush='{DynamicResource BorderSubtle}' BorderThickness='0,0,0,1'>" +
 "          <Grid>" +
 "            <Grid.ColumnDefinitions>" +
 "              <ColumnDefinition Width='3'/>" +
 "              <ColumnDefinition Width='*'/>" +
 "            </Grid.ColumnDefinitions>" +
 "            <Border x:Name='rail' Grid.Column='0' Background='Transparent'/>" +
-"            <ContentPresenter Grid.Column='1' Margin='9,7,9,7' VerticalAlignment='Center'/>" +
+"            <ContentPresenter Grid.Column='1' Margin='12,9,12,9' VerticalAlignment='Center'/>" +
 "          </Grid>" +
 "        </Border>" +
 "        <ControlTemplate.Triggers>" +
@@ -666,7 +827,7 @@ namespace AppStudio
 "  <Setter Property='Template'>" +
 "    <Setter.Value>" +
 "      <ControlTemplate TargetType='ToggleButton'>" +
-"        <Border x:Name='head' Background='{DynamicResource SurfaceHover}' CornerRadius='5' Padding='10,7,10,7'>" +
+"        <Border x:Name='head' MinHeight='40' Background='{DynamicResource SurfaceHover}' CornerRadius='5' Padding='12,8,12,8'>" +
 "          <Grid>" +
 "            <Grid.ColumnDefinitions>" +
 "              <ColumnDefinition Width='14'/>" +
@@ -828,7 +989,7 @@ namespace AppStudio
 "</Style>" +
 
 "<Style x:Key='AppComboBox' TargetType='ComboBox'>" +
-"  <Setter Property='Height' Value='32'/>" +
+"  <Setter Property='Height' Value='36'/>" +
 "  <Setter Property='FontSize' Value='13'/>" +
 "  <Setter Property='Foreground' Value='{DynamicResource Text}'/>" +
 "  <Setter Property='SnapsToDevicePixels' Value='True'/>" +

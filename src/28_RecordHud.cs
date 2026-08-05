@@ -8,8 +8,15 @@ namespace AppStudio
     using System.Windows.Media;
 
     // What is on screen while a recording runs: a restrained frame around the
-    // window in front, and a small control saying that recording is happening
-    // with a way to stop it.
+    // window in front, and a small panel saying that recording is happening,
+    // with the controls a person actually reaches for while it runs.
+    //
+    // Small is not the same as cramped. Everything here is measured in the units
+    // WPF lays out in and then placed in the units Windows positions windows in,
+    // with the scale between them applied. Placing a panel by writing "360 by
+    // 72" straight into SetWindowPos is how, on a 125 per cent display, a stop
+    // control ended up with its right edge and its lower half outside the window
+    // that was supposed to contain it.
     //
     // Both are windows of this application, so both are excluded from the
     // foreground tracking, from the pointer ownership test and from the window
@@ -23,8 +30,17 @@ namespace AppStudio
         private readonly Window chip;
         private readonly TextBlock clock;
         private readonly TextBlock dot;
-        private readonly TextBlock chipText;
+        private readonly TextBlock chipHead;
+        private readonly TextBlock chipDetail;
+        private readonly TextBlock chipHint;
         private readonly Button stop;
+        private readonly System.Windows.Controls.Primitives.ToggleButton pause;
+        private readonly System.Windows.Controls.Primitives.ToggleButton inspect;
+        private readonly System.Windows.Controls.Primitives.ToggleButton detail;
+        private readonly string inspectLabel;
+        private readonly string onWord;
+        private readonly string offWord;
+        private string recordingWord;
         private IntPtr frameHandle;
         private IntPtr controlHandle;
         private IntPtr glowHandle;
@@ -34,8 +50,15 @@ namespace AppStudio
         private RectValue frameRect;
         private bool inspectWanted;
         private RectValue inspectRect;
+        private InspectFact lastFact;
 
         public event Action StopRequested;
+        // Pausing and the hover reader are asked for here rather than found in a
+        // dialog behind the window that is currently hidden. While a recording
+        // runs this panel is the whole of the application the operator can see,
+        // so anything they may want to change during one has to be on it.
+        public event Action<bool> PauseRequested;
+        public event Action<bool> InspectRequested;
 
         public RecordHud(string recordingLabel, string stopLabel)
         {
@@ -48,6 +71,10 @@ namespace AppStudio
             edge.BorderThickness = new Thickness(3);
             edge.Background = Brushes.Transparent;
             frame.Content = edge;
+
+            inspectLabel = Messages.Text("hud-inspect.txt", "Pointer info");
+            onWord = Messages.Text("hud-on.txt", "on");
+            offWord = Messages.Text("hud-off.txt", "off");
 
             control = CreateControlWindow();
             dot = new TextBlock();
@@ -89,20 +116,54 @@ namespace AppStudio
                 if (handler != null) handler();
             };
 
+            pause = HudToggle(Messages.Text("hud-pause.txt", "Pause"));
+            pause.Margin = new Thickness(Theme.Space3, 0, 0, 0);
+            pause.Checked += delegate { PaintPause(); Raise(PauseRequested, true); };
+            pause.Unchecked += delegate { PaintPause(); Raise(PauseRequested, false); };
+            recordingWord = recordingLabel;
+
             StackPanel row = new StackPanel();
             row.Orientation = Orientation.Horizontal;
             row.Children.Add(dot);
             row.Children.Add(clock);
             row.Children.Add(stop);
+            row.Children.Add(pause);
+
+            // The second line. The hover reader is a thing this application can
+            // do during a recording, so its name and whether it is on are on the
+            // panel: a feature whose only entrance is five items down a settings
+            // dialog is a feature nobody knows exists.
+            inspect = HudToggle(inspectLabel);
+            inspect.Checked += delegate { PaintInspectToggle(); Raise(InspectRequested, true); };
+            inspect.Unchecked += delegate { PaintInspectToggle(); Raise(InspectRequested, false); };
+            detail = HudToggle(Messages.Text("hud-detail.txt", "Details"));
+            detail.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            detail.Checked += delegate { PaintChip(); };
+            detail.Unchecked += delegate { PaintChip(); };
+
+            StackPanel second = new StackPanel();
+            second.Orientation = Orientation.Horizontal;
+            second.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            second.Children.Add(inspect);
+            second.Children.Add(detail);
+
+            StackPanel stack = new StackPanel();
+            stack.Children.Add(row);
+            stack.Children.Add(second);
 
             Border shell = new Border();
-            shell.Background = new SolidColorBrush(Color.FromArgb(238, 16, 22, 30));
+            // Opaque. At ninety five per cent whatever is behind the panel reads
+            // straight through the words on it, which is exactly the effect a
+            // recording indicator must not have.
+            shell.Background = new SolidColorBrush(Theme.Parse("#101620"));
             shell.BorderBrush = new SolidColorBrush(Theme.Parse("#3AA0FF"));
             shell.BorderThickness = new Thickness(1);
             shell.CornerRadius = new CornerRadius(Theme.RadiusMd);
-            shell.Padding = new Thickness(Theme.Space5, Theme.Space3, Theme.Space4, Theme.Space3);
-            shell.Child = row;
+            shell.Padding = new Thickness(Theme.Space4, Theme.Space3, Theme.Space4, Theme.Space4);
+            shell.Child = stack;
             control.Content = shell;
+            PaintPause();
+            PaintInspectToggle();
 
             // The inspector. Two more windows of this application, both of them
             // click-through: the operator is recording, and a ring drawn round
@@ -124,19 +185,43 @@ namespace AppStudio
             outer.Child = inner;
             glow.Content = outer;
 
+            // The chip is three lines at most: what the thing is and what it is
+            // called, then - only when asked for - the properties that name it
+            // to a program, then a line saying those properties exist. It is
+            // click-through, so it cannot carry its own control; the panel's
+            // Details toggle is what opens it, and the hint says so.
             chip = CreatePassiveWindow();
-            chipText = new TextBlock();
-            chipText.Foreground = Brushes.White;
-            chipText.FontFamily = Theme.UiFont;
-            chipText.FontSize = 12;
-            chipText.TextWrapping = TextWrapping.NoWrap;
+            chipHead = new TextBlock();
+            chipHead.Foreground = Brushes.White;
+            chipHead.FontFamily = Theme.UiFont;
+            chipHead.FontSize = 13;
+            chipHead.FontWeight = FontWeights.SemiBold;
+            chipHead.TextWrapping = TextWrapping.NoWrap;
+            chipDetail = new TextBlock();
+            chipDetail.Foreground = new SolidColorBrush(Theme.Parse("#B9C6D4"));
+            chipDetail.FontFamily = Theme.UiFont;
+            chipDetail.FontSize = 12;
+            chipDetail.TextWrapping = TextWrapping.NoWrap;
+            chipDetail.Margin = new Thickness(0, Theme.Space1, 0, 0);
+            chipDetail.Visibility = Visibility.Collapsed;
+            chipHint = new TextBlock();
+            chipHint.Text = Messages.Text("chip-more.txt", "more under Details");
+            chipHint.Foreground = new SolidColorBrush(Theme.Parse("#7F94AA"));
+            chipHint.FontFamily = Theme.UiFont;
+            chipHint.FontSize = 11;
+            chipHint.TextWrapping = TextWrapping.NoWrap;
+            chipHint.Margin = new Thickness(0, Theme.Space1, 0, 0);
+            StackPanel chipStack = new StackPanel();
+            chipStack.Children.Add(chipHead);
+            chipStack.Children.Add(chipDetail);
+            chipStack.Children.Add(chipHint);
             Border chipShell = new Border();
-            chipShell.Background = new SolidColorBrush(Color.FromArgb(226, 16, 22, 30));
-            chipShell.BorderBrush = new SolidColorBrush(Color.FromArgb(190, 58, 160, 255));
+            chipShell.Background = new SolidColorBrush(Theme.Parse("#101620"));
+            chipShell.BorderBrush = new SolidColorBrush(Color.FromArgb(200, 58, 160, 255));
             chipShell.BorderThickness = new Thickness(1);
             chipShell.CornerRadius = new CornerRadius(Theme.RadiusSm);
-            chipShell.Padding = new Thickness(Theme.Space3, Theme.Space1, Theme.Space3, Theme.Space1);
-            chipShell.Child = chipText;
+            chipShell.Padding = new Thickness(Theme.Space3, Theme.Space2, Theme.Space3, Theme.Space2);
+            chipShell.Child = chipStack;
             chip.Content = chipShell;
 
             frameHandle = new WindowInteropHelper(frame).EnsureHandle();
@@ -174,12 +259,21 @@ namespace AppStudio
             }), true);
         }
 
+        // The clock says which of the two states the recording is in, not only
+        // how long it has been running. "Recording 02:41" over a paused
+        // recording is the panel telling the operator something untrue.
         public void SetClock(string label, TimeSpan elapsed)
         {
-            string text = label + "  " +
+            string stamp = "  " +
                 ((int)elapsed.TotalMinutes).ToString("00", CultureInfo.InvariantCulture) + ":" +
                 elapsed.Seconds.ToString("00", CultureInfo.InvariantCulture);
-            OnUi(new Action(delegate { clock.Text = text; }), false);
+            string running = label;
+            OnUi(new Action(delegate
+            {
+                bool held = pause.IsChecked == true;
+                clock.Text = (held ? Messages.Text("hud-paused.txt", "Paused") : running) + stamp;
+                clock.Foreground = held ? new SolidColorBrush(Theme.Parse("#E4C179")) : Brushes.White;
+            }), false);
         }
 
         // What is under the pointer, or nothing. Called from the recording
@@ -196,14 +290,119 @@ namespace AppStudio
                 {
                     inspectWanted = false;
                     inspectRect = null;
+                    lastFact = null;
                     ApplyInspect(px, py);
                     return;
                 }
                 inspectWanted = true;
                 inspectRect = copy.Rect;
-                chipText.Text = copy.Chip();
+                lastFact = copy;
+                PaintChip();
                 ApplyInspect(px, py);
             }), false);
+        }
+
+        // The panel says which of the two states each switch is in, rather than
+        // what pressing it will do. "Pointer info: on" is readable at a glance;
+        // a button labelled "turn pointer info off" makes the reader work out
+        // the current state from the offer.
+        private void PaintPause()
+        {
+            bool held = pause.IsChecked == true;
+            pause.Content = held
+                ? Messages.Text("hud-resume.txt", "Resume")
+                : Messages.Text("hud-pause.txt", "Pause");
+            dot.Opacity = held ? 0.35 : 1.0;
+            if (recordingWord == null) return;
+            // The clock only redraws on the next tick, which is up to half a
+            // second away. The word has to change with the press.
+            string stamp = clock.Text;
+            int at = stamp.LastIndexOf("  ", StringComparison.Ordinal);
+            if (at > 0)
+            {
+                clock.Text = (held ? Messages.Text("hud-paused.txt", "Paused") : recordingWord) + stamp.Substring(at);
+                clock.Foreground = held ? new SolidColorBrush(Theme.Parse("#E4C179")) : Brushes.White;
+            }
+            Reflow();
+        }
+
+        // The panel is only as wide as its words, and its words change: "paused"
+        // is longer than "recording" in more than one language. Placed once at
+        // the start, the panel keeps the width it needed then and clips whatever
+        // it says afterwards, which is the fault this whole panel was rebuilt to
+        // stop. The size is recomputed whenever the content changes, and the
+        // window is only moved when the answer is actually different.
+        private void Reflow()
+        {
+            if (suppressed || !control.IsVisible) return;
+            double scale = Scale(controlHandle);
+            control.Measure(new Size(2000, 400));
+            int width = (int)Math.Ceiling(control.DesiredSize.Width * scale) + 2;
+            int height = (int)Math.Ceiling(control.DesiredSize.Height * scale) + 2;
+            RectValue now = WindowTools.GetPhysicalRect(controlHandle);
+            if (now != null && now.Width == width && now.Height == height) return;
+            PlaceControl();
+        }
+
+        private void PaintInspectToggle()
+        {
+            inspect.Content = inspectLabel + ": " + (inspect.IsChecked == true ? onWord : offWord);
+            // Dimmed and inert rather than disabled: a disabled button falls
+            // back to the system's own disabled look, which on this panel is a
+            // near white block. There is nothing to show the properties of when
+            // the reader is off, so it is out of reach either way.
+            bool usable = inspect.IsChecked == true;
+            detail.Opacity = usable ? 1.0 : 0.45;
+            detail.IsHitTestVisible = usable;
+            if (!usable && detail.IsChecked == true) detail.IsChecked = false;
+            Reflow();
+        }
+
+        private void PaintChip()
+        {
+            if (lastFact == null) return;
+            chipHead.Text = lastFact.Headline();
+            string more = lastFact.Detail();
+            bool open = detail.IsChecked == true;
+            chipDetail.Text = more;
+            chipDetail.Visibility = open && more.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            chipHint.Visibility = !open && more.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // Whether the recording is paused, and whether the hover reader is on,
+        // are decided elsewhere as well - a hotkey, the settings dialog - so the
+        // panel is told rather than assumed to be the only place they change.
+        public void SetInspect(bool value)
+        {
+            OnUi(new Action(delegate
+            {
+                if (inspect.IsChecked == value) return;
+                inspect.IsChecked = value;
+            }), false);
+        }
+
+        private static void Raise(Action<bool> handler, bool value)
+        {
+            if (handler != null) handler(value);
+        }
+
+        private static System.Windows.Controls.Primitives.ToggleButton HudToggle(string label)
+        {
+            System.Windows.Controls.Primitives.ToggleButton button = new System.Windows.Controls.Primitives.ToggleButton();
+            button.Content = label;
+            button.FontFamily = Theme.UiFont;
+            button.FontSize = 12;
+            button.FontWeight = FontWeights.SemiBold;
+            button.Height = 30;
+            button.MinWidth = 96;
+            button.Padding = new Thickness(Theme.Space3, 0, Theme.Space3, 0);
+            button.Foreground = Brushes.White;
+            button.Background = new SolidColorBrush(Color.FromArgb(70, 120, 160, 200));
+            button.BorderBrush = new SolidColorBrush(Color.FromArgb(150, 120, 170, 220));
+            button.BorderThickness = new Thickness(1);
+            button.VerticalAlignment = VerticalAlignment.Center;
+            button.Cursor = System.Windows.Input.Cursors.Hand;
+            return button;
         }
 
         public void HideInspect()
@@ -236,9 +435,15 @@ namespace AppStudio
             // The chip sits just below the pointer, and is nudged back onto
             // whichever display the pointer is on rather than being allowed to
             // run off the edge of it.
-            chip.Measure(new Size(1200, 200));
-            int width = (int)Math.Ceiling(chip.DesiredSize.Width) + 2;
-            int height = (int)Math.Ceiling(chip.DesiredSize.Height) + 2;
+            //
+            // Measure gives what the text needs in layout units; SetWindowPos
+            // wants device pixels. Handing the first number to the second is why
+            // the chip used to cut its own last word off on any display that is
+            // not at 100 per cent.
+            double scale = Scale(chipHandle);
+            chip.Measure(new Size(1600, 400));
+            int width = (int)Math.Ceiling(chip.DesiredSize.Width * scale) + 2;
+            int height = (int)Math.Ceiling(chip.DesiredSize.Height * scale) + 2;
             if (width < 40) width = 40;
             if (height < 18) height = 18;
             System.Drawing.Rectangle bounds =
@@ -251,6 +456,28 @@ namespace AppStudio
             if (y < bounds.Top) y = bounds.Top;
             NativeMethods.SetWindowPos(chipHandle, new IntPtr(-1), x, y, width, height,
                 NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+
+            // The ring and the panel are both topmost, and among topmost windows
+            // the last one placed wins. The ring is placed every time the
+            // pointer moves, so without this it ends up drawn across the panel -
+            // a blue band through the word "recording" and through the stop
+            // control. The panel is put back on top after the ring moves.
+            NativeMethods.SetWindowPos(controlHandle, new IntPtr(-1), 0, 0, 0, 0,
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE);
+        }
+
+        // Layout units to device pixels for this window. WPF reports it on the
+        // presentation source; a window that has not been shown yet has none, so
+        // the desktop's own ratio is used until it has.
+        private static double Scale(IntPtr window)
+        {
+            System.Windows.Interop.HwndSource source = System.Windows.Interop.HwndSource.FromHwnd(window);
+            if (source != null && source.CompositionTarget != null)
+            {
+                double m11 = source.CompositionTarget.TransformToDevice.M11;
+                if (m11 > 0) return m11;
+            }
+            return DpiAwareness.Scale();
         }
 
         public void FollowWindow(RectValue rect)
@@ -355,14 +582,30 @@ namespace AppStudio
             NativeMethods.SetWindowPos(frameHandle, new IntPtr(-1), frameRect.X, frameRect.Y,
                 Math.Max(1, frameRect.Width), Math.Max(1, frameRect.Height),
                 NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+            // Same reason as the ring: the frame is placed on every change of
+            // foreground window, and a window whose top edge crosses the panel
+            // would otherwise draw a line through it.
+            if (control.IsVisible)
+            {
+                NativeMethods.SetWindowPos(controlHandle, new IntPtr(-1), 0, 0, 0, 0,
+                    NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE);
+            }
         }
 
+        // The panel is exactly the size of what is in it, whatever the display
+        // is scaled to. Nothing here is a number somebody measured once on one
+        // monitor: the content is asked how much room it needs, and that answer
+        // is converted into the units the window manager positions windows in.
         private void PlaceControl()
         {
             if (suppressed) return;
+            double scale = Scale(controlHandle);
+            control.Measure(new Size(2000, 400));
+            int width = (int)Math.Ceiling(control.DesiredSize.Width * scale) + 2;
+            int height = (int)Math.Ceiling(control.DesiredSize.Height * scale) + 2;
             System.Drawing.Rectangle work = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;
-            int width = 360;
-            int height = 72;
+            if (width > work.Width) width = work.Width;
+            if (height > work.Height) height = work.Height;
             int x = work.Left + (work.Width - width) / 2;
             int y = work.Top + 12;
             NativeMethods.SetWindowPos(controlHandle, new IntPtr(-1), x, y, width, height,

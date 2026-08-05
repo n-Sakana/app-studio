@@ -135,6 +135,21 @@ namespace AppStudio
                 "have no value written at all and replay pauses for the operator.";
         }
 
+        // The same statement for the person at the keyboard rather than for the
+        // assistant reading the outputs. It says the same things in the same
+        // order; what changes is who it is addressed to. A settings dialog in
+        // Japanese with one English paragraph in the middle of it reads as an
+        // unfinished screen, whatever the paragraph says.
+        public static string PolicyStatementForScreen(string policy)
+        {
+            string head = Messages.Text("policy-head.txt", "");
+            if (head.Length == 0) return PolicyStatement(policy);
+            string tail = String.Equals(policy, PolicyLengthOnly, StringComparison.Ordinal)
+                ? Messages.Text("policy-length.txt", "")
+                : Messages.Text("policy-record.txt", "");
+            return tail.Length == 0 ? head : head + " " + tail;
+        }
+
         public static string DescribeLength(int length)
         {
             return length < 0 ? "unknown" : length.ToString(CultureInfo.InvariantCulture) + " character(s)";

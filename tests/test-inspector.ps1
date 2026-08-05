@@ -14,6 +14,8 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 # this test.
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 & (Join-Path $root 'app-studio.ps1') -CompileOnly
 [AppStudio.DpiAwareness]::Enable()
@@ -23,6 +25,11 @@ $shotDir = Join-Path $PSScriptRoot '.build\inspector'
 New-Item -ItemType Directory -Path $shotDir -Force | Out-Null
 
 $build = & (Join-Path $PSScriptRoot 'build-fixtures.ps1')
+function Message([string]$name, [string]$fallback) {
+    $path = Join-Path $root ('assets\messages\' + $name)
+    if (Test-Path -LiteralPath $path) { return ([IO.File]::ReadAllText($path, (New-Object Text.UTF8Encoding($false)))).Trim() }
+    return $fallback
+}
 $fixture = $null
 $hud = $null
 try {
@@ -80,8 +87,55 @@ try {
         $ours = [AppStudio.Inspector]::At([int]($controlRect.X + $controlRect.Width / 2), [int]($controlRect.Y + $controlRect.Height / 2), $hud.OwnHandles)
         if ($null -ne $ours) { throw 'the inspector described one of this product own windows' }
     }
+    # The panel has to be big enough for what is written on it, at whatever this
+    # display is scaled to. WPF lays out in one unit and SetWindowPos places in
+    # another; when the panel was placed with a constant, a 125 per cent display
+    # cut the right hand edge and the lower half off the stop control. This is
+    # the check that holds whatever the scale is: every control the panel offers
+    # is wholly inside the panel.
+    $panel = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$controlHandle)
+    $panelControls = $panel.FindAll([System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)))
+    if ($panelControls.Count -lt 4) {
+        throw ('the recording panel offers ' + $panelControls.Count + ' controls; stop, pause, the pointer reader and its details are all meant to be on it')
+    }
+    $panelNames = @()
+    foreach ($item in $panelControls) {
+        $panelNames += $item.Current.Name
+        $cr = $item.Current.BoundingRectangle
+        if ($cr.X -lt $controlRect.X -or $cr.Y -lt $controlRect.Y) {
+            throw ('"' + $item.Current.Name + '" starts outside the recording panel')
+        }
+        if (($cr.X + $cr.Width) -gt ($controlRect.X + $controlRect.Width)) {
+            throw ('"' + $item.Current.Name + '" is cut off at the right of the recording panel: ' +
+                [int]($cr.X + $cr.Width) + ' > ' + [int]($controlRect.X + $controlRect.Width))
+        }
+        if (($cr.Y + $cr.Height) -gt ($controlRect.Y + $controlRect.Height)) {
+            throw ('"' + $item.Current.Name + '" is cut off at the bottom of the recording panel: ' +
+                [int]($cr.Y + $cr.Height) + ' > ' + [int]($controlRect.Y + $controlRect.Height))
+        }
+    }
+    # The pointer reader says its own name and which of the two states it is in,
+    # on the panel, without anything being opened.
+    $joinedPanel = ($panelNames -join ' | ')
+    foreach ($word in @((Message 'hud-stop.txt' 'Stop'), (Message 'hud-pause.txt' 'Pause'), (Message 'hud-inspect.txt' 'Pointer info'))) {
+        if ($joinedPanel.IndexOf($word, [StringComparison]::Ordinal) -lt 0) {
+            throw ('the recording panel does not offer "' + $word + '": ' + $joinedPanel)
+        }
+    }
+    if ($joinedPanel.IndexOf((Message 'hud-off.txt' 'off'), [StringComparison]::Ordinal) -lt 0) {
+        throw ('the recording panel does not say whether the pointer reader is on or off: ' + $joinedPanel)
+    }
+
     $hud.ShowInspect($fact, $atX, $atY)
     Start-Sleep -Milliseconds 900
+
+    # The chip is sized the same way, and its first line is what a person reads.
+    $chipRect = [AppStudio.WindowTools]::GetPhysicalRect([IntPtr]$hud.OwnHandles[3])
+    if ($null -eq $chipRect) { throw 'the chip was not placed at all' }
+    if ($chipRect.Width -lt 80 -or $chipRect.Height -lt 30) {
+        throw ('the chip is ' + $chipRect.Width + 'x' + $chipRect.Height + ', which is too small to hold a line of text')
+    }
 
     # The pointer test the recorder uses must still find the fixture under the
     # glow. If it found App Studio, the press would be thrown away as this

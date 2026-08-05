@@ -32,7 +32,12 @@ namespace AppStudio
         private readonly TextBlock findCount = new TextBlock();
         private readonly TranslateTransform paintShift = new TranslateTransform();
         private readonly TranslateTransform gutterShift = new TranslateTransform();
-        private readonly Thickness inset = new Thickness(Theme.Space2, Theme.Space2, Theme.Space2, Theme.Space2);
+        // A whole line of room under the last one. Without it, scrolling to the
+        // end of a file leaves the final line flush against the bottom edge with
+        // the row above it sliced in half, which reads - correctly - as "this
+        // does not go all the way down". The colour layer, the numbers and the
+        // box being typed into all take the same inset, so they scroll together.
+        private readonly Thickness inset = new Thickness(Theme.Space2, Theme.Space2, Theme.Space2, Theme.Space2 + Theme.CodeLine);
 
         private Grid root;
         private string language = ScriptLanguages.PowerShell;
@@ -189,15 +194,24 @@ namespace AppStudio
             numbers.BorderBrush = Theme.BorderSubtle;
             numbers.BorderThickness = new Thickness(0, 0, 1, 0);
             numbers.ClipToBounds = true;
-            numbers.MinWidth = 46;
+            numbers.MinWidth = Theme.LineNumberWidth;
+            // No LineHeight here. The numbers, the colour layer and the box being
+            // typed into have to advance by exactly the same amount per line, and
+            // the only value all three agree on is the font's own.
             gutter.FontFamily = Theme.CodeFont;
             gutter.FontSize = Theme.CodeSize;
             gutter.Foreground = Theme.CodeGutterText;
             gutter.TextAlignment = TextAlignment.Right;
             gutter.Margin = new Thickness(Theme.Space2, inset.Top, Theme.Space2, inset.Bottom);
+            // Top, not stretched. A stretched child is arranged at the height of
+            // the box it is in, and a text block arranged shorter than its text
+            // simply stops drawing the rest. Scrolled far enough down, the
+            // numbers ran out and the column went blank below the last one that
+            // happened to fit the viewport when the file was opened.
+            gutter.VerticalAlignment = VerticalAlignment.Top;
             gutter.RenderTransform = gutterShift;
             TextOptions.SetTextFormattingMode(gutter, TextFormattingMode.Display);
-            numbers.Child = gutter;
+            numbers.Child = Unbounded(gutter);
             Grid.SetColumn(numbers, 0);
             grid.Children.Add(numbers);
 
@@ -210,10 +224,18 @@ namespace AppStudio
             paint.Foreground = Theme.Text;
             paint.TextWrapping = TextWrapping.NoWrap;
             paint.Margin = inset;
+            // The same reason as the gutter, and the one that mattered: this is
+            // the layer the code itself is drawn on. Stretched, it was arranged
+            // at the viewport's height, so a file longer than the viewport lost
+            // its lower half - scroll down and the code disappeared, leaving the
+            // caret and the selection moving over an empty box. Top alignment
+            // lets it take the height its text needs; the box around it clips.
+            paint.VerticalAlignment = VerticalAlignment.Top;
+            paint.HorizontalAlignment = HorizontalAlignment.Left;
             paint.RenderTransform = paintShift;
             paint.IsHitTestVisible = false;
             TextOptions.SetTextFormattingMode(paint, TextFormattingMode.Display);
-            stack.Children.Add(paint);
+            stack.Children.Add(Unbounded(paint));
 
             input.FontFamily = Theme.CodeFont;
             input.FontSize = Theme.CodeSize;
@@ -254,6 +276,27 @@ namespace AppStudio
             frame.ClipToBounds = true;
             frame.Child = grid;
             return frame;
+        }
+
+        // A layer that is allowed to be taller than the box it is drawn in.
+        //
+        // The colour and the line numbers are painted behind a scrolling text
+        // box and moved with a transform, so both have to hold the whole file
+        // however little of it is on screen. A panel measures its children with
+        // the room it has, and a text block measured with the viewport's height
+        // is arranged at the viewport's height and stops drawing after that -
+        // so scrolling past the first screenful left the caret moving over an
+        // empty box with no code under it at all. A canvas measures its children
+        // with no limit, which is the one thing needed here; the box around it
+        // still clips what hangs out.
+        private static UIElement Unbounded(UIElement layer)
+        {
+            Canvas host = new Canvas();
+            host.IsHitTestVisible = false;
+            Canvas.SetLeft(layer, 0);
+            Canvas.SetTop(layer, 0);
+            host.Children.Add(layer);
+            return host;
         }
 
         private void Sync()

@@ -81,9 +81,14 @@ namespace AppStudio
 
         public event Action<RecorderStatus> Progress;
 
-        // Off unless the operator asked for it in the detailed settings. It
-        // draws over whatever they are recording, so it is never on by default.
+        // Off unless the operator asked for it. It draws over whatever they are
+        // recording, so it is never on by default.
         public bool Inspect;
+        private volatile bool paused;
+        private DateTime pausedSinceUtc = DateTime.MinValue;
+        private readonly List<TimeSpan[]> pauseSpans = new List<TimeSpan[]>();
+
+        public bool Paused { get { return paused; } }
         private const int InspectMinGapMs = 150;
         private DateTime lastInspectAt = DateTime.MinValue;
         private int lastInspectX = Int32.MinValue;
@@ -283,6 +288,12 @@ namespace AppStudio
         // than passed over.
         private void Enqueue(InputMoment moment)
         {
+            // Paused means this recording is open and watching nothing. The
+            // moment is dropped here, at the one place every moment passes
+            // through, rather than half way down where some of it would already
+            // have become a step. What the operator did in the meantime is not
+            // guessed at and not partially kept.
+            if (paused) return;
             if (pending.Count >= 512)
             {
                 System.Threading.Interlocked.Increment(ref droppedByBacklog);
@@ -291,9 +302,59 @@ namespace AppStudio
             pending.Enqueue(moment);
         }
 
+        // Pausing is a hole in the record, so it is a stated one. Every span is
+        // written into the session's limits when the recording ends, in the same
+        // list as everything else that could not be obtained; a recording that
+        // was paused for two minutes must not read afterwards as two quiet
+        // minutes in which nothing happened.
+        public void SetPaused(bool value)
+        {
+            if (!running) return;
+            lock (sync)
+            {
+                if (paused == value) return;
+                paused = value;
+                if (paused) pausedSinceUtc = DateTime.UtcNow;
+                else if (pausedSinceUtc != DateTime.MinValue)
+                {
+                    pauseSpans.Add(new TimeSpan[] { pausedSinceUtc - startedUtc, DateTime.UtcNow - startedUtc });
+                    pausedSinceUtc = DateTime.MinValue;
+                }
+            }
+        }
+
+        private void ReportPauses()
+        {
+            List<TimeSpan[]> spans;
+            lock (sync)
+            {
+                if (paused && pausedSinceUtc != DateTime.MinValue)
+                {
+                    pauseSpans.Add(new TimeSpan[] { pausedSinceUtc - startedUtc, DateTime.UtcNow - startedUtc });
+                    pausedSinceUtc = DateTime.MinValue;
+                    paused = false;
+                }
+                spans = new List<TimeSpan[]>(pauseSpans);
+                pauseSpans.Clear();
+            }
+            for (int index = 0; index < spans.Count; index++)
+            {
+                session.AddLimit("RECORD-PAUSED: " + Messages.Text("record-paused-limit.txt",
+                    "the recording was paused and watched nothing between") + " " +
+                    Clock(spans[index][0]) + " - " + Clock(spans[index][1]) + ".");
+            }
+        }
+
+        private static string Clock(TimeSpan value)
+        {
+            return ((int)value.TotalMinutes).ToString("00", System.Globalization.CultureInfo.InvariantCulture) + ":" +
+                value.Seconds.ToString("00", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
         public void Stop()
         {
             if (!running) return;
+            ReportPauses();
             running = false;
             Thread watching = sampler;
             sampler = null;

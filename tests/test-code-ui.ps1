@@ -188,13 +188,81 @@ try {
     $parsed = [AppStudio.ScriptRun]::CheckPowerShell($ps)
     if (-not $parsed.Ok) { throw ('what the screen opened with does not parse: ' + (($parsed.Problems) -join ' / ')) }
 
-    # --- 3. the module tree names every module of both languages --------------
+    # --- 3. the module tree is a shape, and every module is reachable in it ---
+    # The procedure a person edits is first and on its own; the three modules
+    # that carry operations out are gathered under one heading that is shut when
+    # the screen opens. Nothing is removed by being folded, so every one of the
+    # ten is still reachable - after opening the heading that says it is there.
+    # The language that is not on screen is shut, so only the current one's
+    # heading is in the tree at this point. That is the shape being asserted.
+    $runtimeGroup = Message 'code-group-runtime.txt' 'The machinery'
+    $groups = @()
+    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
+        if ($item.Current.Name -eq $runtimeGroup) { $groups += $item }
+    }
+    if ($groups.Count -ne 1) { throw ('the runtime modules are not gathered under one heading: found ' + $groups.Count) }
+    foreach ($group in $groups) {
+        $state = $group.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+        if ($state.Current.ExpandCollapseState -ne [System.Windows.Automation.ExpandCollapseState]::Collapsed) {
+            throw 'the runtime heading is already open when the screen opens'
+        }
+    }
+    # Nor is the other language's set of modules on screen before it is asked
+    # for: the tree opens on the one being edited.
+    if ($null -ne (Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.bas')) {
+        throw 'the other language is already unfolded when the screen opens'
+    }
+    # The first module under the current language is the one to edit.
+    $firstModule = $null
+    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
+        if ($item.Current.Name -like '*.ps1' -or $item.Current.Name -like '*.bas') {
+            if ($null -eq $firstModule) { $firstModule = $item.Current.Name }
+        }
+    }
+    if ($firstModule -ne 'Workflow.ps1') { throw ('the tree opens on ' + $firstModule + ' rather than on the procedure') }
+    # A row says what the module is for in the reader's own words, not only what
+    # the file is called.
+    $treeWords = @()
+    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::Text)) { $treeWords += $item.Current.Name }
+    $treeJoined = ($treeWords -join ' | ')
+    foreach ($word in @((Message 'code-role-workflow.txt' 'the procedure'), (Message 'code-role-recorded.txt' 'what the recording found'), $runtimeGroup)) {
+        if ($treeJoined.IndexOf($word, [StringComparison]::Ordinal) -lt 0) {
+            throw ('the module tree does not say what a module is for: "' + $word + '" is not on screen')
+        }
+    }
+    foreach ($group in $groups) {
+        $group.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+        Start-Sleep -Milliseconds 400
+    }
+    # The other language's group has to be opened too, which means opening the
+    # language first.
+    $vbaNode = Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) (Message 'code-lang-vba.txt' 'VBA')
+    if ($null -ne $vbaNode) {
+        $vbaNode.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+        Start-Sleep -Milliseconds 500
+        foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
+            if ($item.Current.Name -ne $runtimeGroup) { continue }
+            $item.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
+        }
+        Start-Sleep -Milliseconds 500
+    }
     $expected = @('Workflow.ps1', 'RecordedFacts.ps1', 'RuntimeCore.ps1', 'RuntimeLocator.ps1', 'RuntimeNative.ps1',
         'Workflow.bas', 'RecordedFacts.bas', 'RuntimeCore.bas', 'RuntimeLocator.bas', 'RuntimeNative.bas')
     foreach ($module in $expected) {
         if ($null -eq (Wait-Named $window ([System.Windows.Automation.ControlType]::TreeItem) $module 8000)) {
             throw ('the module tree does not list ' + $module)
         }
+    }
+    # Every row has to fit the pane it is in. A tree whose text runs out past
+    # its own edge is a tree nobody can read the end of.
+    $paneRight = 0
+    foreach ($item in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
+        $ir = $item.Current.BoundingRectangle
+        if (($ir.X + $ir.Width) -gt $paneRight) { $paneRight = $ir.X + $ir.Width }
+    }
+    $editorBox = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 15000
+    if ($null -ne $editorBox -and $paneRight -gt $editorBox.Current.BoundingRectangle.X) {
+        throw ('a module row runs past the module pane and under the editor: ' + [int]$paneRight + ' > ' + [int]$editorBox.Current.BoundingRectangle.X)
     }
     $null = Shoot $window '03b-module-tree'
 
@@ -228,10 +296,102 @@ try {
     $null = Press $window (Message 'code-lang-ps.txt' 'PowerShell')
     if ((Editor-Text $window) -ne $ps) { throw 'switching back did not bring the PowerShell back' }
 
-    # --- 3c. full width editing, there and back, losing nothing ---------------
+    # --- 3b2. the editor is the size of a place to read a file in -------------
+    # A control being present says nothing about whether anybody can work in it.
+    # These are the numbers: how much of the window the editor actually holds,
+    # how many lines of the file that is, and whether the last one can be
+    # reached. The window used to be 1400 by 1050 with an editor 203 tall.
+    $winRect = [AppStudio.WindowTools]::GetPhysicalRect($handle)
+    $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    if ($winRect.Y -lt $work.Y) { throw ('the code window starts above the desktop: y=' + $winRect.Y) }
+    if (($winRect.Y + $winRect.Height) -gt ($work.Y + $work.Height)) {
+        throw ('the code window runs below the desktop: bottom=' + ($winRect.Y + $winRect.Height) + ' work=' + ($work.Y + $work.Height))
+    }
     $editBox = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 15000
+    $editRect = $editBox.Current.BoundingRectangle
+    $share = ($editRect.Width * $editRect.Height) / ($winRect.Width * $winRect.Height)
+    if ($share -lt 0.28) { throw ('the editor holds ' + [int]($share * 100) + '% of the code window') }
+    if ($editRect.Height -lt 420) { throw ('the editor viewport is ' + [int]$editRect.Height + ' pixels tall') }
+    if ($editRect.Width -lt 520) { throw ('the editor viewport is ' + [int]$editRect.Width + ' pixels wide') }
+    # Nothing may sit on top of it, and it may not run off the window.
+    if (($editRect.X + $editRect.Width) -gt ($winRect.X + $winRect.Width)) { throw 'the editor runs off the right of the window' }
+    if (($editRect.Y + $editRect.Height) -gt ($winRect.Y + $winRect.Height)) { throw 'the editor runs off the bottom of the window' }
+
+    # The last line has to be reachable and whole. Scrolling to the end of the
+    # text and asking where the caret is tells us the box really goes that far.
+    $value = $editBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
+    $lineCount = ($ps -split "`r`n|`n").Count
+    $textPattern = $editBox.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+    $visibleAtTop = $textPattern.GetVisibleRanges()
+    if ($visibleAtTop.Count -lt 1) { throw 'the editor reports no visible text at all' }
+    $topText = $visibleAtTop[0].GetText(-1)
+    $topLines = ($topText -split "`r`n|`n").Count
+    if ($topLines -lt 20) { throw ('only ' + $topLines + ' lines of ' + $lineCount + ' are visible in the editor') }
+
+    # --- 3b3. the code is still drawn after scrolling down --------------------
+    # The colour and the line numbers are painted on layers behind the text box
+    # rather than into it, and a layer that is measured with the viewport's
+    # height stops drawing where the viewport ends. Scrolled past the first
+    # screenful, that leaves a caret moving over an empty box. No test that asks
+    # whether a control exists can see this, so this one looks at the pixels.
+    # The measurement is the same band of the same viewport, photographed twice:
+    # once at the top of the file and once scrolled to its end. At the top the
+    # band is full of code, so it says what "full of code" is worth on this
+    # machine at this size; scrolled down it has to still be worth about that.
+    # A layer cut off at the viewport leaves it empty.
+    function Ink($handle, $rect, $path) {
+        $box = New-Object AppStudio.RectValue
+        $box.X = [int]$rect.X; $box.Y = [int]$rect.Y
+        $box.Width = [int]$rect.Width; $box.Height = [int]$rect.Height
+        $null = [AppStudio.Capture]::Crop($box, (New-Object 'AppStudio.MaskRect[]' 0), $path, $handle)
+        if (-not (Test-Path -LiteralPath $path)) { throw 'the editor could not be photographed' }
+        $bitmap = [Drawing.Bitmap]::FromFile($path)
+        try {
+            # Past the line numbers, and the last fifth of the viewport: the part
+            # that only holds anything when the whole file was drawn.
+            $left = [int]($bitmap.Width * 0.12)
+            $top = [int]($bitmap.Height * 0.78)
+            $background = $bitmap.GetPixel($bitmap.Width - 4, 4)
+            $marked = 0
+            for ($y = $top; $y -lt ($bitmap.Height - 3); $y++) {
+                for ($x = $left; $x -lt ($bitmap.Width - 4); $x += 2) {
+                    $pixel = $bitmap.GetPixel($x, $y)
+                    $delta = [Math]::Abs([int]$pixel.R - [int]$background.R) +
+                        [Math]::Abs([int]$pixel.G - [int]$background.G) +
+                        [Math]::Abs([int]$pixel.B - [int]$background.B)
+                    if ($delta -gt 40) { $marked++ }
+                }
+            }
+            return $marked
+        } finally { $bitmap.Dispose() }
+    }
+    $lastLine = ''
+    $allLines = @($ps -split "`r`n|`n")
+    for ($index = $allLines.Count - 1; $index -ge 0; $index--) {
+        if ($allLines[$index].Trim().Length -gt 0) { $lastLine = $allLines[$index].Trim(); break }
+    }
+    if ($lastLine.Length -lt 4) { throw 'the generated procedure has no last line to look for' }
+    $inkAtTop = Ink $handle $editRect (Join-Path $shotDir 'editor-at-top.png')
+    if ($inkAtTop -lt 100) { throw ('the editor draws almost nothing even at the top of the file: ' + $inkAtTop) }
+    $findBox = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-find.txt' 'Find') 8000
+    if ($null -eq $findBox) { throw 'the editor has no find box' }
+    $findBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($lastLine)
+    Start-Sleep -Milliseconds 600
+    $null = Press $window (Message 'code-find-next.txt' 'Next')
+    Start-Sleep -Milliseconds 900
+    $scrolled = (Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 8000).Current.BoundingRectangle
+    $scrolledInk = Ink $handle $scrolled (Join-Path $shotDir 'editor-scrolled.png')
+    if ($scrolledInk -lt ($inkAtTop / 4)) {
+        throw ('scrolled to its last line, the bottom of the editor holds ' + $scrolledInk +
+            ' marked pixels against ' + $inkAtTop + ' at the top of the same file. The colour layer is ' +
+            'being cut off at the viewport, so the code stops being drawn where the first screenful ended.')
+    }
+    $findBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('')
+    Start-Sleep -Milliseconds 400
+
+    # --- 3c. concentrating, there and back, losing nothing --------------------
     $typed = $ps + "`r`n# typed before going full width"
-    $editBox.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue($typed)
+    $value.SetValue($typed)
     Start-Sleep -Milliseconds 700
     $null = Press $window (Message 'code-full-enter.txt' 'Edit at full width')
     Start-Sleep -Milliseconds 900
@@ -239,6 +399,21 @@ try {
     if ($null -ne (Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'code-ai-copy.txt' 'Copy the request'))) {
         throw 'full width editing did not give the editor the work area'
     }
+    # Concentrating has to take the rest of the window away in fact, not in
+    # name: the language switch, the version buttons and the status line go, and
+    # the editor is measurably larger for it.
+    foreach ($gone in @((Message 'code-lang-ps.txt' 'PowerShell'), (Message 'code-baseline.txt' 'Back to the generated version'))) {
+        if ($null -ne (Find-Named $window ([System.Windows.Automation.ControlType]::Button) $gone)) {
+            throw ('concentrating left "' + $gone + '" on screen')
+        }
+    }
+    $fullBox = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 15000
+    $fullRect = $fullBox.Current.BoundingRectangle
+    if ($fullRect.Width -le $editRect.Width) {
+        throw ('concentrating did not widen the editor: ' + [int]$editRect.Width + ' -> ' + [int]$fullRect.Width)
+    }
+    $fullShare = ($fullRect.Width * $fullRect.Height) / ($winRect.Width * $winRect.Height)
+    if ($fullShare -lt 0.45) { throw ('the concentrated editor holds ' + [int]($fullShare * 100) + '% of the window') }
     if ((Editor-Text $window) -ne $typed) { throw 'going to full width lost what had been typed' }
     if ($null -eq (Find-Named $window ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.ps1')) {
         throw 'full width editing dropped the module tree'
@@ -246,6 +421,28 @@ try {
     $null = Press $window (Message 'code-full-exit.txt' 'Leave full width editing')
     Start-Sleep -Milliseconds 900
     if ((Editor-Text $window) -ne $typed) { throw 'coming back from full width lost what had been typed' }
+
+    # --- 3d. it follows the window instead of being sized once ----------------
+    foreach ($size in @(@(1400, 900), @(1750, 1010), @(1300, 800))) {
+        [AppStudio.WindowTools]::Move($handle, 60, 8, $size[0], $size[1]) | Out-Null
+        Start-Sleep -Milliseconds 900
+        $sized = (Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (Message 'code-editor-name.txt' 'The automation, as code') 8000).Current.BoundingRectangle
+        if (($sized.X + $sized.Width) -gt (60 + $size[0])) { throw ('at ' + $size[0] + 'x' + $size[1] + ' the editor runs off the right') }
+        if (($sized.Y + $sized.Height) -gt (8 + $size[1])) { throw ('at ' + $size[0] + 'x' + $size[1] + ' the editor runs off the bottom') }
+        if ($sized.Height -lt 300) { throw ('at ' + $size[0] + 'x' + $size[1] + ' the editor collapsed to ' + [int]$sized.Height + ' pixels') }
+        if ($sized.Width -lt 380) { throw ('at ' + $size[0] + 'x' + $size[1] + ' the editor narrowed to ' + [int]$sized.Width + ' pixels') }
+        # Nothing may be pushed off the bottom by the resize either.
+        foreach ($name in @((Message 'code-ai-copy.txt' 'Copy the request'), (Message 'code-run.txt' 'Run'))) {
+            $control = Find-Named $window ([System.Windows.Automation.ControlType]::Button) $name
+            if ($null -eq $control) { throw ('"' + $name + '" is gone at ' + $size[0] + 'x' + $size[1]) }
+            $cr = $control.Current.BoundingRectangle
+            if (($cr.Y + $cr.Height) -gt (8 + $size[1])) { throw ('"' + $name + '" is below the window at ' + $size[0] + 'x' + $size[1]) }
+            if ($control.Current.IsOffscreen) { throw ('"' + $name + '" is offscreen at ' + $size[0] + 'x' + $size[1]) }
+        }
+        $null = Shoot $window ('04c-resized-' + $size[0] + 'x' + $size[1])
+    }
+    [AppStudio.WindowTools]::Move($handle, $winRect.X, $winRect.Y, $winRect.Width, $winRect.Height) | Out-Null
+    Start-Sleep -Milliseconds 700
     # Put it back the way it was, so the rest of the run compares against the
     # generated version rather than against something this test typed.
     $null = Press $window (Message 'code-baseline.txt' 'Back to the generated version')
@@ -359,7 +556,11 @@ try {
 
     $shots = @(Get-ChildItem -LiteralPath $shotDir -Filter '*.png' -ErrorAction SilentlyContinue)
     Write-Output ('PASS test-code-ui psChars=' + $ps.Length + ' vbaChars=' + $vba.Length + ' requestChars=' + $request.Length +
-        ' copies=1 staleRefused=1 diffBeforeApply=1 applied=1 undone=1 baseline=1 back=result shots=' + $shots.Count)
+        ' copies=1 staleRefused=1 diffBeforeApply=1 applied=1 undone=1 baseline=1 back=result' +
+        ' editor=' + [int]$editRect.Width + 'x' + [int]$editRect.Height + ' share=' + [int]($share * 100) + '%' +
+        ' concentrated=' + [int]$fullRect.Width + 'x' + [int]$fullRect.Height + ' share=' + [int]($fullShare * 100) + '%' +
+        ' visibleLines=' + $topLines + '/' + $lineCount + ' inkAfterScroll=' + $scrolledInk +
+        ' runtimeFolded=1 treeInPane=1 resized=3 shots=' + $shots.Count)
 } finally {
     if ($null -ne $app) { try { $app.CloseMainWindow() | Out-Null; Start-Sleep -Milliseconds 800; if (-not $app.HasExited) { $app.Kill() } } catch { } }
     if ($null -ne $seedFolder -and (Test-Path -LiteralPath $seedFolder)) { Remove-Item -LiteralPath $seedFolder -Recurse -Force -ErrorAction SilentlyContinue }

@@ -66,25 +66,18 @@ namespace AppStudio
             text.AppendLine("' " + App.Name + " " + App.Version + " - the recorded procedure (VBA)");
             text.AppendLine("' session " + Comment(plan.SessionId) + "  " + Comment(plan.SessionTitle));
             text.AppendLine("'");
-            text.AppendLine("' THIS is the module to edit. One line below is one thing the operator did,");
-            text.AppendLine("' in the order they did it. Deleting a line takes that step out and nothing");
-            text.AppendLine("' else: the wait before it and the settle after it belong to the line and go");
-            text.AppendLine("' with it, and the four modules beside this one do not change.");
-            text.AppendLine("'");
-            text.AppendLine("' The id in quotes is the recorded step. What that step is aimed at is in");
-            text.AppendLine("' " + CodeModules.RecordedFacts + ". How it is carried out is in the three Runtime modules.");
+            // Short, for the same reason the PowerShell one is short: the steps
+            // are what somebody opens this to change, and they have to be on
+            // screen when it opens. The explanation lives beside the editor.
+            text.AppendLine("' One line below is one recorded step, in the order it happened. Deleting a");
+            text.AppendLine("' line takes that step out and changes nothing else.");
             text.AppendLine("'");
             text.AppendLine("' Import all five modules into a VBA project and run " + EntryPoint + ".");
             text.AppendLine("' It drives the real applications on this machine. Read it before you run it.");
             text.AppendLine("'");
-            text.AppendLine("' VBA reaches controls through Win32 only: a class name with a control id,");
-            text.AppendLine("' or a class name with its index. Steps whose only address is a UI Automation");
-            text.AppendLine("' one appear below as Unsupported and stop the run with the reason, because");
-            text.AppendLine("' pressing a remembered coordinate instead would be pressing an unknown part");
-            text.AppendLine("' of the application.");
-            text.AppendLine("'");
-            text.AppendLine("' A secret is never typed by these modules. The field is focused and the");
-            text.AppendLine("' operator enters the value directly, so the value never exists here.");
+            text.AppendLine("' VBA reaches controls through Win32 only. A step whose only address is a UI");
+            text.AppendLine("' Automation one is written below as Unsupported and stops the run with the");
+            text.AppendLine("' reason, rather than pressing a remembered coordinate.");
             text.AppendLine("'");
             if (session != null && session.ValuePolicy != null)
             {
@@ -101,19 +94,11 @@ namespace AppStudio
             text.AppendLine();
             text.AppendLine("Option Explicit");
             text.AppendLine();
-            text.AppendLine("' Run this one yourself. It reports on screen.");
-            text.AppendLine("Public Sub " + EntryPoint + "()");
-            text.AppendLine("    " + CodeModules.RuntimeCore + ".BeginRun \"\"");
-            text.AppendLine("    RunSteps");
-            text.AppendLine("End Sub");
-            text.AppendLine();
-            text.AppendLine("' A host that is watching calls this one and reads the file. Nothing here may");
-            text.AppendLine("' open a window in that case, because there is nobody to close it.");
-            text.AppendLine("Public Sub " + EntryPoint + "To(ByVal resultPath As String)");
-            text.AppendLine("    " + CodeModules.RuntimeCore + ".BeginRun resultPath");
-            text.AppendLine("    RunSteps");
-            text.AppendLine("End Sub");
-            text.AppendLine();
+            // The recorded steps come before the two ways of starting them.
+            // VBA does not care which order a module declares things in, and the
+            // reader does: this is the part somebody opened the file to change,
+            // and putting the entry points first pushed it past line forty,
+            // which is below the bottom of the editor showing it.
             text.AppendLine("'=== the recorded procedure - one line is one step ===");
             text.AppendLine();
             text.AppendLine("Private Sub RunSteps()");
@@ -131,6 +116,19 @@ namespace AppStudio
             text.AppendLine("    Exit Sub");
             text.AppendLine("Failed:");
             text.AppendLine("    " + CodeModules.RuntimeCore + ".Stopped Err.Description");
+            text.AppendLine("End Sub");
+            text.AppendLine();
+            text.AppendLine("' Run this one yourself. It reports on screen.");
+            text.AppendLine("Public Sub " + EntryPoint + "()");
+            text.AppendLine("    " + CodeModules.RuntimeCore + ".BeginRun \"\"");
+            text.AppendLine("    RunSteps");
+            text.AppendLine("End Sub");
+            text.AppendLine();
+            text.AppendLine("' A host that is watching calls this one and reads the file. Nothing here may");
+            text.AppendLine("' open a window in that case, because there is nobody to close it.");
+            text.AppendLine("Public Sub " + EntryPoint + "To(ByVal resultPath As String)");
+            text.AppendLine("    " + CodeModules.RuntimeCore + ".BeginRun resultPath");
+            text.AppendLine("    RunSteps");
             text.AppendLine("End Sub");
             return text.ToString();
         }

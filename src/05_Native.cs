@@ -18,6 +18,8 @@ namespace AppStudio
         internal const uint GW_HWNDNEXT = 2;
         internal const int GWL_STYLE = -16;
         internal const int GWL_EXSTYLE = -20;
+        internal const uint SWP_NOSIZE = 0x0001;
+        internal const uint SWP_NOMOVE = 0x0002;
         internal const uint SWP_NOACTIVATE = 0x0010;
         internal const uint SWP_SHOWWINDOW = 0x0040;
         internal const uint BM_CLICK = 0x00F5;
@@ -288,6 +290,17 @@ namespace AppStudio
         [DllImport("shcore.dll")]
         internal static extern int GetDpiForMonitor(IntPtr monitor, int dpiType, out uint dpiX, out uint dpiY);
 
+        [DllImport("user32.dll")]
+        internal static extern IntPtr GetDC(IntPtr window);
+
+        [DllImport("user32.dll")]
+        internal static extern int ReleaseDC(IntPtr window, IntPtr context);
+
+        [DllImport("gdi32.dll")]
+        internal static extern int GetDeviceCaps(IntPtr context, int index);
+
+        internal const int LOGPIXELSX = 88;
+
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern uint SendInput(uint count, INPUT[] inputs, int size);
 
@@ -528,6 +541,31 @@ namespace AppStudio
                 Reason = (Reason ?? String.Empty) + " SetProcessDPIAware: " + exception.Message;
             }
             State = "unaware";
+        }
+
+        // Device pixels per layout unit for the desktop as a whole. A window
+        // that has been shown knows its own, which may differ on a second
+        // monitor; this is the answer for one that has not been shown yet, and
+        // it is a great deal better than assuming 1.
+        public static double Scale()
+        {
+            IntPtr desktop = IntPtr.Zero;
+            try
+            {
+                desktop = NativeMethods.GetDC(IntPtr.Zero);
+                if (desktop == IntPtr.Zero) return 1.0;
+                int dpi = NativeMethods.GetDeviceCaps(desktop, NativeMethods.LOGPIXELSX);
+                if (dpi <= 0) return 1.0;
+                return dpi / 96.0;
+            }
+            catch (Exception)
+            {
+                return 1.0;
+            }
+            finally
+            {
+                if (desktop != IntPtr.Zero) NativeMethods.ReleaseDC(IntPtr.Zero, desktop);
+            }
         }
     }
 

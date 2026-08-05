@@ -11,18 +11,23 @@ namespace AppStudio
 
     // The third shape of the window: the recording as code.
     //
-    // It opens with the recording already written out as something that runs.
+    // This is a workspace, not a page with an editor on it. Editing code is the
+    // whole job here, so the window's ordinary furniture - the launcher's
+    // buttons, the theme switch, the health badge - is not carried into it. What
+    // is left is a bar that says where you are and offers back, check and run;
+    // the modules down the left; and the file, filling everything else.
+    //
+    // The assistant sits in a column beside the editor rather than a strip under
+    // it. A window is far wider than it is tall, so width is the thing there is
+    // enough of; taking the height instead was what left the editor showing nine
+    // lines of a fifty line file. Concentrating - the same editor with the
+    // assistant column put away - is a second layout rather than a mode: both
+    // hold the same editor object, so moving between them cannot lose what was
+    // typed, where the caret was or how far down it was scrolled.
+    //
     // PowerShell and VBA are the same size on this screen, in the same place,
     // with the same buttons; neither is the real one with the other offered as
     // an export.
-    //
-    // The automation is five modules per language now, so this screen has a tree
-    // of them and says which one is on screen and what it is for. It also has a
-    // second layout: the same editor with the whole work area to itself, for
-    // when reading the code is the job rather than one of three things on a
-    // screen. Both layouts hold the same editor object, so moving between them
-    // cannot lose what was typed, where the caret was or how far down it was
-    // scrolled.
     //
     // Talking to an assistant is part of this screen rather than a mode of its
     // own. One button copies the request - once, whole - one button opens the
@@ -41,14 +46,26 @@ namespace AppStudio
         private readonly TextBlock stateLine = new TextBlock();
         private readonly TextBlock languageNote = new TextBlock();
         private readonly TextBlock moduleLine = new TextBlock();
+        private readonly TextBlock moduleLead = new TextBlock();
         private readonly TextBlock intakeLine = new TextBlock();
         private readonly TextBlock attachLine = new TextBlock();
         private readonly StackPanel diffHost = new StackPanel();
         private readonly TreeView tree = new TreeView();
         private readonly Button copyButton = new Button();
+        private readonly Border stateChip;
         private Button psButton;
         private Button vbaButton;
         private Button fullButton;
+
+        // Leaving this screen goes back to the result it was opened from. The
+        // bar owns the control, so the window hands it the move rather than
+        // keeping a second back button of its own on top.
+        public Action GoBack;
+        // Concentrating changes what the window around this should carry, so the
+        // window is told rather than left to guess.
+        public Action FullChanged;
+
+        public bool IsFull { get { return full; } }
 
         // The picture budget lives in the settings dialog, which this screen
         // does not own. It is asked for rather than copied, so changing it there
@@ -78,6 +95,7 @@ namespace AppStudio
             project = codeProject;
             say = status;
             askRunConsent = runConsent;
+            stateChip = Chip(stateLine);
             editor.Changed = delegate
             {
                 if (loading) return;
@@ -117,7 +135,6 @@ namespace AppStudio
                 return root;
             }
             root = new Grid();
-            root.Margin = new Thickness(Theme.Space5, Theme.Space4, Theme.Space5, Theme.Space4);
             Compose();
             ShowLanguage(project.Language);
             // The status bar still holds whatever the last screen said. Left
@@ -167,9 +184,10 @@ namespace AppStudio
             // are taken out of the layout they were in before the next one is
             // built; rebuilding them instead would throw away the text, the
             // selection and the difference that is waiting to be read.
-            Release(stateLine);
+            Release(stateChip);
             Release(languageNote);
             Release(moduleLine);
+            Release(moduleLead);
             Release(tree);
             Release(requestBox);
             Release(copyButton);
@@ -182,37 +200,18 @@ namespace AppStudio
             root.RowDefinitions.Add(AutoRow());
             root.RowDefinitions.Add(StarRow());
 
-            UIElement head = Head();
-            Grid.SetRow(head, 0);
-            root.Children.Add(head);
+            UIElement bar = WorkspaceBar();
+            Grid.SetRow(bar, 0);
+            root.Children.Add(bar);
 
             UIElement work = Work();
             Grid.SetRow(work, 1);
             root.Children.Add(work);
 
-            if (!full)
-            {
-                root.RowDefinitions.Add(AutoRow());
-                // The editor keeps a floor and the assistant keeps a ceiling, so
-                // both are always on screen whatever arrives. The two together
-                // have to leave room for each other: a floor plus a ceiling that
-                // add up to more than the window has is not a layout, it is two
-                // controls both being clipped, which is what it looked like when
-                // the numbers were 200 and 340.
-                root.RowDefinitions[1].MinHeight = 160;
-                ScrollViewer assistantScroll = new ScrollViewer();
-                assistantScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-                assistantScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-                assistantScroll.MaxHeight = 244;
-                assistantScroll.Content = Assistant();
-                Grid.SetRow(assistantScroll, 2);
-                root.Children.Add(assistantScroll);
-            }
-
             PaintFullButton();
-            // The language buttons are made fresh by Head(), so which one is
-            // chosen has to be said again. Without this both come back looking
-            // like the one that is not on screen.
+            // The language buttons are made fresh by the module pane, so which
+            // one is chosen has to be said again. Without this both come back
+            // looking like the one that is not on screen.
             PaintSwitcher();
             if (!ready) return;
             // Put the operator back where they were. The editor is the same
@@ -228,62 +227,102 @@ namespace AppStudio
             Remember();
             full = !full;
             Compose();
+            if (FullChanged != null) FullChanged();
             editor.FocusEditor();
             Say(full
                 ? Text("code-full-on.txt", "The editor has the whole window. Press the same button to bring the rest back.")
                 : Text("code-full-off.txt", "The rest of the screen is back."), null);
         }
 
-        // ---------- the top: what this is, in which language, and what can be done to it ----------
+        // ---------- the bar: where you are, and the three moves that are always wanted ----------
 
-        private UIElement Head()
+        // One row, the height the design system gives a screen header. Back on
+        // the left where every back is, the name of the job in the middle with
+        // the state beside it, and check / run / concentrate on the right. It
+        // does not carry the theme switch, the health badge or the settings:
+        // none of them is part of editing a file, and each one was another thing
+        // between the operator and the code.
+        private UIElement WorkspaceBar()
         {
-            StackPanel stack = new StackPanel();
+            Grid line = new Grid();
+            line.ColumnDefinitions.Add(AutoColumn());
+            line.ColumnDefinitions.Add(StarColumn());
+            line.ColumnDefinitions.Add(AutoColumn());
 
-            DockPanel line = new DockPanel();
-            line.LastChildFill = true;
-            StackPanel switcher = new StackPanel();
-            switcher.Orientation = Orientation.Horizontal;
-            psButton = LanguageButton(Text("code-lang-ps.txt", "PowerShell"), ScriptLanguages.PowerShell);
-            vbaButton = LanguageButton(Text("code-lang-vba.txt", "VBA"), ScriptLanguages.Vba);
-            switcher.Children.Add(psButton);
-            switcher.Children.Add(vbaButton);
-            DockPanel.SetDock(switcher, Dock.Left);
-            line.Children.Add(switcher);
+            Button back = new Button();
+            back.Content = Text("topbar-back.txt", "Back");
+            back.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonCompact");
+            back.VerticalAlignment = VerticalAlignment.Center;
+            back.Click += delegate { if (GoBack != null) GoBack(); };
+            Grid.SetColumn(back, 0);
+            line.Children.Add(back);
 
+            StackPanel middle = new StackPanel();
+            middle.Orientation = Orientation.Horizontal;
+            middle.VerticalAlignment = VerticalAlignment.Center;
+            middle.Margin = new Thickness(Theme.Space4, 0, Theme.Space4, 0);
+            TextBlock title = new TextBlock();
+            title.Text = Text("code-workspace.txt", "Edit as code");
+            title.FontSize = Theme.TitleSize;
+            title.FontWeight = FontWeights.Bold;
+            title.Foreground = Theme.Text;
+            title.VerticalAlignment = VerticalAlignment.Center;
+            middle.Children.Add(title);
+            if (session != null && !String.IsNullOrEmpty(session.Title))
+            {
+                TextBlock name = new TextBlock();
+                name.Text = session.Title;
+                name.FontSize = Theme.MetaSize;
+                name.Foreground = Theme.TextMuted;
+                name.VerticalAlignment = VerticalAlignment.Center;
+                name.TextTrimming = TextTrimming.CharacterEllipsis;
+                name.Margin = new Thickness(Theme.Space3, 0, 0, 0);
+                middle.Children.Add(name);
+            }
+            middle.Children.Add(stateChip);
+            Grid.SetColumn(middle, 1);
+            line.Children.Add(middle);
+
+            StackPanel right = new StackPanel();
+            right.Orientation = Orientation.Horizontal;
+            right.VerticalAlignment = VerticalAlignment.Center;
+            BarButton(right, Text("code-check.txt", "Check"), delegate { Check(); }, false);
+            BarButton(right, Text("code-run.txt", "Run"), delegate { RunIt(); }, true);
             fullButton = new Button();
             fullButton.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonCompact");
             fullButton.MinWidth = 132;
-            fullButton.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            fullButton.Margin = new Thickness(Theme.Space3, 0, 0, 0);
             fullButton.Click += delegate { ToggleFull(); };
-            DockPanel.SetDock(fullButton, Dock.Right);
-            line.Children.Add(fullButton);
+            right.Children.Add(fullButton);
+            Grid.SetColumn(right, 2);
+            line.Children.Add(right);
 
-            stateLine.FontSize = Theme.BodySize;
-            stateLine.FontWeight = FontWeights.SemiBold;
-            stateLine.Foreground = Theme.Text;
-            stateLine.VerticalAlignment = VerticalAlignment.Center;
-            stateLine.Margin = new Thickness(Theme.Space4, 0, Theme.Space4, 0);
-            stateLine.TextWrapping = TextWrapping.Wrap;
-            line.Children.Add(stateLine);
-            stack.Children.Add(line);
+            Border frame = new Border();
+            frame.Background = Theme.Get("TopbarBackground");
+            frame.BorderBrush = Theme.BorderSubtle;
+            frame.BorderThickness = new Thickness(0, 0, 0, 1);
+            frame.Padding = new Thickness(Theme.Space5, Theme.Space2, Theme.Space5, Theme.Space2);
+            frame.MinHeight = Theme.ScreenHeaderHeight;
+            frame.Child = line;
+            return frame;
+        }
 
-            languageNote.FontSize = Theme.MetaSize;
-            languageNote.Foreground = Theme.TextMuted;
-            languageNote.TextWrapping = TextWrapping.Wrap;
-            languageNote.Margin = new Thickness(0, Theme.Space2, 0, 0);
-            stack.Children.Add(languageNote);
-
-            WrapPanel actions = new WrapPanel();
-            actions.Margin = new Thickness(0, Theme.Space3, 0, 0);
-            Button(actions, Text("code-check.txt", "Check"), delegate { Check(); }, true);
-            Button(actions, Text("code-run.txt", "Run"), delegate { RunIt(); }, false);
-            Button(actions, Text("code-baseline.txt", "Back to the generated version"), delegate { Baseline(); }, false);
-            Button(actions, Text("code-undo.txt", "Undo the last change taken in"), delegate { Undo(); }, false);
-            Button(actions, Text("code-folder.txt", "Code folder"), delegate { Open(project.Folder); }, false);
-            stack.Children.Add(actions);
-
-            return Card(stack);
+        // The state is a badge rather than a sentence in the middle of a row:
+        // it is one of two things, and which one it is has to be legible at a
+        // glance from the edge of the bar.
+        private static Border Chip(TextBlock label)
+        {
+            label.FontSize = Theme.MicroSize;
+            label.FontWeight = FontWeights.SemiBold;
+            label.VerticalAlignment = VerticalAlignment.Center;
+            Border chip = new Border();
+            chip.CornerRadius = new CornerRadius(Theme.RadiusPill);
+            chip.BorderThickness = new Thickness(1);
+            chip.Padding = new Thickness(Theme.Space3, Theme.Space1, Theme.Space3, Theme.Space1);
+            chip.Margin = new Thickness(Theme.Space3, 0, 0, 0);
+            chip.VerticalAlignment = VerticalAlignment.Center;
+            chip.Child = label;
+            return chip;
         }
 
         private void PaintFullButton()
@@ -298,8 +337,12 @@ namespace AppStudio
         {
             Button button = new Button();
             button.Content = label;
-            button.MinWidth = 132;
-            button.Margin = new Thickness(0, 0, Theme.Space2, 0);
+            button.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonCompact");
+            button.MinWidth = 0;
+            // Two of these share the width of the pane, and one of the two words
+            // is "PowerShell". The padding a button gets in a row of its own is
+            // what turned that into "PowerSh".
+            button.Padding = new Thickness(Theme.Space1, 0, Theme.Space1, 0);
             button.Click += delegate { ShowLanguage(languageName); };
             return button;
         }
@@ -318,83 +361,163 @@ namespace AppStudio
         private UIElement Work()
         {
             Grid grid = new Grid();
-            grid.ColumnDefinitions.Add(FixedColumn(244));
+            grid.Margin = new Thickness(Theme.Space5, Theme.Space4, Theme.Space5, Theme.Space4);
+            grid.ColumnDefinitions.Add(FixedColumn(Theme.ModulePaneWidth));
             grid.ColumnDefinitions.Add(StarColumn());
+            // The editor is what this screen is for, so it is the column that
+            // takes whatever is left over. The other two are fixed: a tree that
+            // grows with the window shows the same ten rows further apart.
+            grid.ColumnDefinitions[1].MinWidth = 360;
+            if (!full) grid.ColumnDefinitions.Add(FixedColumn(Theme.AssistantPaneWidth));
 
-            Border rail = new Border();
-            rail.Background = Theme.Surface;
-            rail.BorderBrush = Theme.Border;
-            rail.BorderThickness = new Thickness(1);
-            rail.CornerRadius = new CornerRadius(Theme.RadiusMd);
-            rail.Padding = new Thickness(Theme.Space2);
-            rail.Margin = new Thickness(0, 0, Theme.Space3, Theme.Space3);
-            TextBlock railHead = new TextBlock();
-            railHead.Text = Text("code-modules.txt", "Modules");
-            railHead.FontSize = Theme.LabelSize;
-            railHead.FontWeight = FontWeights.SemiBold;
-            railHead.Foreground = Theme.TextSub;
-            railHead.Margin = new Thickness(Theme.Space2, Theme.Space1, Theme.Space2, Theme.Space2);
-            tree.BorderThickness = new Thickness(0);
-            tree.Background = System.Windows.Media.Brushes.Transparent;
-            tree.FontSize = Theme.LabelSize;
-            System.Windows.Automation.AutomationProperties.SetName(tree, Text("code-modules.txt", "Modules"));
-            // Ten modules do not fit in a short window, and a list that is
-            // simply cut off at the bottom hides the other language.
-            ScrollViewer railScroll = new ScrollViewer();
-            railScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            railScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-            railScroll.Content = tree;
-            Grid railGrid = new Grid();
-            railGrid.RowDefinitions.Add(AutoRow());
-            railGrid.RowDefinitions.Add(StarRow());
-            Grid.SetRow(railHead, 0);
-            Grid.SetRow(railScroll, 1);
-            railGrid.Children.Add(railHead);
-            railGrid.Children.Add(railScroll);
-            rail.Child = railGrid;
-            Grid.SetColumn(rail, 0);
-            grid.Children.Add(rail);
+            UIElement modules = ModulePane();
+            Grid.SetColumn(modules, 0);
+            grid.Children.Add(modules);
 
+            UIElement editing = EditorPane();
+            Grid.SetColumn(editing, 1);
+            grid.Children.Add(editing);
+
+            if (!full)
+            {
+                UIElement assistant = Assistant();
+                Grid.SetColumn(assistant, 2);
+                grid.Children.Add(assistant);
+            }
+            return grid;
+        }
+
+        // ---------- the modules ----------
+
+        private UIElement ModulePane()
+        {
             Grid pane = new Grid();
             pane.RowDefinitions.Add(AutoRow());
             pane.RowDefinitions.Add(StarRow());
-            moduleLine.FontSize = Theme.MetaSize;
-            moduleLine.Foreground = Theme.TextMuted;
+            pane.RowDefinitions.Add(AutoRow());
+
+            // The head of the pane says what the pane is and, under it, which of
+            // the two forms is on screen. The form belongs here rather than over
+            // the editor: choosing a form and choosing a module are the same
+            // question - which file am I looking at - asked twice.
+            StackPanel head = new StackPanel();
+            TextBlock caption = new TextBlock();
+            caption.Text = Text("code-modules.txt", "Modules");
+            caption.FontSize = Theme.LabelSize;
+            caption.FontWeight = FontWeights.SemiBold;
+            caption.Foreground = Theme.TextSub;
+            head.Children.Add(caption);
+            // Concentrating takes the form switch away with the rest of the
+            // chrome. The tree still holds both forms, so nothing becomes
+            // unreachable; what goes is the second way of doing the same thing,
+            // which is what a screen for reading one file does not need.
+            psButton = LanguageButton(Text("code-lang-ps.txt", "PowerShell"), ScriptLanguages.PowerShell);
+            vbaButton = LanguageButton(Text("code-lang-vba.txt", "VBA"), ScriptLanguages.Vba);
+            if (!full)
+            {
+                Grid switcher = new Grid();
+                switcher.Margin = new Thickness(0, Theme.Space2, 0, 0);
+                switcher.ColumnDefinitions.Add(StarColumn());
+                switcher.ColumnDefinitions.Add(FixedColumn(Theme.Space2));
+                switcher.ColumnDefinitions.Add(StarColumn());
+                Grid.SetColumn(psButton, 0);
+                Grid.SetColumn(vbaButton, 2);
+                switcher.Children.Add(psButton);
+                switcher.Children.Add(vbaButton);
+                head.Children.Add(switcher);
+            }
+            head.Margin = new Thickness(0, 0, 0, Theme.Space3);
+            Grid.SetRow(head, 0);
+            pane.Children.Add(head);
+
+            tree.SetResourceReference(FrameworkElement.StyleProperty, "AppTree");
+            tree.FontSize = Theme.LabelSize;
+            System.Windows.Automation.AutomationProperties.SetName(tree, Text("code-modules.txt", "Modules"));
+            Grid.SetRow(tree, 1);
+            pane.Children.Add(tree);
+
+            // What the operator has, and the moves that are about versions and
+            // files rather than about the code on screen. They are down here in
+            // plain sight rather than in a menu: rare is not the same as hidden.
+            StackPanel foot = new StackPanel();
+            foot.Margin = new Thickness(0, Theme.Space3, 0, 0);
+            languageNote.FontSize = Theme.MicroSize;
+            languageNote.Foreground = Theme.TextMuted;
+            languageNote.TextWrapping = TextWrapping.Wrap;
+            languageNote.Margin = new Thickness(0, 0, 0, Theme.Space2);
+            foot.Children.Add(languageNote);
+            if (!full)
+            {
+                WrapPanel versions = new WrapPanel();
+                Button(versions, Text("code-baseline.txt", "Back to the generated version"), delegate { Baseline(); }, false);
+                Button(versions, Text("code-undo.txt", "Undo the last change taken in"), delegate { Undo(); }, false);
+                Button(versions, Text("code-folder.txt", "Code folder"), delegate { Open(project.Folder); }, false);
+                foot.Children.Add(versions);
+            }
+            Grid.SetRow(foot, 2);
+            pane.Children.Add(foot);
+
+            Border card = Panel(pane);
+            card.Margin = new Thickness(0, 0, Theme.Space3, 0);
+            return card;
+        }
+
+        // ---------- the editor ----------
+
+        private UIElement EditorPane()
+        {
+            Grid pane = new Grid();
+            pane.RowDefinitions.Add(AutoRow());
+            pane.RowDefinitions.Add(StarRow());
+            // A viewport shorter than this is not a place to read a file in. The
+            // row takes a scrollbar before it takes the editor's height.
+            pane.RowDefinitions[1].MinHeight = Theme.EditorMinHeight;
+
+            StackPanel head = new StackPanel();
+            head.Margin = new Thickness(0, 0, 0, Theme.Space3);
+            moduleLine.FontSize = Theme.SectionSize;
+            moduleLine.FontWeight = FontWeights.Bold;
+            moduleLine.Foreground = Theme.Text;
             moduleLine.TextWrapping = TextWrapping.Wrap;
-            moduleLine.Margin = new Thickness(0, 0, 0, Theme.Space2);
-            Grid.SetRow(moduleLine, 0);
-            pane.Children.Add(moduleLine);
+            head.Children.Add(moduleLine);
+            moduleLead.FontSize = Theme.MetaSize;
+            moduleLead.Foreground = Theme.TextMuted;
+            moduleLead.TextWrapping = TextWrapping.Wrap;
+            moduleLead.LineHeight = Theme.MetaSize * Theme.BodyLine;
+            moduleLead.Margin = new Thickness(0, Theme.Space1, 0, 0);
+            head.Children.Add(moduleLead);
+            Grid.SetRow(head, 0);
+            pane.Children.Add(head);
+
             UIElement box = editor.Build();
             Grid.SetRow(box, 1);
             pane.Children.Add(box);
 
-            Border card = new Border();
-            card.Background = Theme.Surface;
-            card.BorderBrush = Theme.Border;
-            card.BorderThickness = new Thickness(1);
-            card.CornerRadius = new CornerRadius(Theme.RadiusMd);
-            card.Padding = new Thickness(Theme.Space4);
-            card.Margin = new Thickness(0, 0, 0, Theme.Space3);
-            card.Child = pane;
-            Grid.SetColumn(card, 1);
-            grid.Children.Add(card);
-            return grid;
+            return Panel(pane);
         }
 
         // ---------- the assistant ----------
 
+        // A column, not a strip. Everything it holds is a short line or a narrow
+        // control, and what it does have a lot of - the difference that comes
+        // back - reads down the page rather than across it.
         private UIElement Assistant()
         {
-            StackPanel stack = new StackPanel();
-            stack.Children.Add(Heading(Text("code-ai-title.txt", "Ask an assistant")));
-            stack.Children.Add(Note(Text("code-ai-note.txt",
+            Grid pane = new Grid();
+            pane.RowDefinitions.Add(AutoRow());
+            pane.RowDefinitions.Add(StarRow());
+
+            StackPanel head = new StackPanel();
+            head.Children.Add(Heading(Text("code-ai-title.txt", "Ask an assistant")));
+            head.Children.Add(Note(Text("code-ai-note.txt",
                 "The request is one copy and one paste. It carries what you are asking for and how to answer; the code, the recording and the ledger are in the two files you attach with it.")));
 
             requestBox.SetResourceReference(FrameworkElement.StyleProperty, "AppTextBox");
             requestBox.AcceptsReturn = true;
             requestBox.TextWrapping = TextWrapping.Wrap;
-            requestBox.Height = 56;
-            requestBox.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            requestBox.MinHeight = 84;
+            requestBox.MaxHeight = 140;
+            requestBox.Margin = new Thickness(0, Theme.Space3, 0, 0);
             requestBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             if (requestBox.Text.Length == 0)
             {
@@ -402,39 +525,63 @@ namespace AppStudio
                     "Make this run reliably against the recorded application. Keep every safety rule in section 10 of the attached file.");
             }
             System.Windows.Automation.AutomationProperties.SetName(requestBox, Text("code-ai-request-name.txt", "What to ask for"));
-            stack.Children.Add(requestBox);
+            head.Children.Add(requestBox);
 
             // The order is the order of the job: copy the request, open the
             // folder holding what goes with it, then bring the answer back.
-            WrapPanel row = new WrapPanel();
+            StackPanel row = new StackPanel();
             row.Margin = new Thickness(0, Theme.Space3, 0, 0);
             copyButton.Content = Text("code-ai-copy.txt", "Copy the request");
-            copyButton.Margin = new Thickness(0, 0, Theme.Space2, Theme.Space2);
+            copyButton.Margin = new Thickness(0, 0, 0, Theme.Space2);
+            copyButton.HorizontalAlignment = HorizontalAlignment.Stretch;
             copyButton.Click += delegate { CopyRequest(); };
             row.Children.Add(copyButton);
-            Button(row, Text("code-ai-folder.txt", "Open the folder with the two files to attach"), delegate { OpenAttachments(); }, false);
-            Button(row, Text("code-ai-paste.txt", "Take the answer in from the clipboard"), delegate { TakeIn(); }, false);
-            Button(row, Text("code-ai-restart.txt", "Start the intake again"), delegate { RestartIntake(); }, false);
-            stack.Children.Add(row);
+            Stacked(row, Text("code-ai-folder.txt", "Open the folder with the two files to attach"), delegate { OpenAttachments(); });
+            Stacked(row, Text("code-ai-paste.txt", "Take the answer in from the clipboard"), delegate { TakeIn(); });
+            Stacked(row, Text("code-ai-restart.txt", "Start the intake again"), delegate { RestartIntake(); });
+            head.Children.Add(row);
             PaintCopy();
 
-            attachLine.FontSize = Theme.MetaSize;
+            attachLine.FontSize = Theme.MicroSize;
             attachLine.TextWrapping = TextWrapping.Wrap;
             attachLine.Foreground = Theme.TextMuted;
+            attachLine.LineHeight = Theme.MicroSize * Theme.BodyLine;
             attachLine.Margin = new Thickness(0, Theme.Space2, 0, 0);
-            stack.Children.Add(attachLine);
+            head.Children.Add(attachLine);
             PaintAttachments();
 
             intakeLine.FontSize = Theme.MetaSize;
             intakeLine.TextWrapping = TextWrapping.Wrap;
             intakeLine.Foreground = Theme.TextMuted;
-            intakeLine.Margin = new Thickness(0, Theme.Space1, 0, 0);
-            stack.Children.Add(intakeLine);
+            intakeLine.LineHeight = Theme.MetaSize * Theme.BodyLine;
+            intakeLine.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            head.Children.Add(intakeLine);
+            Grid.SetRow(head, 0);
+            pane.Children.Add(head);
 
-            diffHost.Margin = new Thickness(0, Theme.Space2, 0, 0);
-            stack.Children.Add(diffHost);
+            diffHost.Margin = new Thickness(0, Theme.Space3, 0, 0);
+            ScrollViewer diffScroll = new ScrollViewer();
+            diffScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            diffScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            diffScroll.Content = diffHost;
+            Grid.SetRow(diffScroll, 1);
+            pane.Children.Add(diffScroll);
 
-            return Card(stack);
+            Border card = Panel(pane);
+            card.Margin = new Thickness(Theme.Space3, 0, 0, 0);
+            return card;
+        }
+
+        private void Stacked(Panel into, string label, Action action)
+        {
+            Button button = new Button();
+            button.Content = label;
+            button.SetResourceReference(FrameworkElement.StyleProperty, "AppButtonCompact");
+            button.HorizontalAlignment = HorizontalAlignment.Stretch;
+            button.HorizontalContentAlignment = HorizontalAlignment.Left;
+            button.Margin = new Thickness(0, 0, 0, Theme.Space2);
+            button.Click += delegate { action(); };
+            into.Children.Add(button);
         }
 
         // Says which two files go with the request and whether they are on disk.
@@ -503,10 +650,16 @@ namespace AppStudio
             LoadEditor();
         }
 
-        // Both languages are in the tree, both open, in the order the modules
-        // are meant to be read. Choosing one is choosing a language and a module
-        // in one move; the two buttons above do the same thing for whoever is
-        // already looking at them.
+        // A tree with a shape, not a list of file names.
+        //
+        // Under each form the procedure comes first, because that is the one
+        // anybody opens this screen to change. What the recording found comes
+        // second. The three modules that carry the operations out are gathered
+        // under one heading that says what they are for and stays shut, because
+        // a person taking one step out of a recording should never have to read
+        // five hundred lines of machinery to find the line they want. Nothing is
+        // removed by being folded: the heading is on screen, it says how many
+        // files are inside it, and it opens.
         private void PaintTree()
         {
             loading = true;
@@ -518,71 +671,230 @@ namespace AppStudio
 
         private void AddLanguage(string languageName, string label)
         {
-            TreeViewItem head = new TreeViewItem();
-            head.Header = label;
-            head.IsExpanded = true;
-            head.FontWeight = FontWeights.SemiBold;
-            head.Foreground = Theme.TextSub;
+            bool here = String.Equals(languageName, project.Language, StringComparison.Ordinal);
+            TreeViewItem head = Node();
+            head.Header = GroupHeader(label, null);
+            head.IsExpanded = here;
+            System.Windows.Automation.AutomationProperties.SetName(head, label);
+
+            TreeViewItem runtimeGroup = null;
+            int runtimeFiles = 0;
+            int runtimeLines = 0;
+            TreeViewItem first = null;
             List<CodeFile> files = project.Files(languageName);
             for (int index = 0; index < files.Count; index++)
             {
                 CodeFile file = files[index];
-                TreeViewItem item = new TreeViewItem();
-                item.Header = ModuleHeader(file);
-                item.FontWeight = FontWeights.Normal;
-                item.Foreground = Theme.Text;
-                item.Tag = file.Language + "/" + file.Name;
-                System.Windows.Automation.AutomationProperties.SetName(item, file.FileName);
-                item.Selected += delegate(object sender, RoutedEventArgs args)
+                TreeViewItem item = ModuleItem(file);
+                if (first == null) first = item;
+                if (String.Equals(file.Role, CodeRoles.Runtime, StringComparison.Ordinal))
+                {
+                    if (runtimeGroup == null)
+                    {
+                        runtimeGroup = Node();
+                        runtimeGroup.IsExpanded = false;
+                        System.Windows.Automation.AutomationProperties.SetName(runtimeGroup,
+                            Text("code-group-runtime.txt", "The machinery"));
+                        head.Items.Add(runtimeGroup);
+                    }
+                    runtimeFiles++;
+                    runtimeLines += CodeProject.LineCount(file.Text);
+                    runtimeGroup.Items.Add(item);
+                }
+                else
+                {
+                    head.Items.Add(item);
+                }
+            }
+            if (runtimeGroup != null)
+            {
+                runtimeGroup.Header = GroupHeader(Text("code-group-runtime.txt", "The machinery"),
+                    runtimeFiles.ToString(CultureInfo.InvariantCulture) + " " + Text("code-intake-files.txt", "file(s)"));
+                // Choosing the heading is choosing the first thing under it,
+                // rather than choosing nothing and leaving the rail on a row
+                // that is not what the editor is showing.
+                TreeViewItem group = runtimeGroup;
+                group.Selected += delegate(object sender, RoutedEventArgs args)
                 {
                     args.Handled = true;
                     if (loading) return;
-                    Choose(file.Language, file.Name);
+                    group.IsExpanded = true;
+                    if (group.Items.Count > 0) ((TreeViewItem)group.Items[0]).IsSelected = true;
                 };
-                if (String.Equals(file.Language, project.Language, StringComparison.Ordinal) &&
-                    String.Equals(file.Name, currentFile, StringComparison.OrdinalIgnoreCase))
-                {
-                    item.IsSelected = true;
-                }
-                head.Items.Add(item);
             }
+            TreeViewItem opener = first;
+            head.Selected += delegate(object sender, RoutedEventArgs args)
+            {
+                args.Handled = true;
+                if (loading || opener == null) return;
+                head.IsExpanded = true;
+                opener.IsSelected = true;
+            };
             tree.Items.Add(head);
         }
 
-        private UIElement ModuleHeader(CodeFile file)
+        private TreeViewItem ModuleItem(CodeFile file)
         {
-            StackPanel stack = new StackPanel();
-            stack.MaxWidth = 178;
-            TextBlock name = new TextBlock();
-            name.Text = file.FileName;
-            name.FontSize = Theme.LabelSize;
-            name.Foreground = Theme.Text;
-            name.TextTrimming = TextTrimming.CharacterEllipsis;
-            stack.Children.Add(name);
-            TextBlock role = new TextBlock();
-            role.Text = RoleWord(file.Role) + "  " +
-                CodeProject.LineCount(file.Text).ToString(CultureInfo.InvariantCulture) + " " + Text("code-lines.txt", "lines");
-            role.FontSize = Theme.MicroSize;
-            role.Foreground = file.IsWorkflow ? Theme.AccentText : Theme.TextMuted;
-            // The rail is narrow on purpose, so the second line wraps rather
-            // than being cut off in the middle of the line count.
-            role.TextWrapping = TextWrapping.Wrap;
-            role.Margin = new Thickness(0, 1, 0, Theme.Space1);
-            stack.Children.Add(role);
-            return stack;
+            TreeViewItem item = Node();
+            item.Header = ModuleHeader(file);
+            item.Tag = file.Language + "/" + file.Name;
+            // The name a test and the assistant protocol both use is the file
+            // name, so that is what this reports to the outside. What a person
+            // reads is the role, which is on the row itself.
+            System.Windows.Automation.AutomationProperties.SetName(item, file.FileName);
+            item.Selected += delegate(object sender, RoutedEventArgs args)
+            {
+                args.Handled = true;
+                if (loading) return;
+                Choose(file.Language, file.Name);
+            };
+            if (String.Equals(file.Language, project.Language, StringComparison.Ordinal) &&
+                String.Equals(file.Name, currentFile, StringComparison.OrdinalIgnoreCase))
+            {
+                item.IsSelected = true;
+            }
+            return item;
         }
 
-        private static string RoleWord(string role)
+        // A row is built here rather than generated from data, and an item that
+        // is already its own container never receives the tree's
+        // ItemContainerStyle. Without this every row falls back to the stock
+        // template, which paints the system highlight behind a chosen row - and
+        // that is a pale blue, under white text, in a dark window. The module
+        // that was selected was the one you could not read.
+        private static TreeViewItem Node()
         {
-            if (String.Equals(role, CodeRoles.Workflow, StringComparison.Ordinal))
+            TreeViewItem item = new TreeViewItem();
+            item.SetResourceReference(FrameworkElement.StyleProperty, "AppTreeItem");
+            return item;
+        }
+
+        // A grid rather than a dock panel: the label takes what is left after
+        // the count, and takes it as a bounded width so a long name is trimmed
+        // with an ellipsis instead of running out past the edge of the pane.
+        private static UIElement GroupHeader(string label, string summary)
+        {
+            Grid head = new Grid();
+            head.MinHeight = 28;
+            head.ColumnDefinitions.Add(StarColumn());
+            head.ColumnDefinitions.Add(AutoColumn());
+            TextBlock name = new TextBlock();
+            name.Text = label;
+            name.FontSize = Theme.LabelSize;
+            name.FontWeight = FontWeights.SemiBold;
+            name.Foreground = Theme.TextSub;
+            name.VerticalAlignment = VerticalAlignment.Center;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            Grid.SetColumn(name, 0);
+            head.Children.Add(name);
+            if (summary != null)
             {
-                return Messages.Text("code-role-workflow.txt", "the procedure - edit this one");
+                TextBlock count = new TextBlock();
+                count.Text = summary;
+                count.FontSize = Theme.MicroSize;
+                count.Foreground = Theme.TextMuted;
+                count.VerticalAlignment = VerticalAlignment.Center;
+                count.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+                Grid.SetColumn(count, 1);
+                head.Children.Add(count);
             }
-            if (String.Equals(role, CodeRoles.Recorded, StringComparison.Ordinal))
+            return head;
+        }
+
+        // The row a person reads: what this module is for, in their language,
+        // and under it the file name and its size for when they need to name it
+        // to somebody else.
+        private UIElement ModuleHeader(CodeFile file)
+        {
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(AutoColumn());
+            row.ColumnDefinitions.Add(StarColumn());
+
+            // The one to edit is marked with a dot rather than by being written
+            // in a different colour. A tinted word on a tinted selected row is
+            // the pair that goes wrong; a dot beside a plain word is legible
+            // whichever of the two the row happens to be.
+            Border dot = new Border();
+            dot.Width = Theme.Space2;
+            dot.Height = Theme.Space2;
+            dot.CornerRadius = new CornerRadius(Theme.RadiusPill);
+            dot.VerticalAlignment = VerticalAlignment.Top;
+            dot.Margin = new Thickness(0, 6, Theme.Space2, 0);
+            dot.Background = file.IsWorkflow ? Theme.Accent : Theme.BorderStrong;
+            Grid.SetColumn(dot, 0);
+            row.Children.Add(dot);
+
+            StackPanel stack = new StackPanel();
+            TextBlock role = new TextBlock();
+            role.Text = RoleWord(file);
+            role.FontSize = Theme.LabelSize;
+            role.FontWeight = file.IsWorkflow ? FontWeights.Bold : FontWeights.Normal;
+            role.Foreground = Theme.Text;
+            role.TextTrimming = TextTrimming.CharacterEllipsis;
+            stack.Children.Add(role);
+            TextBlock note = new TextBlock();
+            StringBuilder text = new StringBuilder();
+            text.Append(file.FileName);
+            // The count on the procedure is the number of things the operator
+            // did, which is what they counted while doing them. The number of
+            // calls the plan makes is larger - it includes the waits and the
+            // window checks - and reporting that as "steps" makes a recording of
+            // nine presses read as twenty eight.
+            if (file.IsWorkflow && session != null)
             {
-                return Messages.Text("code-role-recorded.txt", "what the recording saw");
+                text.Append("  ").Append(session.Steps.Count.ToString(CultureInfo.InvariantCulture))
+                    .Append(" ").Append(Text("list-steps.txt", "actions"));
             }
-            return Messages.Text("code-role-runtime.txt", "runtime");
+            text.Append("  ").Append(CodeProject.LineCount(file.Text).ToString(CultureInfo.InvariantCulture))
+                .Append(" ").Append(Text("code-lines.txt", "lines"));
+            note.Text = text.ToString();
+            note.FontSize = Theme.MicroSize;
+            note.Foreground = Theme.TextMuted;
+            note.TextTrimming = TextTrimming.CharacterEllipsis;
+            note.Margin = new Thickness(0, 1, 0, 0);
+            stack.Children.Add(note);
+            Grid.SetColumn(stack, 1);
+            row.Children.Add(stack);
+            return row;
+        }
+
+        // What the module is for, said as a job rather than as a class name. The
+        // five internal names are a fact about how this is built; they are not
+        // something to hand a person who wants to take one step out.
+        private static string RoleWord(CodeFile file)
+        {
+            if (file.IsWorkflow) return Messages.Text("code-role-workflow.txt", "the procedure");
+            if (String.Equals(file.Role, CodeRoles.Recorded, StringComparison.Ordinal))
+            {
+                return Messages.Text("code-role-recorded.txt", "what the recording found");
+            }
+            if (String.Equals(file.Name, CodeModules.RuntimeLocator, StringComparison.Ordinal))
+            {
+                return Messages.Text("code-role-locator.txt", "finding the element on today's screen");
+            }
+            if (String.Equals(file.Name, CodeModules.RuntimeNative, StringComparison.Ordinal))
+            {
+                return Messages.Text("code-role-native.txt", "the calls into Windows");
+            }
+            return Messages.Text("code-role-core.txt", "carrying an operation out");
+        }
+
+        // The sentence under the module title: what this file is, whether it is
+        // the one to edit, and what editing it means.
+        private static string RoleLead(CodeFile file)
+        {
+            if (file.IsWorkflow)
+            {
+                return Messages.Text("code-lead-workflow.txt",
+                    "This is the one to edit. One line is one recorded action, in the order it happened.");
+            }
+            if (String.Equals(file.Role, CodeRoles.Recorded, StringComparison.Ordinal))
+            {
+                return Messages.Text("code-lead-recorded.txt",
+                    "What the recording found. Change this only to aim a step somewhere else.");
+            }
+            return Messages.Text("code-lead-runtime.txt",
+                "How an operation is carried out. You should not need to open this.");
         }
 
         private void Choose(string languageName, string name)
@@ -613,17 +925,15 @@ namespace AppStudio
             {
                 moduleLine.Text = Text("code-module-none.txt", "This module is not in the project.");
                 moduleLine.Foreground = Theme.CautionText;
+                moduleLead.Text = "";
                 return;
             }
-            StringBuilder text = new StringBuilder();
-            text.Append(file.FileName).Append("   ").Append(RoleWord(file.Role));
-            if (file.IsWorkflow)
-            {
-                text.Append("   ").Append(Text("code-workflow-hint.txt",
-                    "one line is one step - deleting a line takes that step out and leaves the other modules alone"));
-            }
-            moduleLine.Text = text.ToString();
-            moduleLine.Foreground = file.IsWorkflow ? Theme.AccentText : Theme.TextMuted;
+            moduleLine.Text = RoleWord(file) + "   " + file.FileName;
+            moduleLine.Foreground = file.IsWorkflow ? Theme.AccentText : Theme.Text;
+            // One sentence, said once. The rule about deleting a line is in the
+            // lead already; adding the older hint after it said the same thing
+            // twice in a row, in two slightly different wordings.
+            moduleLead.Text = RoleLead(file);
         }
 
         private void Remember()
@@ -638,7 +948,9 @@ namespace AppStudio
             stateLine.Text = changed
                 ? Text("code-state-edited.txt", "Edited since it was generated from the recording.")
                 : Text("code-state-generated.txt", "Exactly as it was generated from the recording.");
-            stateLine.Foreground = changed ? Theme.CautionText : Theme.TextSub;
+            stateLine.Foreground = changed ? Theme.CautionText : Theme.SuccessText;
+            stateChip.Background = changed ? Theme.CautionSoft : Theme.SuccessSoft;
+            stateChip.BorderBrush = changed ? Theme.Caution : Theme.Success;
             StringBuilder note = new StringBuilder();
             note.Append(Text("code-files.txt", "files / lines")).Append(": ").Append(project.Summary(project.Language));
             if (project.Plan != null)
@@ -1123,6 +1435,13 @@ namespace AppStudio
             return column;
         }
 
+        private static ColumnDefinition AutoColumn()
+        {
+            ColumnDefinition column = new ColumnDefinition();
+            column.Width = GridLength.Auto;
+            return column;
+        }
+
         private static ColumnDefinition FixedColumn(double width)
         {
             ColumnDefinition column = new ColumnDefinition();
@@ -1130,7 +1449,11 @@ namespace AppStudio
             return column;
         }
 
-        private static Border Card(UIElement content)
+        // A panel that fills the cell it is in. Cards on this screen are columns
+        // of a work area rather than blocks stacked down a page, so they carry
+        // no bottom margin of their own; the gap between them is the gap the
+        // work area puts there.
+        private static Border Panel(UIElement content)
         {
             Border card = new Border();
             card.Background = Theme.Surface;
@@ -1138,7 +1461,6 @@ namespace AppStudio
             card.BorderThickness = new Thickness(1);
             card.CornerRadius = new CornerRadius(Theme.RadiusMd);
             card.Padding = new Thickness(Theme.Space4);
-            card.Margin = new Thickness(0, 0, 0, Theme.Space3);
             card.Child = content;
             return card;
         }
@@ -1163,6 +1485,20 @@ namespace AppStudio
             block.TextWrapping = TextWrapping.Wrap;
             block.Margin = new Thickness(0, Theme.Space1, 0, 0);
             return block;
+        }
+
+        // A button in a single row rather than in a wrapping block: it needs a
+        // gap to its left and none underneath.
+        private static Button BarButton(Panel panel, string label, Action action, bool primary)
+        {
+            Button button = new Button();
+            button.Content = label;
+            button.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            button.VerticalAlignment = VerticalAlignment.Center;
+            button.SetResourceReference(FrameworkElement.StyleProperty, primary ? "AppButtonPrimary" : "AppButtonCompact");
+            button.Click += delegate { action(); };
+            panel.Children.Add(button);
+            return button;
         }
 
         private static Button Button(Panel panel, string label, RoutedEventHandler handler, bool primary)

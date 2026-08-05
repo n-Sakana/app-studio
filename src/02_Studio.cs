@@ -39,6 +39,7 @@ namespace AppStudio
         private ReplayEngine replay;
         private CodeScreen codeScreen;
         private string codeSessionId;
+        private UIElement codeStatusHost;
         private DateTime busySince;
         private string busyLabel;
         private bool busy;
@@ -56,6 +57,11 @@ namespace AppStudio
         private const int CompactHeight = 356;
         private const int ResultWidth = 1120;
         private const int ResultHeight = 840;
+        // The code screen carries three columns instead of two, and the middle
+        // one holds lines of code rather than sentences that wrap. At the result
+        // window's width the editor came out under four hundred units wide,
+        // which is a column of code with its right hand side scrolled away.
+        private const int CodeWidth = 1320;
 
         private string mode = ModeCompact;
         private string hotkeyNotice;
@@ -67,6 +73,7 @@ namespace AppStudio
         private int pdfBudgetKb = ScreensPdf.DefaultBudgetBytes / 1024;
         private CheckBox writeSwitch;
         private CheckBox inspectSwitch;
+        private TextBlock inspectHint;
         private bool inspectEnabled;
 
         public StudioWindow(string directory, JsonObject startupDiagnostics, int autoCloseMs)
@@ -171,16 +178,31 @@ namespace AppStudio
                 codeScreen.Persist();
             }
             mode = next;
+            // The status bar this points at is about to be thrown away with the
+            // rest of the old layout. Left set, the next request to hide it for
+            // concentrating would reach into a tree nobody is looking at.
+            codeStatusHost = null;
             DetachShared();
             bool compact = String.Equals(mode, ModeCompact, StringComparison.Ordinal);
             bool code = String.Equals(mode, ModeCode, StringComparison.Ordinal);
             // The minimums come first. Shrinking back to the launcher while the
             // result window's minimum is still in force leaves the window stuck
             // at that minimum, because the assignment is clamped as it is made.
-            MinWidth = compact ? CompactWidth : 940;
-            MinHeight = compact ? CompactHeight : 620;
-            Width = compact ? CompactWidth : ResultWidth;
-            Height = compact ? CompactHeight : ResultHeight;
+            // The wanted size is what the design asks for; the allowed size is
+            // what this desktop actually has. A window taller than the work area
+            // is not a large window, it is a window with its bottom rows behind
+            // the taskbar - which is what put the editor, the status line and
+            // half of the last visible row off this machine's screen.
+            Size room = WorkAreaDip();
+            double wanted = compact ? CompactWidth : (code ? CodeWidth : ResultWidth);
+            // Three columns need more floor than two. Below this the editor is
+            // squeezed to a width no line of code fits in, and a window that can
+            // be dragged into a state its own layout does not work at is a
+            // window with a missing minimum.
+            MinWidth = Math.Min(compact ? CompactWidth : (code ? 1040 : 940), room.Width);
+            MinHeight = Math.Min(compact ? CompactHeight : 620, room.Height);
+            Width = Math.Min(wanted, room.Width);
+            Height = Math.Min(compact ? CompactHeight : ResultHeight, room.Height);
             ResizeMode = compact ? ResizeMode.CanMinimize : ResizeMode.CanResize;
             Background = Theme.SurfaceCanvas;
             Content = compact ? BuildCompact() : (code ? BuildCode() : BuildResult());
@@ -252,40 +274,79 @@ namespace AppStudio
             return true;
         }
 
+        // The code screen is a workspace and gets the window, not a panel inside
+        // the window's usual furniture. It carries its own bar - back, where you
+        // are, check, run, concentrate - so the launcher's top bar, its theme
+        // switch and its health badge are not stacked on top of a screen where
+        // none of them is part of the job. Only the status line stays, and
+        // concentrating puts that away too.
+        //
+        // No outer scroll here. The body is a grid whose editor row takes what
+        // is left, and a grid inside a scroller grows to its content instead of
+        // filling the window.
         private UIElement BuildCode()
         {
             Grid root = new Grid();
-            root.RowDefinitions.Add(Row(GridLength.Auto));
-            root.RowDefinitions.Add(Row(new GridLength(Theme.ProgressTrackHeight)));
             root.RowDefinitions.Add(Row(new GridLength(1, GridUnitType.Star)));
             root.RowDefinitions.Add(Row(GridLength.Auto));
-            root.Children.Add(TopBar());
-            Grid.SetRow(progress, 1);
-            root.Children.Add(progress);
-            // No outer scroll here. The body is a grid whose middle row is the
-            // editor, and a grid inside a scroller grows to its content instead
-            // of filling the window - which pushed the assistant off the bottom
-            // of the screen and made a long file scroll the buttons away.
+            codeScreen.GoBack = GoResult;
+            codeScreen.FullChanged = ApplyCodeChrome;
             UIElement body = codeScreen.Build();
-            Grid.SetRow(body, 2);
+            Grid.SetRow(body, 0);
             root.Children.Add(body);
-            root.Children.Add(StatusBar());
+            codeStatusHost = StatusBar();
+            Grid.SetRow(codeStatusHost, 1);
+            root.Children.Add(codeStatusHost);
+            ApplyCodeChrome();
             return root;
+        }
+
+        private void ApplyCodeChrome()
+        {
+            if (codeStatusHost == null || codeScreen == null) return;
+            codeStatusHost.Visibility = codeScreen.IsFull ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private double DeviceScale()
+        {
+            PresentationSource source = PresentationSource.FromVisual(this);
+            if (source != null && source.CompositionTarget != null)
+            {
+                double m11 = source.CompositionTarget.TransformToDevice.M11;
+                if (m11 > 0) return m11;
+            }
+            return 1.0;
+        }
+
+        // How much room this desktop has, in the units WPF sizes windows in.
+        // Everything here is decided against this rather than against a number
+        // chosen on somebody else's monitor. A margin is left so the shadow and
+        // the resize grip are reachable rather than flush against the edge.
+        private Size WorkAreaDip()
+        {
+            System.Drawing.Rectangle work = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;
+            double scale = DeviceScale();
+            double width = work.Width / scale - Theme.Space3;
+            double height = work.Height / scale - Theme.Space3;
+            if (width < 480) width = 480;
+            if (height < 400) height = 400;
+            return new Size(width, height);
         }
 
         private void CentreOnScreen()
         {
             System.Drawing.Rectangle work = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;
-            double scale = 1.0;
-            PresentationSource source = PresentationSource.FromVisual(this);
-            if (source != null && source.CompositionTarget != null)
-            {
-                double m11 = source.CompositionTarget.TransformToDevice.M11;
-                if (m11 > 0) scale = m11;
-            }
+            double scale = DeviceScale();
             WindowStartupLocation = WindowStartupLocation.Manual;
-            Left = (work.Left + (work.Width - Width * scale) / 2) / scale;
-            Top = (work.Top + (work.Height - Height * scale) / 2) / scale;
+            double left = (work.Left + (work.Width - Width * scale) / 2) / scale;
+            double top = (work.Top + (work.Height - Height * scale) / 2) / scale;
+            // Never above or left of the work area: a window centred by
+            // arithmetic alone slides off the top as soon as it is taller than
+            // the desktop, and the title bar goes with it.
+            if (left < work.Left / scale) left = work.Left / scale;
+            if (top < work.Top / scale) top = work.Top / scale;
+            Left = left;
+            Top = top;
         }
 
         // The launcher: the things this product does, the settings, and one line
@@ -309,8 +370,14 @@ namespace AppStudio
             actions.ColumnDefinitions.Add(Column(new GridLength(1, GridUnitType.Star)));
             actions.ColumnDefinitions.Add(Column(new GridLength(Theme.Space3)));
             actions.ColumnDefinitions.Add(Column(new GridLength(1, GridUnitType.Star)));
-            UIElement snap = CompactAction(snapButton, Text("home-snap.txt", "Snap"), Text("home-snap-short.txt", "Pick a window and take it apart."), StartSnap);
-            UIElement record = CompactAction(recordButton, Text("home-record.txt", "Record"), Text("home-record-short.txt", "Follow what you do across applications."), StartRecord);
+            UIElement snap = CompactAction(snapButton, Text("home-snap.txt", "Snap"), Text("home-snap-short.txt", "Pick a window and take it apart."), StartSnap, null);
+            // The hover reader belongs to recording, so its switch is on the
+            // recording side of the launcher, saying its name and which of the
+            // two states it is in. It is still in the settings dialog as well -
+            // this is the same setting, shown where it is about to matter, not a
+            // second copy of it.
+            UIElement record = CompactAction(recordButton, Text("home-record.txt", "Record"),
+                Text("home-record-short.txt", "Follow what you do across applications."), StartRecord, InspectEntry());
             Grid.SetColumn(snap, 0);
             Grid.SetColumn(record, 2);
             actions.Children.Add(snap);
@@ -343,7 +410,38 @@ namespace AppStudio
             return root;
         }
 
-        private Border CompactAction(Button button, string label, string note, Action action)
+        // Name and state on one control, so the feature is discoverable without
+        // opening anything and its current state is readable without pressing
+        // anything.
+        private UIElement InspectEntry()
+        {
+            System.Windows.Controls.Primitives.ToggleButton toggle = new System.Windows.Controls.Primitives.ToggleButton();
+            toggle.SetResourceReference(StyleProperty, "AppToggleButton");
+            toggle.HorizontalAlignment = HorizontalAlignment.Left;
+            toggle.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            toggle.IsChecked = inspectEnabled;
+            inspectHint = new TextBlock();
+            inspectHint.VerticalAlignment = VerticalAlignment.Center;
+            toggle.Content = inspectHint;
+            System.Windows.Automation.AutomationProperties.SetName(toggle,
+                Text("settings-inspect.txt", "Show what is under the pointer while recording"));
+            toggle.Checked += delegate
+            {
+                inspectEnabled = true;
+                if (inspectSwitch != null) inspectSwitch.IsChecked = true;
+                ApplyInspect();
+            };
+            toggle.Unchecked += delegate
+            {
+                inspectEnabled = false;
+                if (inspectSwitch != null) inspectSwitch.IsChecked = false;
+                ApplyInspect();
+            };
+            ApplyInspect();
+            return toggle;
+        }
+
+        private Border CompactAction(Button button, string label, string note, Action action, UIElement extra)
         {
             Orphan(button);
             button.Content = label;
@@ -365,7 +463,9 @@ namespace AppStudio
             text.TextWrapping = TextWrapping.Wrap;
             text.Margin = new Thickness(2, Theme.Space2, 0, 0);
             text.MinHeight = 32;
+            text.LineHeight = Theme.MicroSize * Theme.BodyLine;
             stack.Children.Add(text);
+            if (extra != null) stack.Children.Add(extra);
             Border box = new Border();
             box.Child = stack;
             return box;
@@ -425,10 +525,9 @@ namespace AppStudio
             back.SetResourceReference(StyleProperty, "AppButtonCompact");
             back.Margin = new Thickness(0, 0, Theme.Space2, 0);
             back.Visibility = String.Equals(mode, ModeCompact, StringComparison.Ordinal) ? Visibility.Collapsed : Visibility.Visible;
-            // One step back, not all the way out. The code screen was reached
-            // from a result, so that is where leaving it goes.
-            bool fromCode = String.Equals(mode, ModeCode, StringComparison.Ordinal);
-            back.Click += delegate { if (fromCode) GoResult(); else GoCompact(); };
+            // The code screen has a back of its own, in its own bar, so this one
+            // only ever has the launcher to return to.
+            back.Click += delegate { GoCompact(); };
             right.Children.Add(back);
             Button options = new Button();
             options.Content = Text("compact-options.txt", "Settings");
@@ -698,7 +797,7 @@ namespace AppStudio
             StackPanel card = new StackPanel();
             card.Children.Add(Heading(Text("welcome-title.txt", "Three things")));
             card.Children.Add(Body(Text("welcome-body.txt", "Snap, record and replay.")));
-            card.Children.Add(Note(Privacy.PolicyStatement(valuePolicy)));
+            card.Children.Add(Note(Privacy.PolicyStatementForScreen(valuePolicy)));
             detail.Children.Add(Card(card));
         }
 
@@ -812,6 +911,7 @@ namespace AppStudio
                 AddButton(primary, Text("detail-code.txt", "Edit as code"), delegate { GoCode(); }, false);
             }
 
+            // The road most people are on: read it, or hand it to an assistant.
             WrapPanel row = new WrapPanel();
             row.Margin = new Thickness(0, Theme.Space2, 0, 0);
             if (verdict.IsRecording && verdict.Steps > 0)
@@ -819,19 +919,55 @@ namespace AppStudio
                 AddButton(row, Text("detail-report.txt", "Open the report"), delegate { OpenPath(current.ReportPath, hasReport); }, false);
             }
             AddButton(row, Text("detail-ai.txt", "Open the two files for an assistant"), delegate { OpenPath(current.AiFolder, hasAi); }, false);
-            AddButton(row, Text("detail-folder.txt", "Session folder"), delegate { OpenPath(current.Folder, true); }, false);
-            AddButton(row, Text("detail-rebuild.txt", "Build the outputs again"), delegate { BuildOutputs(current, true); }, false);
-            AddButton(row, Text("detail-export.txt", "Copy the outputs elsewhere"), delegate { ExportElsewhere(); }, false);
 
             StackPanel stack = new StackPanel();
             stack.Children.Add(primary);
             stack.Children.Add(row);
+
+            // Outputs that are not there yet are a thing to fix, not a thing to
+            // read about. The sentence carries the button that fixes it, so it
+            // is one move rather than a sentence naming a control the reader
+            // then has to find among six others.
             if (!hasReport || !hasAi)
             {
-                TextBlock warn = Note(Text("detail-missing.txt", "Some outputs are not on disk for this session. Use \"Build the outputs again\"."));
+                StackPanel warnStack = new StackPanel();
+                TextBlock warn = Note(Text("detail-missing.txt", "The outputs for this session are not on disk yet."));
                 warn.Foreground = Theme.CautionText;
-                stack.Children.Add(warn);
+                warn.Margin = new Thickness(0, 0, 0, Theme.Space2);
+                warnStack.Children.Add(warn);
+                WrapPanel fix = new WrapPanel();
+                AddButton(fix, Text("detail-missing-action.txt", "Write them now"), delegate { BuildOutputs(current, true); }, false);
+                warnStack.Children.Add(fix);
+                Border frame = new Border();
+                frame.CornerRadius = new CornerRadius(Theme.RadiusSm);
+                frame.BorderThickness = new Thickness(1);
+                frame.BorderBrush = Theme.Caution;
+                frame.Background = Theme.CautionSoft;
+                frame.Padding = new Thickness(Theme.Space3, Theme.Space3, Theme.Space3, Theme.Space2);
+                frame.Margin = new Thickness(0, Theme.Space3, 0, 0);
+                frame.Child = warnStack;
+                stack.Children.Add(frame);
             }
+
+            // Where the files are, and the two things somebody does to them once
+            // in a while. Folded, but the heading is on screen and says what is
+            // inside: the point of folding is to keep a rare move from competing
+            // with the frequent ones, not to make it unfindable.
+            StackPanel rare = new StackPanel();
+            rare.Children.Add(Note(Text("detail-outputs-note.txt",
+                "Only needed when the outputs have to be written again or kept somewhere else.")));
+            WrapPanel rareRow = new WrapPanel();
+            rareRow.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            AddButton(rareRow, Text("detail-folder.txt", "Session folder"), delegate { OpenPath(current.Folder, true); }, false);
+            AddButton(rareRow, Text("detail-rebuild.txt", "Build the outputs again"), delegate { BuildOutputs(current, true); }, false);
+            AddButton(rareRow, Text("detail-export.txt", "Copy the outputs elsewhere"), delegate { ExportElsewhere(); }, false);
+            rare.Children.Add(rareRow);
+            Expander outputs = Fold(Text("detail-outputs.txt", "Output files and where they are"), rare,
+                (hasReport && hasAi)
+                    ? Text("outputs-done.txt", "written")
+                    : Text("code-ai-attach-missing.txt", "not written yet"));
+            outputs.Margin = new Thickness(0, Theme.Space4, 0, 0);
+            stack.Children.Add(outputs);
             return stack;
         }
 
@@ -971,7 +1107,7 @@ namespace AppStudio
                 if (item != null) valuePolicy = Convert.ToString(item.Tag, CultureInfo.InvariantCulture);
             };
             body.Children.Add(values);
-            body.Children.Add(Note(Privacy.PolicyStatement(valuePolicy)));
+            body.Children.Add(Note(Privacy.PolicyStatementForScreen(valuePolicy)));
 
             body.Children.Add(FieldLabel(Text("settings-budget.txt", "Size budget for screens.pdf (KB)")));
             TextBox budget = new TextBox();
@@ -1184,7 +1320,20 @@ namespace AppStudio
 
             hud = new RecordHud(Text("hud-recording.txt", "Recording"), Text("hud-stop.txt", "Stop"));
             hud.StopRequested += delegate { StopRecord(); };
+            // While a recording runs this window is hidden, so the panel is the
+            // only part of this application on screen. Anything the operator may
+            // want to change during a recording has to be reachable from it, and
+            // whatever they change there has to be the same setting the dialog
+            // shows afterwards rather than a second one that looks like it.
+            hud.PauseRequested += delegate(bool value) { if (recorder != null) recorder.SetPaused(value); };
+            hud.InspectRequested += delegate(bool value)
+            {
+                inspectEnabled = value;
+                if (inspectSwitch != null) inspectSwitch.IsChecked = value;
+                ApplyInspect();
+            };
             hud.ShowControl();
+            hud.SetInspect(inspectEnabled);
             recorder = new Recorder(baseDir, session, hud, Dispatcher);
             recorder.SetExcludedHandles(hud.OwnHandles);
             recorder.Inspect = inspectEnabled;
@@ -1704,7 +1853,16 @@ namespace AppStudio
         private void ApplyInspect()
         {
             if (recorder != null) recorder.Inspect = inspectEnabled;
-            if (!inspectEnabled && hud != null) hud.HideInspect();
+            if (hud != null)
+            {
+                hud.SetInspect(inspectEnabled);
+                if (!inspectEnabled) hud.HideInspect();
+            }
+            if (inspectHint != null)
+            {
+                inspectHint.Text = Text("settings-inspect.txt", "Show what is under the pointer while recording") +
+                    ": " + (inspectEnabled ? Text("hud-on.txt", "on") : Text("hud-off.txt", "off"));
+            }
         }
 
         private CheckBox PermissionSwitch(string label, string accessibleNote)
@@ -1912,32 +2070,56 @@ namespace AppStudio
             window.SizeToContent = SizeToContent.WidthAndHeight;
             window.WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
+            // A card, laid out like every other card in this product: a caption,
+            // the thing itself, and the way out. The number sits on its own line
+            // with its leading set, rather than floating in a tall box with the
+            // hint pushed to the bottom by the font's own descent.
+            TextBlock caption = new TextBlock();
+            caption.FontFamily = Theme.UiFont;
+            caption.FontSize = Theme.LabelSize;
+            caption.FontWeight = FontWeights.SemiBold;
+            caption.Foreground = new SolidColorBrush(Theme.Parse("#B9C6D4"));
+            caption.HorizontalAlignment = HorizontalAlignment.Center;
+            caption.Text = Messages.Text("countdown-title.txt", "The recording starts in");
+
             TextBlock number = new TextBlock();
             number.FontFamily = Theme.UiFont;
-            number.FontSize = 92;
+            number.FontSize = 72;
+            // The digit is about three quarters of its point size and sits above
+            // the baseline, so a line box set to the font's default leaves a band
+            // of nothing under it that looks like a mistake. This is measured to
+            // the glyph rather than to the font.
+            number.LineHeight = 74;
+            number.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
             number.FontWeight = FontWeights.Bold;
             number.Foreground = Brushes.White;
+            number.TextAlignment = TextAlignment.Center;
             number.HorizontalAlignment = HorizontalAlignment.Center;
+            number.Margin = new Thickness(0, Theme.Space4, 0, 0);
             number.Text = seconds.ToString(CultureInfo.InvariantCulture);
 
             TextBlock hint = new TextBlock();
             hint.FontFamily = Theme.UiFont;
-            hint.FontSize = Theme.LabelSize;
-            hint.Foreground = Brushes.White;
+            hint.FontSize = Theme.MetaSize;
+            hint.Foreground = new SolidColorBrush(Theme.Parse("#B9C6D4"));
             hint.HorizontalAlignment = HorizontalAlignment.Center;
-            hint.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            hint.Margin = new Thickness(0, Theme.Space4, 0, 0);
             hint.Text = Messages.Text("countdown-hint.txt", "Escape cancels");
 
             StackPanel stack = new StackPanel();
+            stack.MinWidth = 192;
+            stack.Children.Add(caption);
             stack.Children.Add(number);
             stack.Children.Add(hint);
 
             Border shell = new Border();
-            shell.Background = new SolidColorBrush(Color.FromArgb(238, 16, 22, 30));
+            // Opaque. A card you can read the desktop through is a card nobody
+            // can read.
+            shell.Background = new SolidColorBrush(Theme.Parse("#101620"));
             shell.BorderBrush = new SolidColorBrush(Theme.Parse("#3AA0FF"));
             shell.BorderThickness = new Thickness(1);
             shell.CornerRadius = new CornerRadius(Theme.RadiusLg);
-            shell.Padding = new Thickness(56, 36, 56, 28);
+            shell.Padding = new Thickness(Theme.Space7, Theme.Space5, Theme.Space7, Theme.Space5);
             shell.Child = stack;
             window.Content = shell;
 

@@ -21,6 +21,18 @@ try {
     $fixture = Get-Content -LiteralPath $ready -Raw | ConvertFrom-Json
     $x = [int](($fixture.editRect.left + $fixture.editRect.right) / 2)
     $y = [int](($fixture.editRect.top + $fixture.editRect.bottom) / 2)
+    # What this asks for is the window at a point on the screen, so the answer
+    # depends on what else happens to be over that point. Bringing the fixture
+    # to the front first makes the question the one this test means to ask;
+    # without it the test reports "degraded acquisition failed" when what
+    # actually happened is that somebody left a window open there.
+    [AppStudio.ScreenCapture]::Raise([int64]$fixture.window)
+    Start-Sleep -Milliseconds 400
+    $onTop = [AppStudio.WindowTools]::ProcessIdAt($x, $y)
+    if ($onTop -ne $process.Id) {
+        throw ('another window is over the fixture at ' + $x + ',' + $y + ': process ' + $onTop +
+            ' answered instead of ' + $process.Id + '. This test reads the window at a screen point, so it needs that point.')
+    }
     $snapshot = [AppStudio.Probe]::At($x, $y, 500)
     if ($snapshot.Win32Status.State -ne 'ok' -or $snapshot.Win32.CtrlId -ne 1002) { throw 'Win32 degraded acquisition failed.' }
     if ($snapshot.UiaStatus.State -ne 'unavailable' -or $snapshot.UiaStatus.Reasons[0].Code -ne 'UIA-INIT') { throw 'UIA degraded reason missing.' }
