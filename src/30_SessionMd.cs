@@ -120,7 +120,8 @@ namespace AppStudio
             text.AppendLine("- Value policy in force: `" + Safe(session.ValuePolicy) + "`");
             text.AppendLine("- Shortcut keys are recorded only while Ctrl, Alt or the Windows key is held, plus Enter, Tab, Escape and F1-F12 on their own. " +
                 "An unmodified letter, digit or punctuation key is never looked at.");
-            text.AppendLine("- No clipboard, no window contents of applications that were not in front, no screen recording.");
+            text.AppendLine("- No clipboard while recording, no window contents of applications that were not in front, no screen recording. " +
+                "The clipboard is read in one place only: when the operator presses the button that takes an assistant's answer back into the code screen.");
             text.AppendLine();
             int secrets = 0;
             for (int index = 0; index < session.Steps.Count; index++) if (session.Steps[index].Kind == StepRecord.KindSecretInput) secrets++;

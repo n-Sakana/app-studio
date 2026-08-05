@@ -120,7 +120,10 @@ namespace AppStudio
             string head = "No keyboard stream is captured. The state of a fixed list of keys is read to notice a shortcut " +
                 "or that typing is happening; a key name is written down only for a command key on that list, and " +
                 "typed text is read back from the target element, never from key traffic. " +
-                "Clipboard contents are never read. " +
+                // Narrowed to what stays true. The code screen reads the
+                // clipboard when the operator presses the button that takes an
+                // answer in, and only then; nothing about a recording does.
+                "Clipboard contents are never read while recording, snapping or replaying. " +
                 "The pointer is watched at the event level, so a press, a release, a drag and a wheel turn are recorded " +
                 "with their positions; pointer movement on its own is not.";
             if (String.Equals(policy, PolicyLengthOnly, StringComparison.Ordinal))

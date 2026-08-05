@@ -601,6 +601,16 @@ namespace AppStudio
             }
         }
 
+        // Which process owns a window. Used where something this product
+        // started has to be closed again and nothing else may be.
+        public static int ProcessIdOf(long handle)
+        {
+            if (handle == 0) return 0;
+            uint processId;
+            NativeMethods.GetWindowThreadProcessId(new IntPtr(handle), out processId);
+            return unchecked((int)processId);
+        }
+
         // Cheap ownership test used to keep manual observation inside the target
         // application; it costs two Win32 calls and touches no accessibility API.
         public static int ProcessIdAt(int x, int y)

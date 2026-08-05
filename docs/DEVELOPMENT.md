@@ -86,6 +86,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `32_Pdf` | 依存なしの PDF writer（無劣化 Flate と写真 DCT） |
 | `33_ScreensPdf` | AI へ渡す `screens.pdf` と容量予算 |
 | `34_Acquire` | 取得と撮影の共通処理、秘密欄の黒塗り、出力の書き出し口 |
+| `36_ScriptModel` | 録画 step を両言語共通の操作列へ落とす唯一の場所。PowerShell と VBA が同じ録画について食い違わない根拠 |
+| `37_PowerShellGen` | PowerShell の初期コード生成。UIA でウィンドウと要素を解決し、位置は要素矩形に対する割合で扱う |
+| `38_VbaGen` | VBA の初期コード生成。Win32 だけで届く範囲を書き、届かない step は理由付きで停止させる |
+| `39_CodeProject` | 生成版・現行版・取り込み直前版の3版保持と `runtime/sessions/<id>/code/` への保存・読み戻し |
+| `40_Handoff` | AI へ渡すテキスト1個の組み立てと、長い場合の番号付き分割 |
+| `41_Intake` | 返答の解析。request id 照合、BEGIN/END/COMPLETE/PART、装飾除去、拒否理由 |
+| `42_Diff` | 行単位の差分。反映前に何が変わるのかを見せるためだけに使う |
+| `43_CodeScreen` | コード編集画面。形式切替、検証、実行、AI への送りと受け、差分と復帰 |
+| `44_ScriptRun` | PowerShell の構文検証と実行、VBA の構造検証と VBA ホストでの実行 |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
@@ -109,6 +118,12 @@ runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test 
 - `test-session-store`: 逐次追記の耐久性、実行中の読み戻し、round trip、一覧、壊れたフォルダの報告
 - `test-outputs`: 3出力の生成、**AI 添付がちょうど2ファイル**、PDF の xref 健全性、`session.md` の9節と base64 不在、HTML の外部参照0とエスケープ、容量予算（悪化する縮小段を採らないこと、効く場合は採ること、省略の明記）
 - `test-replay`: 経路 mode の意味、拒否の試行列、存在しないウィンドウ、許可なしの拒否、住所を持たない要素の拒否
+- `test-codegen`: 操作列の生成、PowerShell と VBA が**同じ9操作を持つこと**、住所を持たない step が黙って落ちず停止すること、UIA だけの要素を VBA が理由付きで断ること、位置が住所として書かれないこと、秘密が値ではなく問い合わせになること、生成 PowerShell が実際に parse できること、3版（生成・現行・直前）の保持と復帰
+- `test-handoff`: テキスト1個が8節すべてを持つこと、request id と返却形式が入ること、通常のセッションが**1回のコピーで収まること**、長すぎる場合だけ番号付きに分割され再結合で欠落しないこと、依頼テキストが `ai/` を2ファイルのまま保つこと
+- `test-intake`: 正常系（1ファイル／複数ファイル／拒否）と20種の不正形、チャット装飾を剥がしても**本文は逐語**であること、PART の欠落・順不同・重複・総数不一致・内容衝突、再結合の順序、差分の増減行数
+- `test-code-ui`: 実 GUI を UI Automation で駆動し、結果画面からコード編集画面へ入ること、開いた瞬間に実行可能なコードが入っていること、PowerShell と VBA が同格に並ぶこと、**1回のコピー**で依頼文が出ること、**別の依頼への返答が理由付きで拒否され画面のコードが変わらないこと**、返答が差分として出てから反映されること、反映・取り消し・生成版への復帰、［← 戻る］が結果画面へ返ること
+- `test-code-run-e2e`: 生成した PowerShell を実際に走らせ、**fixture の状態が実際に変わること**を合格条件にする。スクリプトが最後まで走ったことではなく、対象アプリが変わったことを見る
+- `test-vba-host`: 生成した VBA を実際の VBA ホストへ取り込んで走らせる。ホストが無い／VBA プロジェクトへのアクセスが信頼されていない／走って停止した、の**どれであっても名指しで報告されること**を確認し、どれも「合格」に丸めない。あわせて全 `Declare` が `Alias` を持つこと、呼出しに上限があること、**ホストを残さないこと**を見る
 - `test-diagnostics` / `test-acq-diagnostics`: 診断 code が全投影へ届くこと、画像0のとき PDF 不在の理由が出ること
 - `test-hang-recovery`: 恒久 hang 20回、直後正常取得、resource/orphan/queue/UI
 - `test-live-basic`: Win32/WPF、deep tree、画像と黒塗り表明
@@ -137,7 +152,7 @@ fixture だけを build:
 
 `FixtureWinForms`、`FixtureWin32`、`FixtureWpf`、`FixtureCanvas`、`FixtureInputTarget`、`FixtureIme` を `tests/.build` に生成する。
 
-`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-input-timeline`、`test-gesture-e2e`、`test-ime-e2e`、`test-gui-e2e`、`test-notepad-e2e`、`test-calculator-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
+`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-input-timeline`、`test-gesture-e2e`、`test-ime-e2e`、`test-gui-e2e`、`test-notepad-e2e`、`test-calculator-e2e`、`test-code-run-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。`test-code-run-e2e` が駆動するのは UIA パターンを持つ fixture なので実際には合成入力へ落ちないが、`InvokeElement` はパターンが無ければ合成入力へ落ちる設計であり、**落ちうる以上こちら側に置く**。`test-vba-host` は VBA ホスト（Excel）を起動するため同じ扱いにする。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
 
 `test-gui-e2e` は自分で起動した fixture だけを操作する。全 click は押す直前に `WindowTools.ProcessIdAt` で対象プロセスのものだと確認し、違えば一度だけ対象を前面に出して確認し直し、それでも違えば例外にして何も押さない。再生の前には、記録した各ウィンドウ記述に一致する窓がちょうど1つであることを確かめ、複数あれば再生を行わずその事実を出力する。
 
@@ -166,7 +181,9 @@ WP-S 成果は `artifacts/wp-s/<run>/` に出る。WP-S 文書の数値と製品
 画面の見た目と操作導線は、共通の design system に揃える。
 
 - 色・余白・角丸・型スケールは `src/00_Theme.cs` の token だけを使う。`Color.FromRgb` や `Brushes.White` を UI コードへ直接書かない。
-- 画面は2形態。**ランチャ 660 x 356**（メニューと設定だけ、結果領域を持たない）と、**結果画面 1120 x 840**（左レール＋詳細）。どちらも topbar / progress track / 本体 / status bar の4帯。
+- 画面は3形態。**ランチャ 660 x 356**（メニューと設定だけ、結果領域を持たない）、**結果画面 1120 x 840**（左レール＋詳細）、**コード編集画面 1120 x 840**（形式切替＋エディタ＋AI 相談）。いずれも topbar / progress track / 本体 / status bar の4帯。
+- コード編集画面は結果画面の［コード編集］からだけ入り、［← 戻る］は結果画面へ返す。ランチャへ一足飛びに戻さない。
+- **PowerShell と VBA は同じ大きさ・同じ位置・同じボタンで扱う。** 片方を既定にしたり、片方だけ「書き出し」の扱いにしたりしない。
 - 結果画面は上から **結論 → 数値 → 警告 → 次の一手 → 詳細** の順。結論は状態チップ＋1文で、主語と結果が曖昧にならないこと。
 - **折り畳みは1段だけ。** 折り畳みを開いた先に折り畳みを置かない。開いた先は平らな一覧を持つ1つのスクロール箱にする。
 - 生ログ・全要素・環境・取得方法は詳細側に置く。最初の画面には出さない。

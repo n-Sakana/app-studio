@@ -35,11 +35,23 @@ foreach($term in @('スナップ','録画','再生','session.md','screens.pdf','
 # Nothing may still promise the withdrawn assistant workflow. Saying that a file
 # is deliberately not produced is the opposite of promising it, so the check is
 # on the names that cannot appear as a denial.
+#
+# Taking an answer back in used to be on this list. It is not withdrawn any
+# more: the code screen reads one paste, checks it against the request it was
+# asked for and shows the difference before anything is replaced, so the
+# documents are supposed to describe it. The artefact names below never came
+# back and stay banned.
 foreach($doc in @('README.md','docs\SPEC.md','docs\DEVELOPMENT.md','docs\ONSITE.md')){
  $text=[IO.File]::ReadAllText((Join-Path $root $doc),(New-Object Text.UTF8Encoding($false)))
- foreach($gone in @('pui-plan','案件','回答を取り込','調査パック','handoff.txt','MANIFEST.json')){
+ foreach($gone in @('pui-plan','案件','調査パック','handoff.txt','MANIFEST.json')){
   if($text.Contains($gone)){throw ($doc+' still promises the withdrawn workflow: '+$gone)}
  }
+}
+# The intake is only worth having if a bad answer is refused with a reason, so
+# the documents have to say so where a reader meets the feature.
+foreach($pair in @(@('README.md','request id'),@('docs\SPEC.md','request id'))){
+ $text=[IO.File]::ReadAllText((Join-Path $root $pair[0]),(New-Object Text.UTF8Encoding($false)))
+ if(-not$text.Contains($pair[1])){throw ($pair[0]+' does not state how a stale or foreign answer is refused')}
 }
 # The two-file rule is the whole handover contract, so it has to be stated where
 # a reader will meet it.

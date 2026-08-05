@@ -15,6 +15,9 @@ $tests = @(
     'test-outputs.ps1',
     'test-report-states.ps1',
     'test-replay.ps1',
+    'test-codegen.ps1',
+    'test-handoff.ps1',
+    'test-intake.ps1',
     'test-diagnostics.ps1',
     'test-acq-diagnostics.ps1',
     'test-win32-bound.ps1',
@@ -27,6 +30,7 @@ $tests = @(
     'test-autosave.ps1',
     'test-scan.ps1',
     'test-ui-flow.ps1',
+    'test-code-ui.ps1',
     'test-hang-recovery.ps1'
 )
 # These move the real pointer and send real keystrokes, so they disturb whoever
@@ -41,7 +45,9 @@ $realInputTests = @(
     'test-ime-e2e.ps1',
     'test-gui-e2e.ps1',
     'test-notepad-e2e.ps1',
-    'test-calculator-e2e.ps1'
+    'test-calculator-e2e.ps1',
+    'test-code-run-e2e.ps1',
+    'test-vba-host.ps1'
 )
 if ($env:APPSTUDIO_ALLOW_REAL_INPUT -eq '1') {
     $tests += $realInputTests

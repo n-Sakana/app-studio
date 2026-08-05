@@ -37,12 +37,18 @@ namespace AppStudio
         private RecordHud hud;
         private Recorder recorder;
         private ReplayEngine replay;
+        private CodeScreen codeScreen;
+        private string codeSessionId;
         private DateTime busySince;
         private string busyLabel;
         private bool busy;
 
         private const string ModeCompact = "compact";
         private const string ModeResult = "result";
+        // A third shape. The result screen says what a session is; this one is
+        // the same session written out as something that runs, and it is a
+        // different job with a different window.
+        private const string ModeCode = "code";
 
         // The launcher is deliberately about the size of the one Windows itself
         // uses for the same kind of job; the result window is sized to be read.
@@ -155,9 +161,17 @@ namespace AppStudio
 
         private void ApplyMode(string next)
         {
+            // Leaving the code screen writes what is in it. There is no save
+            // button there, so this is the moment it has to happen.
+            if (String.Equals(mode, ModeCode, StringComparison.Ordinal) &&
+                !String.Equals(next, ModeCode, StringComparison.Ordinal) && codeScreen != null)
+            {
+                codeScreen.Persist();
+            }
             mode = next;
             DetachShared();
             bool compact = String.Equals(mode, ModeCompact, StringComparison.Ordinal);
+            bool code = String.Equals(mode, ModeCode, StringComparison.Ordinal);
             // The minimums come first. Shrinking back to the launcher while the
             // result window's minimum is still in force leaves the window stuck
             // at that minimum, because the assignment is clamped as it is made.
@@ -167,8 +181,8 @@ namespace AppStudio
             Height = compact ? CompactHeight : ResultHeight;
             ResizeMode = compact ? ResizeMode.CanMinimize : ResizeMode.CanResize;
             Background = Theme.SurfaceCanvas;
-            Content = compact ? BuildCompact() : BuildResult();
-            if (!compact) ShowDetail();
+            Content = compact ? BuildCompact() : (code ? BuildCode() : BuildResult());
+            if (!compact && !code) ShowDetail();
         }
 
         private void GoResult()
@@ -187,6 +201,73 @@ namespace AppStudio
             if (String.Equals(mode, ModeCompact, StringComparison.Ordinal)) return;
             ApplyMode(ModeCompact);
             CentreOnScreen();
+        }
+
+        // The code screen belongs to one session. Selecting a different session
+        // and pressing the button again builds it from that one instead of
+        // showing the previous session's code under a new title.
+        private void GoCode()
+        {
+            if (current == null)
+            {
+                Say(Text("code-nosession.txt", "Choose a session first: the code is written from a recording."), "Caution");
+                return;
+            }
+            if (codeScreen == null || !String.Equals(codeSessionId, current.Id, StringComparison.Ordinal))
+            {
+                CodeProject project;
+                try
+                {
+                    project = CodeProject.Open(current);
+                }
+                catch (Exception exception)
+                {
+                    Say(Text("code-failed.txt", "The code could not be written from this session") + ": " + exception.Message, "Danger");
+                    return;
+                }
+                codeScreen = new CodeScreen(this, current, project, Say, AskRunConsent);
+                codeSessionId = current.Id;
+            }
+            ApplyMode(ModeCode);
+            CentreOnScreen();
+        }
+
+        // Running a generated script drives the real applications on this
+        // machine, exactly as replay does, so it asks the same way and honours
+        // the same permission.
+        private bool AskRunConsent()
+        {
+            if (writeEnabled) return true;
+            Confirm prompt = new Confirm(
+                Text("code-consent-title.txt", "Running this drives the real application"),
+                Text("code-consent-body.txt", "The script presses buttons and types into the applications on this machine."),
+                Text("code-consent-ok.txt", "Allow and run"),
+                Text("replay-consent-cancel.txt", "Cancel"));
+            if (!prompt.Ask(this)) return false;
+            writeEnabled = true;
+            if (writeSwitch != null) writeSwitch.IsChecked = true;
+            return true;
+        }
+
+        private UIElement BuildCode()
+        {
+            Grid root = new Grid();
+            root.RowDefinitions.Add(Row(GridLength.Auto));
+            root.RowDefinitions.Add(Row(new GridLength(Theme.ProgressTrackHeight)));
+            root.RowDefinitions.Add(Row(new GridLength(1, GridUnitType.Star)));
+            root.RowDefinitions.Add(Row(GridLength.Auto));
+            root.Children.Add(TopBar());
+            Grid.SetRow(progress, 1);
+            root.Children.Add(progress);
+            // No outer scroll here. The body is a grid whose middle row is the
+            // editor, and a grid inside a scroller grows to its content instead
+            // of filling the window - which pushed the assistant off the bottom
+            // of the screen and made a long file scroll the buttons away.
+            UIElement body = codeScreen.Build();
+            Grid.SetRow(body, 2);
+            root.Children.Add(body);
+            root.Children.Add(StatusBar());
+            return root;
         }
 
         private void CentreOnScreen()
@@ -340,8 +421,11 @@ namespace AppStudio
             back.Content = Text("topbar-back.txt", "Back");
             back.SetResourceReference(StyleProperty, "AppButtonCompact");
             back.Margin = new Thickness(0, 0, Theme.Space2, 0);
-            back.Visibility = String.Equals(mode, ModeResult, StringComparison.Ordinal) ? Visibility.Visible : Visibility.Collapsed;
-            back.Click += delegate { GoCompact(); };
+            back.Visibility = String.Equals(mode, ModeCompact, StringComparison.Ordinal) ? Visibility.Collapsed : Visibility.Visible;
+            // One step back, not all the way out. The code screen was reached
+            // from a result, so that is where leaving it goes.
+            bool fromCode = String.Equals(mode, ModeCode, StringComparison.Ordinal);
+            back.Click += delegate { if (fromCode) GoResult(); else GoCompact(); };
             right.Children.Add(back);
             Button options = new Button();
             options.Content = Text("compact-options.txt", "Settings");
@@ -706,10 +790,15 @@ namespace AppStudio
             if (verdict.IsRecording && verdict.Steps > 0)
             {
                 AddButton(primary, Text("detail-replay.txt", "Replay"), delegate { StartReplay(); }, true);
+                // The other thing a recording is for. Replay carries it out
+                // once; this turns it into something that can be read, changed
+                // and kept.
+                AddButton(primary, Text("detail-code.txt", "Edit as code"), delegate { GoCode(); }, true);
             }
             else
             {
                 AddButton(primary, Text("detail-report.txt", "Open the report"), delegate { OpenPath(current.ReportPath, hasReport); }, true);
+                AddButton(primary, Text("detail-code.txt", "Edit as code"), delegate { GoCode(); }, false);
             }
 
             WrapPanel row = new WrapPanel();
@@ -1424,6 +1513,11 @@ namespace AppStudio
         private void OnClosed(object sender, EventArgs args)
         {
             clock.Stop();
+            if (codeScreen != null && String.Equals(mode, ModeCode, StringComparison.Ordinal))
+            {
+                try { codeScreen.Persist(); }
+                catch { }
+            }
             if (recorder != null)
             {
                 recorder.Stop();
