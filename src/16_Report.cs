@@ -113,9 +113,25 @@ namespace AppStudio
                 session.Kind == StudioSession.KindRecord ? "recording" : "snap"))).Append(" &middot; ");
             html.Append(E(session.Id)).Append(" &middot; ");
             html.Append(E(session.StartedAt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)));
-            html.Append("</p></div><div class=\"search\"><input id=\"q\" type=\"search\" placeholder=\"")
-                .Append(E(Word("report-filter.txt", "filter rows and steps..."))).Append("\" autocomplete=\"off\">");
+            // The filter says what it filters, and what it leaves alone.
+            //
+            // It used to be an unlabelled box with a hint inside it, which is a
+            // control whose scope a reader has to discover by typing into it and
+            // watching what moves. It narrows the rows of every detail table on
+            // the page at once - not the summary above them - and that is now
+            // written next to it, along with how many rows survived and a way
+            // back to all of them.
+            html.Append("</p></div><div class=\"search\"><label class=\"searchlabel\" for=\"q\">")
+                .Append(E(Word("report-filter-label.txt", "Filter the detail tables"))).Append("</label>");
+            html.Append("<input id=\"q\" type=\"search\" placeholder=\"")
+                .Append(E(Word("report-filter.txt", "filter rows and steps..."))).Append("\" autocomplete=\"off\" aria-describedby=\"qhelp\">");
+            html.Append("<button id=\"qclear\" type=\"button\" hidden>")
+                .Append(E(Word("report-filter-clear.txt", "clear"))).Append("</button>");
             html.Append("<span id=\"qcount\" class=\"muted\"></span></div></div>");
+            html.Append("<p id=\"qhelp\" class=\"searchhelp muted\">")
+                .Append(E(Word("report-filter-help.txt",
+                    "Every row of every table below is matched against what you type. The summary is not filtered.")))
+                .Append("</p>");
             html.Append("<nav><a href=\"#summary\">").Append(E(Word("report-nav-summary.txt", "summary"))).Append("</a>");
             if (session.Steps.Count > 0) html.Append("<a href=\"#steps\">").Append(E(Word("detail-steps.txt", "what was done"))).Append("</a>");
             html.Append("<a href=\"#screens\">").Append(E(Word("detail-screens.txt", "screens"))).Append("</a>");
@@ -141,6 +157,7 @@ namespace AppStudio
             Stat(html, verdict.Limits.ToString(CultureInfo.InvariantCulture), Word("stat-limits.txt", "stated limits"));
             if (verdict.IsRecording) Stat(html, verdict.InputEvents.ToString(CultureInfo.InvariantCulture), Word("stat-events.txt", "input events"));
             html.Append("</div>");
+            Proportions(html, session, verdict);
             if (verdict.Warnings.Count > 0)
             {
                 html.Append("<ul class=\"warnings\">");
@@ -529,6 +546,53 @@ namespace AppStudio
             html.Append("<div class=\"stat\"><b>").Append(E(value)).Append("</b><span>").Append(E(label)).Append("</span></div>");
         }
 
+        // The numbers above, said again as widths.
+        //
+        // The counts are the record; these are for the glance before it. Three
+        // out of four screens photographed and nine out of ten steps carried out
+        // are facts a reader takes in from a bar in a moment and from a row of
+        // numbers only after doing the arithmetic. Nothing is drawn that is not
+        // already stated as a number, so the picture can never be the only place
+        // something is said - and a bar is only drawn where there is a whole for
+        // the part to be a part of.
+        private static void Proportions(StringBuilder html, StudioSession session, SessionVerdict verdict)
+        {
+            StringBuilder bars = new StringBuilder();
+            if (verdict.Screens > 0)
+            {
+                Bar(bars, Word("bar-shots.txt", "screens with a picture"), verdict.Shots, verdict.Screens,
+                    verdict.Shots == verdict.Screens ? "ok" : "warnpill");
+            }
+            if (verdict.IsRecording && verdict.Steps > 0)
+            {
+                Bar(bars, Word("bar-replayable.txt", "steps with an address that survives a restart"),
+                    verdict.Replayable, verdict.Steps, verdict.NotReplayable == 0 ? "ok" : "warnpill");
+            }
+            if (verdict.HasReplay)
+            {
+                int tried = verdict.ReplayDone + verdict.ReplayStopped;
+                Bar(bars, Word("bar-replayed.txt", "steps carried out on the last replay"),
+                    verdict.ReplayDone, tried, verdict.ReplayStopped == 0 ? "ok" : "bad");
+            }
+            if (bars.Length == 0) return;
+            html.Append("<div class=\"bars\">").Append(bars).Append("</div>");
+        }
+
+        private static void Bar(StringBuilder html, string label, int part, int whole, string tone)
+        {
+            if (whole <= 0) return;
+            int percent = (int)Math.Round(part * 100.0 / whole);
+            if (percent < 0) percent = 0;
+            if (percent > 100) percent = 100;
+            html.Append("<div class=\"barrow\">");
+            html.Append("<span class=\"barlabel\">").Append(E(label)).Append("</span>");
+            html.Append("<span class=\"bartrack\"><span class=\"barfill ").Append(tone).Append("\" style=\"width:")
+                .Append(percent.ToString(CultureInfo.InvariantCulture)).Append("%\"></span></span>");
+            html.Append("<span class=\"barvalue\">").Append(part.ToString(CultureInfo.InvariantCulture))
+                .Append(" / ").Append(whole.ToString(CultureInfo.InvariantCulture)).Append("</span>");
+            html.Append("</div>");
+        }
+
         private static void Row(StringBuilder html, string key, string value)
         {
             html.Append("<tr><th>").Append(E(key)).Append("</th><td>").Append(E(value)).Append("</td></tr>");
@@ -701,8 +765,23 @@ namespace AppStudio
 ".bar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;max-width:1400px;margin:auto;padding:12px 20px}" +
 "h1{font-size:18px;margin:0}h2{font-size:16px;margin:0 0 10px}h3{font-size:14px;margin:16px 0 6px}h4{font-size:13px;margin:14px 0 4px;color:var(--sub)}" +
 ".sub{margin:2px 0 0;color:var(--muted);font-size:12px}" +
-".search{display:flex;align-items:center;gap:8px}" +
+".search{display:flex;align-items:center;gap:8px;flex-wrap:wrap}" +
+".searchlabel{font-size:12px;font-weight:600;color:var(--sub)}" +
+".searchhelp{max-width:1400px;margin:0 auto;padding:0 20px 10px;font-size:12px}" +
 "input[type=search]{width:min(340px,60vw);padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--sunken);color:var(--fg);font:inherit}" +
+"#qclear{padding:5px 10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--sub);font:inherit;font-size:12px;cursor:pointer}" +
+"#qclear:hover{border-color:var(--accent);color:var(--accent)}" +
+".filtered{margin:8px 0 0;font-size:12px}" +
+/* The proportion bars. Each is a track, a fill and the two numbers the fill
+   was computed from, so the picture never says anything the text does not. */
+".bars{display:flex;flex-direction:column;gap:6px;margin:0 0 14px}" +
+".barrow{display:grid;grid-template-columns:minmax(140px,22em) 1fr auto;gap:10px;align-items:center;font-size:12px}" +
+".barlabel{color:var(--sub)}" +
+".bartrack{position:relative;height:10px;border-radius:5px;background:var(--sunken);border:1px solid var(--soft);overflow:hidden}" +
+".barfill{position:absolute;left:0;top:0;bottom:0;border-radius:5px;background:var(--accent)}" +
+".barfill.ok{background:var(--ok)}.barfill.bad{background:var(--bad)}.barfill.warnpill{background:var(--warn)}" +
+".barvalue{font-variant-numeric:tabular-nums;color:var(--muted);font-weight:600}" +
+"@media (max-width:640px){.barrow{grid-template-columns:1fr auto}.barlabel{grid-column:1/-1}}" +
 "nav{max-width:1400px;margin:auto;padding:0 20px 10px;display:flex;flex-wrap:wrap;gap:14px}" +
 "nav a{color:var(--accent);text-decoration:none;font-size:12px;font-weight:600}" +
 "main{max-width:1400px;margin:auto;padding:20px}" +
@@ -750,6 +829,7 @@ namespace AppStudio
             return
 "(function(){" +
 "var box=document.getElementById('q');var count=document.getElementById('qcount');" +
+"var clear=document.getElementById('qclear');" +
 "if(!box)return;" +
 "function apply(){" +
 "var term=box.value.toLowerCase();" +
@@ -761,9 +841,25 @@ namespace AppStudio
    that holds it is opened. There is only ever one to open. */
 "if(hit&&term!==''){var fold=rows[i].closest('details');if(fold)fold.open=true;}" +
 "}" +
+/* A section whose rows have all been filtered out is marked as such, so an
+   empty table reads as "nothing here matched" rather than as "this report has
+   nothing in it". Without this the filter silently empties whole sections. */
+"var parts=document.querySelectorAll('section');" +
+"for(var s=0;s<parts.length;s++){" +
+"var owned=parts[s].querySelectorAll('.row');" +
+"if(owned.length===0){continue;}" +
+"var left=parts[s].querySelectorAll('.row:not(.hide)').length;" +
+"var tag=parts[s].querySelector('.filtered');" +
+"if(!tag){tag=document.createElement('p');tag.className='filtered muted';parts[s].appendChild(tag);}" +
+"if(term!==''&&left===0){tag.textContent=box.getAttribute('data-none')||'no row here matches the filter';tag.hidden=false;}" +
+"else if(term!==''){tag.textContent=left+' / '+owned.length;tag.hidden=false;}" +
+"else{tag.hidden=true;}" +
+"}" +
 "count.textContent=term===''?'':shown+' shown';" +
+"if(clear){clear.hidden=term==='';}" +
 "}" +
 "box.addEventListener('input',apply);" +
+"if(clear){clear.addEventListener('click',function(){box.value='';apply();box.focus();});}" +
 "})();";
         }
     }
