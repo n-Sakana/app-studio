@@ -35,11 +35,6 @@ namespace AppStudio
         private readonly TextBlock chipHint;
         private readonly Button stop;
         private readonly System.Windows.Controls.Primitives.ToggleButton pause;
-        private readonly System.Windows.Controls.Primitives.ToggleButton inspect;
-        // Removed: the chip says everything it has, so there is nothing to open.
-        private readonly string inspectLabel;
-        private readonly string onWord;
-        private readonly string offWord;
         private string recordingWord;
         private IntPtr frameHandle;
         private IntPtr controlHandle;
@@ -53,12 +48,15 @@ namespace AppStudio
         private InspectFact lastFact;
 
         public event Action StopRequested;
-        // Pausing and the hover reader are asked for here rather than found in a
-        // dialog behind the window that is currently hidden. While a recording
-        // runs this panel is the whole of the application the operator can see,
-        // so anything they may want to change during one has to be on it.
+        // Stopping and pausing are the two things that are about this panel's own
+        // job, so they are the only two on it.
+        //
+        // The hover reader used to have a switch here as well. It is a recording
+        // setting, and it already has a switch in the recording settings, so this
+        // was the same setting in two places - and the two disagreed, because
+        // turning it off in the dialog left this one still reading "on". One
+        // setting, one switch, in the place where settings are.
         public event Action<bool> PauseRequested;
-        public event Action<bool> InspectRequested;
 
         public RecordHud(string recordingLabel, string stopLabel)
         {
@@ -71,10 +69,6 @@ namespace AppStudio
             edge.BorderThickness = new Thickness(3);
             edge.Background = Brushes.Transparent;
             frame.Content = edge;
-
-            inspectLabel = Messages.Text("hud-inspect.txt", "Pointer info");
-            onWord = Messages.Text("hud-on.txt", "on");
-            offWord = Messages.Text("hud-off.txt", "off");
 
             control = CreateControlWindow();
             dot = new TextBlock();
@@ -122,6 +116,13 @@ namespace AppStudio
             pause.Unchecked += delegate { PaintPause(); Raise(PauseRequested, false); };
             recordingWord = recordingLabel;
 
+            // One row, and it is allowed to be exactly as wide as it needs to be.
+            // The clock text grows during a replay - "Replaying 12/40" is wider
+            // than "Replaying" - and the panel used to be sized once, at the start,
+            // and never again. Everything after the clock therefore moved right
+            // as the count grew, and the pause control was the last thing on the
+            // row, so it was the thing that ended up outside the window. It is
+            // the row that is measured now, on every change of what is in it.
             StackPanel row = new StackPanel();
             row.Orientation = Orientation.Horizontal;
             row.Children.Add(dot);
@@ -129,25 +130,8 @@ namespace AppStudio
             row.Children.Add(stop);
             row.Children.Add(pause);
 
-            // The second line. The hover reader is a thing this application can
-            // do during a recording, so its name and whether it is on are on the
-            // panel: a feature whose only entrance is five items down a settings
-            // dialog is a feature nobody knows exists.
-            inspect = HudToggle(inspectLabel);
-            inspect.Checked += delegate { PaintInspectToggle(); Raise(InspectRequested, true); };
-            inspect.Unchecked += delegate { PaintInspectToggle(); Raise(InspectRequested, false); };
-            // One switch, not two. Whether the chip appears and how much it says
-            // were separate controls, which asked the operator a question that
-            // has only one sensible answer: a chip says what it has room to say.
-            // There is no amount of information here worth a second switch.
-            StackPanel second = new StackPanel();
-            second.Orientation = Orientation.Horizontal;
-            second.Margin = new Thickness(0, Theme.Space2, 0, 0);
-            second.Children.Add(inspect);
-
             StackPanel stack = new StackPanel();
             stack.Children.Add(row);
-            stack.Children.Add(second);
 
             Border shell = new Border();
             // Opaque. At ninety five per cent whatever is behind the panel reads
@@ -161,7 +145,6 @@ namespace AppStudio
             shell.Child = stack;
             control.Content = shell;
             PaintPause();
-            PaintInspectToggle();
 
             // The inspector. Two more windows of this application, both of them
             // click-through: the operator is recording, and a ring drawn round
@@ -269,8 +252,16 @@ namespace AppStudio
             OnUi(new Action(delegate
             {
                 bool held = pause.IsChecked == true;
-                clock.Text = (held ? Messages.Text("hud-paused.txt", "Paused") : running) + stamp;
+                string wanted = (held ? Messages.Text("hud-paused.txt", "Paused") : running) + stamp;
+                if (String.Equals(clock.Text, wanted, StringComparison.Ordinal)) return;
+                clock.Text = wanted;
                 clock.Foreground = held ? new SolidColorBrush(Theme.Parse("#E4C179")) : Brushes.White;
+                // The panel is only as wide as its words, and this is where the
+                // words change. Without this the window keeps the width it needed
+                // for "Replaying 1/40" and clips everything the wider "Replaying 12/40"
+                // pushes past that edge - which is the pause control, because it
+                // is last on the row.
+                Reflow();
             }), false);
         }
 
@@ -333,23 +324,33 @@ namespace AppStudio
         private void Reflow()
         {
             if (suppressed || !control.IsVisible) return;
-            double scale = Scale(controlHandle);
-            control.Measure(new Size(2000, 400));
-            int width = (int)Math.Ceiling(control.DesiredSize.Width * scale) + 2;
-            int height = (int)Math.Ceiling(control.DesiredSize.Height * scale) + 2;
+            Size wanted = Wanted();
             RectValue now = WindowTools.GetPhysicalRect(controlHandle);
-            if (now != null && now.Width == width && now.Height == height) return;
+            if (now != null && now.Width == (int)wanted.Width && now.Height == (int)wanted.Height) return;
             PlaceControl();
         }
 
-        private void PaintInspectToggle()
+        // What the panel needs, in the units the window manager places windows
+        // in. WPF caches a measure against the constraint it was given, so
+        // measuring again with the same constraint returns the previous answer
+        // and the panel keeps a stale width - which is exactly the fault this is
+        // here to stop. The measure is invalidated first, every time.
+        private Size Wanted()
         {
-            inspect.Content = inspectLabel + ": " + (inspect.IsChecked == true ? onWord : offWord);
-            // Dimmed and inert rather than disabled: a disabled button falls
-            // back to the system's own disabled look, which on this panel is a
-            // near white block. There is nothing to show the properties of when
-            // the reader is off, so it is out of reach either way.
-            Reflow();
+            double scale = Scale(controlHandle);
+            FrameworkElement content = control.Content as FrameworkElement;
+            if (content != null) content.InvalidateMeasure();
+            control.InvalidateMeasure();
+            control.Measure(new Size(2400, 400));
+            control.UpdateLayout();
+            double needWidth = Math.Max(control.DesiredSize.Width, content == null ? 0 : content.DesiredSize.Width);
+            double needHeight = Math.Max(control.DesiredSize.Height, content == null ? 0 : content.DesiredSize.Height);
+            // A few units of slack. A window sized to exactly what a layout asked
+            // for puts the last control flush against the frame, and one rounding
+            // step in the other direction slices its border off.
+            int width = (int)Math.Ceiling(needWidth * scale) + 6;
+            int height = (int)Math.Ceiling(needHeight * scale) + 6;
+            return new Size(width, height);
         }
 
         // Three short lines: what it is, which window it is in, and what names
@@ -365,18 +366,6 @@ namespace AppStudio
             string more = lastFact.Detail();
             chipHint.Text = more;
             chipHint.Visibility = more.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        }
-
-        // Whether the recording is paused, and whether the hover reader is on,
-        // are decided elsewhere as well - a hotkey, the settings dialog - so the
-        // panel is told rather than assumed to be the only place they change.
-        public void SetInspect(bool value)
-        {
-            OnUi(new Action(delegate
-            {
-                if (inspect.IsChecked == value) return;
-                inspect.IsChecked = value;
-            }), false);
         }
 
         private static void Raise(Action<bool> handler, bool value)
@@ -597,10 +586,9 @@ namespace AppStudio
         private void PlaceControl()
         {
             if (suppressed) return;
-            double scale = Scale(controlHandle);
-            control.Measure(new Size(2000, 400));
-            int width = (int)Math.Ceiling(control.DesiredSize.Width * scale) + 2;
-            int height = (int)Math.Ceiling(control.DesiredSize.Height * scale) + 2;
+            Size wanted = Wanted();
+            int width = (int)wanted.Width;
+            int height = (int)wanted.Height;
             System.Drawing.Rectangle work = System.Windows.Forms.Screen.PrimaryScreen.WorkingArea;
             if (width > work.Width) width = work.Width;
             if (height > work.Height) height = work.Height;

@@ -56,6 +56,59 @@ namespace AppStudio
         private readonly object sync = new object();
         private ScanRunner runner;
         private volatile bool cancelled;
+        private volatile bool paused;
+
+        // How fast this runs against the pace the recording was made at.
+        //
+        // A replay is slower than the recording it came from, and deliberately
+        // so: every step waits out the interval the operator left, then finds the
+        // element again by meaning rather than by where it used to be, then waits
+        // for the application to stop changing before the next step starts. That
+        // is what makes it a replay rather than a burst of clicks at remembered
+        // coordinates. It is also why a recording of ten seconds takes the better
+        // part of a minute to play back, which is a surprise if nothing says so.
+        //
+        // So the amount of waiting is a number the operator sets. It scales the
+        // recorded interval and the settling budget together - the two waits that
+        // exist to be safe rather than to be correct. What is never scaled is the
+        // time given to finding the element or to carrying the operation out:
+        // those are not padding, and shortening them would not make a replay
+        // faster, it would make it fail.
+        private double speed = 1.0;
+
+        public double Speed
+        {
+            get { return speed; }
+            set
+            {
+                double wanted = value;
+                if (wanted < 0.25) wanted = 0.25;
+                if (wanted > 8.0) wanted = 8.0;
+                speed = wanted;
+            }
+        }
+
+        public bool IsPaused { get { return paused; } }
+
+        // Held between steps rather than in the middle of one. Stopping half way
+        // through an operation would leave the application in a state the
+        // recording never describes.
+        public void SetPaused(bool value)
+        {
+            paused = value;
+        }
+
+        private void HoldWhilePaused()
+        {
+            while (paused && !cancelled) Thread.Sleep(80);
+        }
+
+        private int Scaled(int milliseconds)
+        {
+            double value = milliseconds / speed;
+            if (value < 0) value = 0;
+            return (int)Math.Round(value);
+        }
         // Set while a step runs when the keyboard could not be verified. It has
         // to reach the outcome, or a step that may have gone to the wrong
         // control would read as a clean success.
@@ -110,6 +163,13 @@ namespace AppStudio
                         report.Stopped++;
                         break;
                     }
+                    HoldWhilePaused();
+                    if (cancelled)
+                    {
+                        report.StopReason = "The run was stopped by the operator.";
+                        report.Stopped++;
+                        break;
+                    }
                     StepRecord step = session.Steps[index];
                     report.Attempted++;
                     Report(index + 1, session.Steps.Count, step.Headline, "running", null, false);
@@ -158,6 +218,7 @@ namespace AppStudio
             int wait = step.GapMs <= 0 ? MinGapMs : step.GapMs;
             if (wait < MinGapMs) wait = MinGapMs;
             if (wait > MaxGapMs) wait = MaxGapMs;
+            wait = Scaled(wait);
             int slept = 0;
             while (slept < wait && !cancelled)
             {
@@ -175,11 +236,16 @@ namespace AppStudio
         // measured wait, and the number is written on the step.
         private int Settle(int budgetMs)
         {
+            // The ceiling moves with the chosen speed; the two stable readings
+            // that end the wait early do not. Settling stops as soon as the
+            // application has stopped changing, so at any speed the common case
+            // costs the same and only the patience for a slow one differs.
+            int budget = Scaled(budgetMs);
             Stopwatch watch = Stopwatch.StartNew();
             string title = null;
             long front = 0;
             int stable = 0;
-            while (watch.ElapsedMilliseconds < budgetMs && !cancelled)
+            while (watch.ElapsedMilliseconds < budget && !cancelled)
             {
                 TargetWindowInfo now = WindowTools.Foreground();
                 string nowTitle = now == null ? null : now.Title;

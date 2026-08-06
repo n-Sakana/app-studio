@@ -75,6 +75,33 @@ namespace AppStudio
         public const double ModulePaneMinWidth = 220;
         public const double AssistantPaneWidth = 300;
 
+        // ---- the three panes of the full window ----
+        // Stated as proportions rather than as widths, because the window is
+        // resizable and a pane fixed at 248 is a fifth of one desktop and a
+        // twelfth of another. These are the shares the design asks for; the
+        // minimums below are what each pane stops being usable under, and the
+        // splitters are free to move anywhere between them.
+        public const double PaneLeftShare = 20;
+        public const double PaneCentreShare = 50;
+        public const double PaneRightShare = 30;
+        public const double PaneLeftMin = 180;
+        public const double PaneCentreMin = 320;
+        public const double PaneRightMin = 260;
+        // A collapsed pane is not gone: it leaves the rail that brings it back.
+        public const double PaneRailWidth = 34;
+        public const double SplitterWidth = 6;
+        // The small window. It is a bar with the recording controls on it, so it
+        // is measured by what those controls need rather than by a shape chosen
+        // for a launcher.
+        // Wide enough for everything the small bar has to carry at once: the two
+        // ways to start a session, the recording settings, which session, replay
+        // and its speed, the theme, the settings and the way back. Narrower than
+        // this and the session picker - the only route to a past recording - is
+        // the thing that gets squeezed off the end.
+        public const double MiniWidth = 940;
+        public const double MiniBarHeight = 56;
+        public const double MiniListHeight = 260;
+
         private static readonly Dictionary<string, SolidColorBrush> Brushes = new Dictionary<string, SolidColorBrush>(StringComparer.Ordinal);
         private static readonly List<ResourceDictionary> Installed = new List<ResourceDictionary>();
         private static string mode = Light;
@@ -85,10 +112,18 @@ namespace AppStudio
 
         public static FontFamily UiFont
         {
-            // The design system bundles Noto Sans JP. A text-only tool cannot carry a
-            // font file, so the same intent is met with the Japanese UI faces
-            // that ship with Windows, in the same order of preference.
-            get { return new FontFamily("Yu Gothic UI, Meiryo, Segoe UI, MS UI Gothic"); }
+            // Noto Sans first, as the design system asks for.
+            //
+            // A text-only tool cannot carry a font file, so this is stated as a
+            // preference rather than as a bundled face: where Noto Sans JP or
+            // Noto Sans is installed - it ships with several editors, with
+            // Office, and with anything that has pulled Google Fonts down - it is
+            // what the product draws with. Where it is not, WPF walks the rest of
+            // this list and lands on the Japanese UI faces Windows ships with,
+            // which is what the product used before. Naming a face that is not
+            // present costs nothing at all; naming it second would mean never
+            // using it on the machines that do have it.
+            get { return new FontFamily("Noto Sans JP, Noto Sans CJK JP, Noto Sans, Yu Gothic UI, Meiryo, Segoe UI, MS UI Gothic"); }
         }
 
         public static FontFamily CodeFont
@@ -372,7 +407,7 @@ namespace AppStudio
 
         private static string[] FragmentNames()
         {
-            return new string[] { "scrollbar", "button", "textbox", "list", "accordion", "checkbox", "combobox", "wraptemplate", "tree" };
+            return new string[] { "scrollbar", "button", "textbox", "list", "accordion", "checkbox", "combobox", "wraptemplate", "tree", "controls" };
         }
 
         private static string Wrap(string body)
@@ -400,8 +435,249 @@ namespace AppStudio
             parts.Add(ComboBoxXaml());
             parts.Add(WrapTemplateXaml());
             parts.Add(TreeXaml());
+            parts.Add(ControlsXaml());
 
             return parts.ToArray();
+        }
+
+        // The parts the restructured window is assembled from: a switch that
+        // looks like a switch, a button that carries a drawing instead of a
+        // sentence, a tab, and a slider.
+        //
+        // A setting that is either on or off is a switch. It used to be a button
+        // whose label said which state it was in - "Pointer info: on" - which
+        // asks the reader to work out from the caption whether they are looking
+        // at the current state or at the offer. A switch answers that by its
+        // shape: the knob is on the side the state is, and the sentence beside it
+        // says what the setting is about rather than what pressing it does.
+        private static string ControlsXaml()
+        {
+            return
+"<Style x:Key='AppSwitch' TargetType='ToggleButton'>" +
+"  <Setter Property='OverridesDefaultStyle' Value='True'/>" +
+"  <Setter Property='Cursor' Value='Hand'/>" +
+"  <Setter Property='HorizontalAlignment' Value='Left'/>" +
+"  <Setter Property='FontSize' Value='13'/>" +
+"  <Setter Property='Focusable' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='ToggleButton'>" +
+"        <Border Background='Transparent' Padding='0,3,0,3'>" +
+"          <StackPanel Orientation='Horizontal'>" +
+"            <Border x:Name='track' Width='38' Height='22' CornerRadius='11' VerticalAlignment='Center' " +
+"                    Background='{DynamicResource SurfaceSunken}' BorderBrush='{DynamicResource Border}' BorderThickness='1'>" +
+"              <Border x:Name='knob' Width='16' Height='16' CornerRadius='8' HorizontalAlignment='Left' Margin='2,0,0,0' " +
+"                      Background='{DynamicResource TextMuted}'/>" +
+"            </Border>" +
+"            <ContentPresenter x:Name='label' Margin='10,0,0,0' VerticalAlignment='Center' " +
+"                              TextBlock.Foreground='{DynamicResource Text}'/>" +
+"          </StackPanel>" +
+"        </Border>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='track' Property='BorderBrush' Value='{DynamicResource BorderStrong}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsChecked' Value='True'>" +
+"            <Setter TargetName='track' Property='Background' Value='{DynamicResource Accent}'/>" +
+"            <Setter TargetName='track' Property='BorderBrush' Value='{DynamicResource Accent}'/>" +
+"            <Setter TargetName='knob' Property='HorizontalAlignment' Value='Right'/>" +
+"            <Setter TargetName='knob' Property='Margin' Value='0,0,2,0'/>" +
+"            <Setter TargetName='knob' Property='Background' Value='{DynamicResource TextOnAccent}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsKeyboardFocused' Value='True'>" +
+"            <Setter TargetName='track' Property='BorderBrush' Value='{DynamicResource Focus}'/>" +
+"            <Setter TargetName='track' Property='BorderThickness' Value='2'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsEnabled' Value='False'>" +
+"            <Setter TargetName='label' Property='TextBlock.Foreground' Value='{DynamicResource TextDisabled}'/>" +
+"            <Setter TargetName='track' Property='Opacity' Value='0.5'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppIconButton' TargetType='Button'>" +
+"  <Setter Property='Width' Value='40'/>" +
+"  <Setter Property='Height' Value='40'/>" +
+"  <Setter Property='Cursor' Value='Hand'/>" +
+"  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='Button'>" +
+"        <Border x:Name='shell' CornerRadius='4' Background='Transparent' BorderBrush='Transparent' BorderThickness='1'>" +
+"          <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>" +
+"        </Border>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='shell' Property='Background' Value='{DynamicResource SurfaceHover}'/>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource Border}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsKeyboardFocused' Value='True'>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource Focus}'/>" +
+"            <Setter TargetName='shell' Property='BorderThickness' Value='2'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsEnabled' Value='False'>" +
+"            <Setter TargetName='shell' Property='Opacity' Value='0.35'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppIconToggle' TargetType='ToggleButton'>" +
+"  <Setter Property='Width' Value='40'/>" +
+"  <Setter Property='Height' Value='40'/>" +
+"  <Setter Property='Cursor' Value='Hand'/>" +
+"  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='ToggleButton'>" +
+"        <Border x:Name='shell' CornerRadius='4' Background='Transparent' BorderBrush='Transparent' BorderThickness='1'>" +
+"          <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>" +
+"        </Border>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='shell' Property='Background' Value='{DynamicResource SurfaceHover}'/>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource Border}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsChecked' Value='True'>" +
+"            <Setter TargetName='shell' Property='Background' Value='{DynamicResource AccentSoft}'/>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource Accent}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsKeyboardFocused' Value='True'>" +
+"            <Setter TargetName='shell' Property='BorderBrush' Value='{DynamicResource Focus}'/>" +
+"            <Setter TargetName='shell' Property='BorderThickness' Value='2'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsEnabled' Value='False'>" +
+"            <Setter TargetName='shell' Property='Opacity' Value='0.35'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppTab' TargetType='ToggleButton'>" +
+"  <Setter Property='MinHeight' Value='34'/>" +
+"  <Setter Property='Cursor' Value='Hand'/>" +
+"  <Setter Property='FontSize' Value='13'/>" +
+"  <Setter Property='FontWeight' Value='SemiBold'/>" +
+"  <Setter Property='Padding' Value='12,0,12,0'/>" +
+"  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='ToggleButton'>" +
+"        <Grid Background='Transparent'>" +
+"          <Grid.RowDefinitions>" +
+"            <RowDefinition Height='*'/>" +
+"            <RowDefinition Height='2'/>" +
+"          </Grid.RowDefinitions>" +
+"          <ContentPresenter x:Name='label' Grid.Row='0' HorizontalAlignment='Center' VerticalAlignment='Center' " +
+"                            Margin='{TemplateBinding Padding}' TextBlock.Foreground='{DynamicResource TextMuted}'/>" +
+"          <Border x:Name='rule' Grid.Row='1' Background='Transparent' CornerRadius='1'/>" +
+"        </Grid>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='label' Property='TextBlock.Foreground' Value='{DynamicResource TextSub}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsChecked' Value='True'>" +
+"            <Setter TargetName='label' Property='TextBlock.Foreground' Value='{DynamicResource Text}'/>" +
+"            <Setter TargetName='rule' Property='Background' Value='{DynamicResource Accent}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsKeyboardFocused' Value='True'>" +
+"            <Setter TargetName='rule' Property='Background' Value='{DynamicResource Focus}'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppSliderThumb' TargetType='Thumb'>" +
+"  <Setter Property='OverridesDefaultStyle' Value='True'/>" +
+"  <Setter Property='Width' Value='16'/>" +
+"  <Setter Property='Height' Value='16'/>" +
+"  <Setter Property='Cursor' Value='Hand'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='Thumb'>" +
+"        <Border CornerRadius='8' Background='{DynamicResource Accent}' " +
+"                BorderBrush='{DynamicResource Surface}' BorderThickness='2'/>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppSliderRepeat' TargetType='RepeatButton'>" +
+"  <Setter Property='OverridesDefaultStyle' Value='True'/>" +
+"  <Setter Property='Focusable' Value='False'/>" +
+"  <Setter Property='IsTabStop' Value='False'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='RepeatButton'>" +
+"        <Border Background='Transparent'/>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppSlider' TargetType='Slider'>" +
+"  <Setter Property='Height' Value='24'/>" +
+"  <Setter Property='IsMoveToPointEnabled' Value='True'/>" +
+"  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='Slider'>" +
+"        <Grid Background='Transparent'>" +
+"          <Border Height='4' CornerRadius='2' VerticalAlignment='Center' " +
+"                  Background='{DynamicResource SurfaceSunken}' BorderBrush='{DynamicResource Border}' BorderThickness='1'/>" +
+"          <Track x:Name='PART_Track'>" +
+"            <Track.DecreaseRepeatButton>" +
+"              <RepeatButton Style='{StaticResource AppSliderRepeat}' Command='Slider.DecreaseLarge'/>" +
+"            </Track.DecreaseRepeatButton>" +
+"            <Track.Thumb>" +
+"              <Thumb Style='{StaticResource AppSliderThumb}'/>" +
+"            </Track.Thumb>" +
+"            <Track.IncreaseRepeatButton>" +
+"              <RepeatButton Style='{StaticResource AppSliderRepeat}' Command='Slider.IncreaseLarge'/>" +
+"            </Track.IncreaseRepeatButton>" +
+"          </Track>" +
+"        </Grid>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsEnabled' Value='False'>" +
+"            <Setter Property='Opacity' Value='0.4'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+"<Style x:Key='AppSplitter' TargetType='GridSplitter'>" +
+"  <Setter Property='Background' Value='Transparent'/>" +
+"  <Setter Property='Width' Value='6'/>" +
+"  <Setter Property='HorizontalAlignment' Value='Center'/>" +
+"  <Setter Property='VerticalAlignment' Value='Stretch'/>" +
+"  <Setter Property='Cursor' Value='SizeWE'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='GridSplitter'>" +
+"        <Border Background='Transparent'>" +
+"          <Border x:Name='rule' Width='1' Background='{DynamicResource BorderSubtle}' HorizontalAlignment='Center'/>" +
+"        </Border>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='rule' Property='Width' Value='3'/>" +
+"            <Setter TargetName='rule' Property='Background' Value='{DynamicResource Accent}'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>";
         }
 
         // The project tree. The stock TreeViewItem paints the system highlight
@@ -658,15 +934,10 @@ namespace AppStudio
 "  <Setter Property='MinWidth' Value='0'/>" +
 "</Style>" +
 
-"<Style x:Key='AppIconButton' TargetType='Button' BasedOn='{StaticResource AppButton}'>" +
-"  <Setter Property='Height' Value='28'/>" +
-"  <Setter Property='MinWidth' Value='30'/>" +
-"  <Setter Property='Padding' Value='8,0,8,0'/>" +
-"  <Setter Property='FontSize' Value='12'/>" +
-"  <Setter Property='FontWeight' Value='Normal'/>" +
-"  <Setter Property='Background' Value='Transparent'/>" +
-"  <Setter Property='Foreground' Value='{DynamicResource TextMuted}'/>" +
-"</Style>" +
+// AppIconButton is defined once, in the controls fragment, because a control
+// that carries a drawing is now a shape of its own rather than a small text
+// button with the text left out. Two styles under one key is a rule nobody can
+// read off the screen: whichever fragment happens to be applied last wins.
 
 // A toggle that reads as a toggle: the same size and shape as a compact
 // button, but it says which of two states it is in rather than what

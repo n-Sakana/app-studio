@@ -59,9 +59,13 @@ namespace AppStudio
 
         private Grid root;
         private FrameworkElement findBar;
+        private Border numberColumn;
         private string language = ScriptLanguages.PowerShell;
         private bool painting;
         private bool suppress;
+        // On by default. A line of generated code is long, and a reader who has
+        // to scroll sideways to see the end of it is a reader who does not.
+        private bool wrap = true;
         private System.Windows.Threading.DispatcherTimer repaint;
 
         // Raised after the operator changed the text, never while the text is
@@ -131,6 +135,61 @@ namespace AppStudio
         {
             language = ScriptLanguages.IsKnown(value) ? value : ScriptLanguages.PowerShell;
             Repaint();
+        }
+
+        // Wrapping, so that reading a file does not require driving it sideways.
+        //
+        // A generated workflow line names a window, an element and a value, and
+        // is routinely past a hundred characters. Without wrapping the only way
+        // to read the end of it is a horizontal scrollbar, which also means the
+        // line the operator is looking for can be off the right hand edge with
+        // nothing on screen saying so.
+        //
+        // The colour is painted on a layer behind the box being typed into, and
+        // the two only line up if they break their lines in the same places. So
+        // this sets both, and the layer behind is pinned to the width of the
+        // viewport rather than being allowed to size to its longest line; a
+        // wrapping layer that is a thousand units wide wraps in different places
+        // from a box that is four hundred wide.
+        public void SetWrap(bool value)
+        {
+            wrap = value;
+            input.TextWrapping = value ? TextWrapping.Wrap : TextWrapping.NoWrap;
+            input.HorizontalScrollBarVisibility = value ? ScrollBarVisibility.Disabled : ScrollBarVisibility.Auto;
+            paint.TextWrapping = value ? TextWrapping.Wrap : TextWrapping.NoWrap;
+            // The gutter counts lines of the file, and a wrapped line is still
+            // one line of the file. Numbering what is on screen instead would
+            // make the numbers disagree with every error message the compiler
+            // ever produces, so when wrapping is on the column is put away
+            // rather than made to lie.
+            if (numberColumn != null) numberColumn.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
+            SizePaint();
+            Repaint();
+        }
+
+        public bool Wrapped { get { return wrap; } }
+
+        // A file that is shown but not edited. The caret is left visible so the
+        // text can still be selected and copied; only writing is refused.
+        public void SetReadOnly(bool value)
+        {
+            input.IsReadOnly = value;
+            input.IsReadOnlyCaretVisible = true;
+        }
+
+        public bool IsReadOnly { get { return input.IsReadOnly; } }
+
+        // The colour layer has to break its lines exactly where the box above it
+        // does, so while wrapping is on it is given the box's own width.
+        private void SizePaint()
+        {
+            if (!wrap)
+            {
+                paint.Width = Double.NaN;
+                return;
+            }
+            double room = input.ActualWidth - input.Padding.Left - input.Padding.Right - 2;
+            paint.Width = room > 40 ? room : 40;
         }
 
         // Built once and handed back afterwards, so moving the editor between
@@ -260,6 +319,7 @@ namespace AppStudio
             gutter.RenderTransform = gutterShift;
             TextOptions.SetTextFormattingMode(gutter, TextFormattingMode.Display);
             numbers.Child = Unbounded(gutter);
+            numberColumn = numbers;
             Grid.SetColumn(numbers, 0);
             grid.Children.Add(numbers);
 
@@ -326,6 +386,11 @@ namespace AppStudio
 
             Grid.SetColumn(stack, 1);
             grid.Children.Add(stack);
+            // Wrapping depends on how wide the box actually is, which is not
+            // known until it has been laid out and changes again every time a
+            // pane beside it is folded or a splitter is dragged.
+            input.SizeChanged += delegate { SizePaint(); };
+            SetWrap(wrap);
 
             Border frame = new Border();
             frame.BorderBrush = Theme.Border;

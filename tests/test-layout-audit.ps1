@@ -234,79 +234,93 @@ try {
     Start-Sleep -Milliseconds 1600
     $handle = [IntPtr][int64]$window.Current.NativeWindowHandle
 
-    $null = Audit 'launcher' $window ([AppStudio.WindowTools]::GetPhysicalRect($handle))
-
-    # settings, which is a window of its own
-    $null = Press $window (Message 'compact-options.txt' 'Settings')
-    Start-Sleep -Milliseconds 1200
-    $dialogHandle = [IntPtr]::Zero
-    foreach ($w in [AppStudio.WindowTools]::ListStackOrder((New-Object 'long[]' 0), 0)) {
-        if ($w.ProcessId -ne $app.Id) { continue }
-        if ($w.Title -ne (Message 'settings-title.txt' 'Detailed settings')) { continue }
-        $dialogHandle = [IntPtr]$w.Hwnd
-    }
-    if ($dialogHandle -ne [IntPtr]::Zero) {
-        $dialog = [System.Windows.Automation.AutomationElement]::FromHandle($dialogHandle)
-        $null = Audit 'settings' $dialog ([AppStudio.WindowTools]::GetPhysicalRect($dialogHandle))
-        $close = Find-Named $dialog ([System.Windows.Automation.ControlType]::Button) (Message 'settings-close.txt' 'Close')
-        if ($null -ne $close) { $close.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke() }
-        Start-Sleep -Milliseconds 900
-    } else { Note 'settings: the dialog did not open' }
-
-    # the result screen, then the code screen, at several sizes
-    $null = Press $window (Message 'compact-results.txt' 'Results')
-    $list = (All-Of $window ([System.Windows.Automation.ControlType]::List))[0]
-    $items = $list.FindAll([System.Windows.Automation.TreeScope]::Children,
-        (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)))
-    if ($items.Count -lt 1) { throw 'the seeded session is not in the list' }
-    $items[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
-    Start-Sleep -Milliseconds 1500
-
     $work = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    foreach ($size in @(@(0, 0), @(1400, 900), @(1250, 800))) {
+
+    # The seeded session, chosen the only way there is to choose one now.
+    $picker = (All-Of $window ([System.Windows.Automation.ControlType]::ComboBox))
+    if ($picker.Count -lt 1) { throw 'the window has no session picker' }
+    $expand = $picker[0].GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+    $expand.Expand(); Start-Sleep -Milliseconds 700
+    $items = $picker[0].FindAll([System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)))
+    if ($items.Count -lt 1) { throw 'the seeded session is not in the picker' }
+    $items[0].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    Start-Sleep -Milliseconds 1800
+
+    # The two dialogs, each a window of its own.
+    foreach ($pair in @(@((Message 'compact-options.txt' 'Settings'), (Message 'settings-title.txt' 'Settings')),
+                        @((Message 'record-settings.txt' 'Recording settings'), (Message 'record-settings.txt' 'Recording settings')))) {
+        $null = Press $window $pair[0]
+        Start-Sleep -Milliseconds 1200
+        $dialogHandle = [IntPtr]::Zero
+        foreach ($w in [AppStudio.WindowTools]::ListStackOrder((New-Object 'long[]' 0), 0)) {
+            if ($w.ProcessId -ne $app.Id) { continue }
+            if ($w.Title -ne $pair[1]) { continue }
+            $dialogHandle = [IntPtr]$w.Hwnd
+        }
+        if ($dialogHandle -ne [IntPtr]::Zero) {
+            $dialog = [System.Windows.Automation.AutomationElement]::FromHandle($dialogHandle)
+            $null = Audit ('dialog:' + $pair[1]) $dialog ([AppStudio.WindowTools]::GetPhysicalRect($dialogHandle))
+            $close = Find-Named $dialog ([System.Windows.Automation.ControlType]::Button) (Message 'settings-close.txt' 'Close')
+            if ($null -ne $close) { $close.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke() }
+            Start-Sleep -Milliseconds 900
+        } else { Note ($pair[1] + ': the dialog did not open') }
+    }
+
+    # The full window at several widths, including a narrow one. A layout that
+    # only holds at the size it was designed at is a layout with a hidden
+    # minimum, and the thing that falls off the end is whatever is last in a row.
+    foreach ($size in @(@(0, 0), @(1500, 950), @(1320, 860), @(1120, 780))) {
         $tag = 'default'
         if ($size[0] -gt 0) {
             [AppStudio.WindowTools]::Move($handle, 40, 20, $size[0], $size[1]) | Out-Null
-            Start-Sleep -Milliseconds 1000
+            Start-Sleep -Milliseconds 1100
             $tag = ($size[0].ToString() + 'x' + $size[1])
         }
         $bounds = [AppStudio.WindowTools]::GetPhysicalRect($handle)
         if (($bounds.Y + $bounds.Height) -gt ($work.Y + $work.Height) -or $bounds.Y -lt $work.Y) {
-            Note ('result@' + $tag + ': the window is not inside the work area: y=' + $bounds.Y + ' h=' + $bounds.Height)
+            Note ('full@' + $tag + ': the window is not inside the work area: y=' + $bounds.Y + ' h=' + $bounds.Height)
         }
-        $null = Audit ('result@' + $tag) $window $bounds
-    }
+        $null = Audit ('full@' + $tag) $window $bounds
 
-    $null = Press $window (Message 'detail-code.txt' 'Edit as code')
-    Start-Sleep -Milliseconds 1200
-    foreach ($size in @(@(0, 0), @(1500, 950), @(1320, 800))) {
-        $tag = 'default'
-        if ($size[0] -gt 0) {
-            [AppStudio.WindowTools]::Move($handle, 40, 20, $size[0], $size[1]) | Out-Null
-            Start-Sleep -Milliseconds 1000
-            $tag = ($size[0].ToString() + 'x' + $size[1])
+        # Each pane folded away, and the editor with the whole window.
+        $foldLeft = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'pane-modules-hide.txt' 'Fold the modules away')
+        if ($null -ne $foldLeft) {
+            $foldLeft.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+            Start-Sleep -Milliseconds 900
+            $null = Audit ('left-folded@' + $tag) $window ([AppStudio.WindowTools]::GetPhysicalRect($handle))
+            $show = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'pane-modules-show.txt' 'Open the modules')
+            if ($null -ne $show) { $show.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); Start-Sleep -Milliseconds 900 }
         }
-        $bounds = [AppStudio.WindowTools]::GetPhysicalRect($handle)
-        $null = Audit ('code@' + $tag) $window $bounds
-        # and the same screen while concentrating
-        $enter = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'code-full-enter.txt' 'Edit at full width')
+        $enter = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'code-full-enter.txt' 'Make the editor full width')
         if ($null -ne $enter) {
             $enter.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
             Start-Sleep -Milliseconds 900
-            $null = Audit ('code-full@' + $tag) $window ([AppStudio.WindowTools]::GetPhysicalRect($handle))
-            $leave = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'code-full-exit.txt' 'Leave full width editing')
-            if ($null -ne $leave) {
-                $leave.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-                Start-Sleep -Milliseconds 900
-            }
+            $null = Audit ('editor-full@' + $tag) $window ([AppStudio.WindowTools]::GetPhysicalRect($handle))
+            $leave = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'code-full-exit.txt' 'Leave full width')
+            if ($null -ne $leave) { $leave.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); Start-Sleep -Milliseconds 900 }
         }
     }
+
+    # The small bar, open and folded. Everything on it is on one row, so it is
+    # the shape most likely to push its last control off the end.
+    $null = Press $window (Message 'view-mini.txt' 'Fold down to the small bar')
+    Start-Sleep -Milliseconds 1400
+    $null = Audit 'mini' $window ([AppStudio.WindowTools]::GetPhysicalRect($handle))
+    $foldList = Find-Named $window ([System.Windows.Automation.ControlType]::Button) (Message 'mini-fold.txt' 'Fold the step list away')
+    if ($null -ne $foldList) {
+        $foldList.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Start-Sleep -Milliseconds 1100
+        $null = Audit 'mini-folded' $window ([AppStudio.WindowTools]::GetPhysicalRect($handle))
+    }
+    $null = Press $window (Message 'view-full.txt' 'Back to the full view')
+    Start-Sleep -Milliseconds 1400
 
     if ($problems.Count -gt 0) {
         foreach ($problem in $problems) { Write-Output ('LAYOUT ' + $problem) }
         throw ($problems.Count.ToString() + ' layout fault(s) across the screens; see the LAYOUT lines above')
     }
-    Write-Output ('PASS test-layout-audit measured=' + $measured + ' screens=10 clipped=0 sizeless=0 buttonHeights=1')
+    Write-Output ('PASS test-layout-audit measured=' + $measured + ' screens=13 clipped=0 sizeless=0 buttonHeights=1')
 } finally {
     if ($null -ne $app) { try { $app.CloseMainWindow() | Out-Null; Start-Sleep -Milliseconds 800; if (-not $app.HasExited) { $app.Kill() } } catch { } }
     if ($null -ne $seedFolder -and (Test-Path -LiteralPath $seedFolder)) { Remove-Item -LiteralPath $seedFolder -Recurse -Force -ErrorAction SilentlyContinue }

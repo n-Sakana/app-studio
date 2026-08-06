@@ -32,9 +32,9 @@ $tests = @(
     'test-live-canvas.ps1',
     'test-autosave.ps1',
     'test-scan.ps1',
-    'test-ui-flow.ps1',
-    'test-code-ui.ps1',
+    'test-ui-shell.ps1',
     'test-layout-audit.ps1',
+    'test-hud-fit.ps1',
     'test-hang-recovery.ps1'
 )
 # These move the real pointer and send real keystrokes, so they disturb whoever
@@ -52,6 +52,8 @@ $realInputTests = @(
     'test-notepad-e2e.ps1',
     'test-calculator-e2e.ps1',
     'test-code-run-e2e.ps1',
+    'test-artefact-e2e.ps1',
+    'test-replay-fidelity.ps1',
     'test-vba-host.ps1',
     'test-vba-build.ps1',
     'test-inspector.ps1'
