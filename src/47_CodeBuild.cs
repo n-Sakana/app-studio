@@ -297,6 +297,27 @@ namespace AppStudio
             return text.ToString();
         }
 
+        // The PowerShell of a built artefact, on its own.
+        //
+        // Same wrapper and same tail as a real build, with the here-string that
+        // carries the C# left as a marked gap rather than filled in. It is used
+        // where the wrapper itself is the subject - a question about how the
+        // handed over file starts, where it logs, what it does when a run fails -
+        // and repeating several hundred lines of engine inside it there would
+        // bury the thing being asked about in the thing that is already beside
+        // it.
+        public static string WrapperOnly()
+        {
+            StringBuilder text = new StringBuilder();
+            Append(text, Wrapper(true));
+            text.AppendLine("$engine = @'");
+            text.AppendLine("// The C# modules are placed here by the build, in reading order, each in a");
+            text.AppendLine("// #region of its own. They are not repeated in this listing.");
+            text.AppendLine("'@");
+            Append(text, Tail());
+            return text.ToString();
+        }
+
         // The same wrapper and the same engine, compiled and then not run. A
         // check that compiled something other than what a run compiles would be
         // checking the wrong thing.

@@ -6,7 +6,8 @@ namespace AppStudio
     using System.IO;
     using System.Text;
 
-    // One of the two files the operator attaches to the chat.
+    // One file the operator attaches to the chat. There is a row here only for a
+    // file this request actually had written for it.
     public sealed class HandoffAttachment
     {
         public string Name;
@@ -24,16 +25,25 @@ namespace AppStudio
         public string Problem;
         public string Folder;
         public List<HandoffAttachment> Attachments = new List<HandoffAttachment>();
+        // What was chosen, and what came of choosing it. Carried here so the
+        // window can show the same account the file gives, rather than a second
+        // one assembled from the same parts.
+        public AiPicks Picks;
+        public SessionMdResult Markdown;
+        public ScreensPdfResult Pdf;
+        public List<AiWarning> Warnings = new List<AiWarning>();
 
-        // Whether both files the request tells the assistant to read are
-        // actually on disk. A request that names an attachment that was never
-        // written is a request that cannot be answered, and saying so before
-        // the operator pastes it is the whole point of looking.
+        // Whether every file this request tells an assistant to read is on disk.
+        //
+        // It is no longer "are there two of them". A request that names no
+        // attachment is a complete request - it asks a question and says there is
+        // nothing attached - and calling that unready would refuse to send the
+        // one thing the operator chose to send. What is checked is the promise:
+        // nothing is named that is not there.
         public bool AttachmentsReady
         {
             get
             {
-                if (Attachments.Count != 2) return false;
                 for (int index = 0; index < Attachments.Count; index++)
                 {
                     if (!Attachments[index].Exists) return false;
@@ -55,20 +65,18 @@ namespace AppStudio
         }
     }
 
-    // The text that goes to an assistant, and the one shape an answer may come
-    // back in.
+    // The text that goes to an assistant, and - when the operator asked for one -
+    // the one shape an answer may come back in.
     //
-    // It is short on purpose, and it is one copy. What the assistant has to read
-    // - the machine, the recording, the ledger, what could not be obtained and
-    // the automation as it stands - is in the two files that are attached with
-    // it, which is where all of that already lives. Putting it in here as well
-    // made the request long enough to need cutting into numbered pieces, and a
-    // request the operator has to paste four times is a request three of whose
-    // pastes can go wrong.
+    // It is short on purpose, and it is one copy. What an assistant has to read is
+    // in the files attached with it. Putting it in here as well made the request
+    // long enough to need cutting into numbered pieces, and a request the operator
+    // has to paste four times is a request three of whose pastes can go wrong.
     //
-    // So there is no cutting here and there is nothing to cut. The only thing
-    // that is ever split is the answer, by the assistant, one file at a time,
-    // and that is the assistant's side of the protocol.
+    // Nothing here is fixed any more. It does not say there are two files, it does
+    // not say the code is in a particular numbered section, and it does not say
+    // everything is included: it says what was actually generated this time, by
+    // reading the result of generating it.
     public static class Handoff
     {
         public const string Marker = "#@APPSTUDIO";
@@ -101,29 +109,73 @@ namespace AppStudio
 
         public static HandoffResult Build(StudioSession session, CodeProject project, string requestText, string requestId)
         {
+            return Build(session, project, requestText, requestId, null, null, null);
+        }
+
+        public static HandoffResult Build(StudioSession session, CodeProject project, string requestText, string requestId,
+            AiPicks picks, SessionMdResult markdown, ScreensPdfResult pdf)
+        {
             HandoffResult result = new HandoffResult();
             result.RequestId = IsRequestId(requestId) ? requestId : NewRequestId();
+            result.Picks = picks == null ? AiPicks.Default() : picks;
+            result.Markdown = markdown;
+            result.Pdf = pdf;
+            result.Warnings = result.Picks.Warnings();
             Look(result, session);
             StringBuilder text = new StringBuilder();
             Head(text, result);
             Ask(text, requestText);
-            Modules(text, project);
-            ReturnFormat(text, result.RequestId);
+            Modules(text, project, result);
+            if (result.Picks.Has(AiItems.Protocol)) ReturnFormat(text, result.RequestId);
+            else NoProtocol(text);
             result.Text = text.ToString();
             return result;
         }
 
-        // What is attached, and whether it is really there. Nothing here creates
-        // the files; it reports what the session actually wrote.
+        // What is attached, and whether it is really there.
+        //
+        // Nothing here creates a file. A file is listed only when this request had
+        // it written, so a document left over from an earlier request with a
+        // different selection is never presented as part of this one.
         private static void Look(HandoffResult result, StudioSession session)
         {
             result.Folder = session == null ? null : session.AiFolder;
-            result.Attachments.Add(Attachment(result.Folder, SessionFile,
-                "the machine and the coordinate system, what was and was not written down, the applications, " +
-                "the screens, the elements, what the operator did with the intervals and what held the keyboard, " +
-                "the replay results, what could not be obtained, and the automation as it stands"));
-            result.Attachments.Add(Attachment(result.Folder, ScreensFile,
-                "one page per screen, labelled with the screen id that " + SessionFile + " uses"));
+            bool wantsDocument = result.Picks.AnyDocument;
+            bool documentWritten = result.Markdown == null ? wantsDocument : result.Markdown.Written;
+            if (wantsDocument && documentWritten)
+            {
+                result.Attachments.Add(Attachment(result.Folder, SessionFile, Describe(result)));
+            }
+            if (result.Picks.Has(AiItems.Pdf))
+            {
+                bool pictureWritten = result.Pdf == null || result.Pdf.Written;
+                if (pictureWritten)
+                {
+                    result.Attachments.Add(Attachment(result.Folder, ScreensFile,
+                        "one page per screen, labelled with the screen id that " + SessionFile + " uses"));
+                }
+            }
+        }
+
+        // What session.md holds this time, in the words of the parts that are
+        // actually in it.
+        private static string Describe(HandoffResult result)
+        {
+            if (result.Markdown == null || result.Markdown.Sections.Count == 0)
+            {
+                return "what was recorded and what the automation looks like";
+            }
+            // The titles as they are written at the top of each part. They are not
+            // folded to lower case to fit the sentence: "the C# automation" is a
+            // name, and "the c# automation" is a different string from the one the
+            // reader is being sent to look for.
+            StringBuilder text = new StringBuilder();
+            for (int index = 0; index < result.Markdown.Sections.Count; index++)
+            {
+                if (index != 0) text.Append(index == result.Markdown.Sections.Count - 1 ? " and " : ", ");
+                text.Append('"').Append(result.Markdown.Sections[index].Title).Append('"');
+            }
+            return text.ToString();
         }
 
         private static HandoffAttachment Attachment(string folder, string name, string what)
@@ -153,11 +205,22 @@ namespace AppStudio
             text.AppendLine();
             text.AppendLine("Request id: `" + result.RequestId + "`");
             text.AppendLine();
-            text.AppendLine("## The two files attached with this message");
-            text.AppendLine();
-            text.AppendLine("Everything you need is in them. Read both before you answer. Do not ask for the");
-            text.AppendLine("code, the log or the screenshots to be pasted into the chat: they are attached,");
-            text.AppendLine("in full, with nothing left out.");
+            if (result.Attachments.Count == 0)
+            {
+                // Said plainly, because the alternative is a request that tells an
+                // assistant to go and read files that were never written.
+                text.AppendLine("## Nothing is attached to this message");
+                text.AppendLine();
+                text.AppendLine("There are no attachments. The operator chose to send the question on its own, so");
+                text.AppendLine("there is no recording, no ledger and no code here to read. Do not ask for an");
+                text.AppendLine("attachment and do not assume one was lost: answer from what is written below, or");
+                text.AppendLine("say what you would need.");
+                text.AppendLine();
+                return;
+            }
+            text.AppendLine(result.Attachments.Count == 1
+                ? "## The file attached with this message"
+                : "## The " + Count(result.Attachments.Count) + " files attached with this message");
             text.AppendLine();
             for (int index = 0; index < result.Attachments.Count; index++)
             {
@@ -165,14 +228,73 @@ namespace AppStudio
                 text.AppendLine("- **`" + attachment.Name + "`** - " + attachment.What + ".");
             }
             text.AppendLine();
-            text.AppendLine("The automation you are being asked to change is section 10 of `" + SessionFile + "`,");
-            text.AppendLine("written out module by module. That section also states the operations both");
-            text.AppendLine("languages share and the rules the code may not trade away. Read it before you");
-            text.AppendLine("change anything, and keep those rules.");
+            text.AppendLine(result.Attachments.Count == 1
+                ? "Read it before you answer."
+                : "Read them before you answer.");
             text.AppendLine();
-            text.AppendLine("If either file is missing from this conversation, say so and stop. Do not");
+            // What is in the attachment is stated from the attachment, so a part
+            // the operator left out is never claimed here.
+            if (result.Markdown != null && result.Markdown.Sections.Count > 0)
+            {
+                text.AppendLine("`" + SessionFile + "` has these parts, and only these:");
+                text.AppendLine();
+                for (int index = 0; index < result.Markdown.Sections.Count; index++)
+                {
+                    SessionMdSection section = result.Markdown.Sections[index];
+                    text.AppendLine("- " + section.Number.ToString(CultureInfo.InvariantCulture) + ". " + section.Title);
+                }
+                text.AppendLine();
+                string code = CodeReference(result);
+                if (code != null)
+                {
+                    text.AppendLine("The automation you are being asked about is in " + code + ", written out module by");
+                    text.AppendLine("module and in full.");
+                    text.AppendLine();
+                }
+                string guidance = result.Markdown.Reference(AiItems.Guidance);
+                if (guidance != null)
+                {
+                    text.AppendLine("The operations both languages share, and the rules the code may not trade away, are in " +
+                        guidance + ".");
+                    text.AppendLine("Read it before you change anything, and keep those rules.");
+                    text.AppendLine();
+                }
+                text.AppendLine("Anything not in that list was left out deliberately by the operator. It is not missing");
+                text.AppendLine("by accident, so do not reconstruct it and do not answer as though you had seen it. If");
+                text.AppendLine("what is there is not enough to answer, say what is missing.");
+                text.AppendLine();
+            }
+            text.AppendLine("If a file named above is missing from this conversation, say so and stop. Do not");
             text.AppendLine("reconstruct what you cannot see.");
             text.AppendLine();
+        }
+
+        // Where the code is, named by whichever parts of it were included.
+        private static string CodeReference(HandoffResult result)
+        {
+            List<string> parts = new List<string>();
+            string engine = result.Markdown.Reference(AiItems.Engine);
+            if (engine != null) parts.Add(engine);
+            string vba = result.Markdown.Reference(AiItems.Vba);
+            if (vba != null) parts.Add(vba);
+            string wrapper = result.Markdown.Reference(AiItems.Wrapper);
+            if (wrapper != null) parts.Add(wrapper);
+            if (parts.Count == 0) return null;
+            StringBuilder text = new StringBuilder();
+            for (int index = 0; index < parts.Count; index++)
+            {
+                if (index != 0) text.Append(index == parts.Count - 1 ? " and " : ", ");
+                text.Append(parts[index]);
+            }
+            return text.ToString();
+        }
+
+        private static string Count(int value)
+        {
+            if (value == 2) return "two";
+            if (value == 3) return "three";
+            if (value == 4) return "four";
+            return value.ToString(CultureInfo.InvariantCulture);
         }
 
         private static void Ask(StringBuilder text, string requestText)
@@ -180,52 +302,117 @@ namespace AppStudio
             text.AppendLine("## What is being asked");
             text.AppendLine();
             string ask = requestText == null ? "" : requestText.Trim();
+            // Nothing is invented here. A request nobody wrote is a request that
+            // gets sent unread, so an empty box says it is empty rather than
+            // having the product state what the operator wanted.
             text.AppendLine(ask.Length == 0
-                ? "Improve the automation so it carries out the recorded procedure reliably. Keep every safety rule stated in section 10 of the attached file."
+                ? "*(The operator did not write a request. Nothing is being asked for yet - do not guess at one.)*"
                 : ask);
             text.AppendLine();
         }
 
-        // The names and sizes of what is there, so the answer can say which
-        // module it is returning. No code: the code is in the attachment.
-        private static void Modules(StringBuilder text, CodeProject project)
+        // The names of the code that is actually in the attachment, so an answer
+        // can say which module it is returning. No code here: the code is in the
+        // attachment, when there is any.
+        private static void Modules(StringBuilder text, CodeProject project, HandoffResult result)
         {
             text.AppendLine("## The modules");
             text.AppendLine();
-            if (project == null)
+            bool engine = result.Picks.Has(AiItems.Engine);
+            bool vba = result.Picks.Has(AiItems.Vba);
+            bool wrapper = result.Picks.Has(AiItems.Wrapper);
+            if (!engine && !vba && !wrapper)
+            {
+                text.AppendLine("No code was handed over. The operator did not include any, so there is no module here");
+                text.AppendLine("to change and none to return. Answer about what to do rather than with code you have");
+                text.AppendLine("not been shown.");
+                text.AppendLine();
+                return;
+            }
+            List<CodeFile> files = new List<CodeFile>();
+            if (project != null)
+            {
+                if (engine) files.AddRange(project.Files(ScriptLanguages.PowerShell));
+                if (vba) files.AddRange(project.Files(ScriptLanguages.Vba));
+            }
+            if (files.Count == 0 && !wrapper)
             {
                 text.AppendLine("No automation has been generated for this session yet.");
                 text.AppendLine();
                 return;
             }
-            List<CodeFile> files = project.All();
-            if (files.Count == 0)
+            if (engine && vba)
             {
-                text.AppendLine("No automation has been generated for this session yet.");
+                text.AppendLine("Both languages were handed over. Answer in the one the request is about, and return");
+                text.AppendLine("only the modules you actually changed.");
+            }
+            else if (engine)
+            {
+                text.AppendLine("Only the C# was handed over. The VBA spelling of this automation exists but was not");
+                text.AppendLine("included, so do not return VBA and do not describe changes to it as though you had");
+                text.AppendLine("read it.");
+            }
+            else if (vba)
+            {
+                text.AppendLine("Only the VBA was handed over. The C# engine exists but was not included, so do not");
+                text.AppendLine("return C# and do not describe changes to it as though you had read it.");
+            }
+            text.AppendLine();
+            if (files.Count > 0)
+            {
+                text.AppendLine("| language | module | name to use in the answer | lines |");
+                text.AppendLine("|---|---|---|---|");
+                for (int index = 0; index < files.Count; index++)
+                {
+                    CodeFile file = files[index];
+                    text.AppendLine("| " + Spoken(file.Language) + " | " + file.FileName + " | `" + file.Name + "` | " +
+                        CodeProject.LineCount(file.Text).ToString(CultureInfo.InvariantCulture) + " |");
+                }
                 text.AppendLine();
-                return;
+                text.AppendLine("`" + CodeModules.Workflow + "` is the module a person edits: one line is one step of the");
+                text.AppendLine("recording. `" + CodeModules.RecordedFacts + "` holds the addresses and intervals that");
+                text.AppendLine("recording produced. The three `Runtime` modules are the machinery. Change the");
+                text.AppendLine("smallest set that does what was asked, and keep the split: a change that puts");
+                text.AppendLine("the machinery back into the workflow will not be taken in.");
+                text.AppendLine();
             }
-            text.AppendLine("Both languages are first class here. Answer in the one the request is about,");
-            text.AppendLine("and return only the modules you actually changed.");
-            text.AppendLine();
-            text.AppendLine("| language | module | name to use in the answer | lines |");
-            text.AppendLine("|---|---|---|---|");
-            for (int index = 0; index < files.Count; index++)
+            if (wrapper)
             {
-                CodeFile file = files[index];
-                text.AppendLine("| " + file.Language + " | " + file.FileName + " | `" + file.Name + "` | " +
-                    CodeProject.LineCount(file.Text).ToString(CultureInfo.InvariantCulture) + " |");
+                text.AppendLine("The PowerShell launch wrapper is included as well. It is **generated by the build on");
+                text.AppendLine("every build and is not an edit target** - a replacement for it would be overwritten");
+                text.AppendLine("without anyone being told. It is there to be read, so questions about how the built");
+                text.AppendLine("file starts, logs and fails can be answered; do not return it as a module.");
+                text.AppendLine();
             }
+        }
+
+        // What a language is called when talking to a person. The token the
+        // protocol uses is a different thing and is not changed here: `powershell`
+        // is what an answer writes, because that is what the reader on this side
+        // matches, and what it holds is C#.
+        private static string Spoken(string language)
+        {
+            return String.Equals(language, ScriptLanguages.Vba, StringComparison.Ordinal) ? "VBA" : "C#";
+        }
+
+        // Said when the operator turned the answer format off.
+        //
+        // The request then asks a question like any other message, and nothing
+        // that comes back can be read into the editor by the machinery. Claiming
+        // otherwise would be the one lie this file exists to avoid.
+        private static void NoProtocol(StringBuilder text)
+        {
+            text.AppendLine("## How to answer");
             text.AppendLine();
-            text.AppendLine("`" + CodeModules.Workflow + "` is the module a person edits: one line is one step of the");
-            text.AppendLine("recording. `" + CodeModules.RecordedFacts + "` holds the addresses and intervals that");
-            text.AppendLine("recording produced. The three `Runtime` modules are the machinery. Change the");
-            text.AppendLine("smallest set that does what was asked, and keep the split: a change that puts");
-            text.AppendLine("the machinery back into the workflow will not be taken in.");
+            text.AppendLine("Answer in plain words, however suits the question.");
+            text.AppendLine();
+            text.AppendLine("There is no machine readable format for this request: the operator turned it off. Do");
+            text.AppendLine("not wrap the answer in markers and do not treat it as something that will be applied");
+            text.AppendLine("automatically - it will be read by a person, who will decide what to do with it.");
             text.AppendLine();
         }
 
-        // The only shape an answer may come back in.
+        // The only shape an answer may come back in, when one was asked for.
         private static void ReturnFormat(StringBuilder text, string requestId)
         {
             text.AppendLine("## How to answer");
@@ -251,8 +438,9 @@ namespace AppStudio
             text.AppendLine();
             text.AppendLine("Rules:");
             text.AppendLine();
-            text.AppendLine("- The language is `powershell` or `vba`. Both are first class here; do not answer in one and");
-            text.AppendLine("  describe the other in prose.");
+            text.AppendLine("- The language token is `powershell` or `vba`. `powershell` is the token for the C# modules -");
+            text.AppendLine("  it is what the reader on this side matches, and it is not a request for PowerShell code.");
+            text.AppendLine("  Write C# under it. Only answer in a language that was actually handed over to you.");
             text.AppendLine("- The name after the language is the module name from the table above, without the extension.");
             text.AppendLine("- Return the **whole** module, not a patch and not an excerpt. A module that is cut off is");
             text.AppendLine("  refused. Do not write `# unchanged` or anything like it in place of code.");
@@ -297,8 +485,9 @@ namespace AppStudio
         }
 
         // Writes the request beside the code it is about. It is deliberately not
-        // put in the assistant folder: that folder is exactly two files and
-        // saying "attach what is in ai/" has to stay a complete instruction.
+        // put in the assistant folder: that folder holds exactly the files this
+        // request tells an assistant to read, so "attach what is in ai/" stays a
+        // complete instruction whatever was selected.
         public static string Write(CodeProject project, HandoffResult result)
         {
             if (project == null || project.Folder == null) return "This session has no folder on disk.";

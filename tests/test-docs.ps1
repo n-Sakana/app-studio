@@ -53,11 +53,27 @@ foreach($pair in @(@('README.md','request id'),@('docs\SPEC.md','request id'))){
  $text=[IO.File]::ReadAllText((Join-Path $root $pair[0]),(New-Object Text.UTF8Encoding($false)))
  if(-not$text.Contains($pair[1])){throw ($pair[0]+' does not state how a stale or foreign answer is refused')}
 }
-# The two-file rule is the whole handover contract, so it has to be stated where
-# a reader will meet it.
-foreach($pair in @(@('README.md','2ファイル'),@('docs\SPEC.md','ちょうど2ファイル'))){
+# What the handover folder contains is the whole contract, so it has to be stated
+# where a reader will meet it.
+#
+# It used to be "exactly two files". It is not that any more: the operator picks
+# what goes, so the rule that makes "attach what is in ai/" a complete
+# instruction is now that the folder holds what was selected and nothing left
+# over. The documents have to say the rule that is true.
+foreach($pair in @(
+ @('README.md','AI へ渡すのは、選んだものだけ'),
+ @('README.md','いま渡すものと常に一致'),
+ @('docs\SPEC.md','その依頼のために書き出したファイルだけ'),
+ @('docs\SPEC.md','全組合せを許可する'))){
  $text=[IO.File]::ReadAllText((Join-Path $root $pair[0]),(New-Object Text.UTF8Encoding($false)))
- if(-not$text.Contains($pair[1])){throw ($pair[0]+' does not state the two-file handover rule')}
+ if(-not$text.Contains($pair[1])){throw ($pair[0]+' does not state the handover rule: '+$pair[1])}
+}
+# And they must not go back to promising the rule that was withdrawn.
+foreach($doc in @('README.md','docs\SPEC.md')){
+ $text=[IO.File]::ReadAllText((Join-Path $root $doc),(New-Object Text.UTF8Encoding($false)))
+ foreach($stale in @('ちょうど2ファイル','常にこの2ファイル','10節に')){
+  if($text.Contains($stale)){throw ($doc+' still promises the withdrawn fixed handover: '+$stale)}
+ }
 }
 foreach($path in @('launch.vbs','launch.bat','app-studio.ps1','app-studio-worker.ps1','tests\run-all.ps1','tests\wp-s\run-wp-s.ps1','tests\build-fixtures.ps1')){
  if(-not(Test-Path (Join-Path $root $path))){throw ('documented path missing: '+$path)}

@@ -128,6 +128,11 @@ namespace AppStudio
         public string Headline;
         public string WindowTitle;
         public string WindowClass;
+        // The image name of the process the recorded window belonged to. The
+        // recording has always known it - replay inside the product matches on
+        // it - and dropping it here was what left the generated script with
+        // nothing but a class and a title to tell two windows apart.
+        public string AppName;
         public int GapMs;
         public string ElementLabel;
         public List<ElementLocator> Locators = new List<ElementLocator>();
@@ -192,6 +197,7 @@ namespace AppStudio
         public int GapMs;
         public string WindowClass;
         public string WindowTitle;
+        public string AppName;
         public string ElementLabel;
         public List<ElementLocator> Locators = new List<ElementLocator>();
         public List<ElementLocator> FocusLocators = new List<ElementLocator>();
@@ -338,6 +344,7 @@ namespace AppStudio
                 line.GapMs = pendingGap;
                 line.WindowClass = op.WindowClass;
                 line.WindowTitle = op.WindowTitle;
+                line.AppName = op.AppName;
                 line.ElementLabel = op.ElementLabel;
                 line.Locators = op.Locators;
                 line.FocusLocators = pendingFocus == null ? new List<ElementLocator>() : pendingFocus;
@@ -410,9 +417,15 @@ namespace AppStudio
             return baseId + "_" + count.ToString(CultureInfo.InvariantCulture);
         }
 
+        // What makes two steps "the same window". The application is part of it:
+        // a class and a title can be shared by two different programs, and
+        // treating those as one window would carry a step over to a window the
+        // recording never touched.
         private static string Key(StepRecord step)
         {
-            return (step.WindowClass == null ? "" : step.WindowClass) + "|" + (step.WindowTitle == null ? "" : step.WindowTitle);
+            return (step.WindowClass == null ? "" : step.WindowClass) + "|" +
+                (step.WindowTitle == null ? "" : step.WindowTitle) + "|" +
+                (step.AppName == null ? "" : step.AppName);
         }
 
         private static ScriptOp WindowOp(StepRecord step)
@@ -423,6 +436,7 @@ namespace AppStudio
             op.Headline = step.Kind == StepRecord.KindAppSwitch ? step.Headline : "the window this step expects in front";
             op.WindowTitle = step.WindowTitle;
             op.WindowClass = step.WindowClass;
+            op.AppName = step.AppName;
             return op;
         }
 

@@ -112,6 +112,71 @@ namespace AppStudio
             return stack;
         }
 
+        // One item of a list being picked from, and the sentence that says what
+        // it is.
+        //
+        // A checkbox rather than a switch: a switch is a setting that changes how
+        // the product behaves, and these are things being chosen for one act. Each
+        // one stands alone - nothing here reads another one to decide its own
+        // state, and none of them is ever disabled because of what it was combined
+        // with, because "you would not want that combination" is a guess about
+        // somebody else's work.
+        public static CheckBox Check(string label, string note, bool value)
+        {
+            CheckBox box = new CheckBox();
+            box.SetResourceReference(FrameworkElement.StyleProperty, "AppCheckBox");
+            TextBlock text = new TextBlock();
+            text.Text = label;
+            text.TextWrapping = TextWrapping.Wrap;
+            text.FontWeight = FontWeights.SemiBold;
+            box.Content = text;
+            box.IsChecked = value;
+            Name(box, label, note);
+            return box;
+        }
+
+        // The checkbox with its sentence underneath, as one block, indented to
+        // start where the label starts. The sentence is what says what the item
+        // actually is; a list of fourteen bare labels is a list nobody can choose
+        // from.
+        public static UIElement CheckBlock(CheckBox box, string note)
+        {
+            StackPanel stack = new StackPanel();
+            stack.Children.Add(box);
+            if (!String.IsNullOrEmpty(note))
+            {
+                TextBlock text = new TextBlock();
+                text.Text = note;
+                text.FontSize = Theme.MicroSize;
+                text.LineHeight = Theme.MicroSize * Theme.BodyLine;
+                text.Foreground = Theme.TextMuted;
+                text.TextWrapping = TextWrapping.Wrap;
+                text.Margin = new Thickness(26, 0, 0, 0);
+                stack.Children.Add(text);
+            }
+            stack.Margin = new Thickness(0, 0, 0, Theme.Space2);
+            return stack;
+        }
+
+        // One position of a control with two. Used where the choice is between
+        // two ways of looking at the same thing rather than between two places to
+        // go: both positions are on screen, the chosen one is filled in, and
+        // pressing the other changes what is underneath rather than where the
+        // operator is. A tab would have said "another screen"; a button whose
+        // caption is the state would have said nothing until it was pressed.
+        public static System.Windows.Controls.Primitives.ToggleButton Segment(string label, string tooltip)
+        {
+            System.Windows.Controls.Primitives.ToggleButton segment = new System.Windows.Controls.Primitives.ToggleButton();
+            segment.SetResourceReference(FrameworkElement.StyleProperty, "AppSegment");
+            TextBlock text = new TextBlock();
+            text.Text = label;
+            text.TextTrimming = TextTrimming.CharacterEllipsis;
+            text.HorizontalAlignment = HorizontalAlignment.Center;
+            segment.Content = text;
+            Name(segment, label, tooltip);
+            return segment;
+        }
+
         public static System.Windows.Controls.Primitives.ToggleButton Tab(string icon, string label, string tooltip)
         {
             System.Windows.Controls.Primitives.ToggleButton tab = new System.Windows.Controls.Primitives.ToggleButton();
@@ -119,6 +184,35 @@ namespace AppStudio
             tab.Content = Row(icon, label, Theme.TextSub);
             Name(tab, label, tooltip);
             return tab;
+        }
+
+        // What an empty box is for, drawn behind it rather than typed into it.
+        //
+        // Text put into the box as a starting point is text the product wrote and
+        // the operator is credited with; it also has to be deleted before
+        // anything else can be typed. A prompt that disappears the moment there
+        // is something to read says the same thing and is never mistaken for an
+        // answer.
+        public static Grid Placeholder(TextBox box, string prompt)
+        {
+            TextBlock hint = new TextBlock();
+            hint.Text = prompt;
+            hint.FontSize = box.FontSize > 0 ? box.FontSize : Theme.BodySize;
+            hint.Foreground = Theme.TextMuted;
+            hint.TextWrapping = TextWrapping.Wrap;
+            hint.IsHitTestVisible = false;
+            hint.Margin = new Thickness(Theme.Space3, Theme.Space3, Theme.Space3, Theme.Space2);
+            hint.VerticalAlignment = VerticalAlignment.Top;
+            hint.HorizontalAlignment = HorizontalAlignment.Left;
+            hint.Visibility = box.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+            box.TextChanged += delegate
+            {
+                hint.Visibility = box.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+            };
+            Grid holder = new Grid();
+            holder.Children.Add(box);
+            holder.Children.Add(hint);
+            return holder;
         }
 
         public static Slider Speed(double value, double min, double max, double step)
@@ -197,7 +291,14 @@ namespace AppStudio
             return stack;
         }
 
-        // A card that fills the cell it is in.
+        // A card that fills the cell it is in, and stays inside it.
+        //
+        // A pane is one column of a grid, and what is in it can want more room
+        // than the column has - a row of four buttons is as wide as four buttons
+        // whatever it is put in. Without this the surplus is painted over the
+        // pane next door and, at the last pane, off the side of the window. It is
+        // held here, on the one part every pane is made from, rather than
+        // remembered separately at each place that could overflow.
         public static Border Panel(UIElement content)
         {
             Border card = new Border();
@@ -205,8 +306,19 @@ namespace AppStudio
             card.BorderBrush = Theme.Border;
             card.BorderThickness = new Thickness(1);
             card.CornerRadius = new CornerRadius(Theme.RadiusMd);
+            card.ClipToBounds = true;
             card.Child = content;
             return card;
+        }
+
+        // A row of controls that becomes two rows rather than running off the
+        // side. Used wherever several operations sit together in a pane whose
+        // width the operator sets.
+        public static WrapPanel Row()
+        {
+            WrapPanel row = new WrapPanel();
+            row.Orientation = Orientation.Horizontal;
+            return row;
         }
 
         // The head of a pane: what the pane is, and the operations that belong to

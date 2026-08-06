@@ -62,6 +62,16 @@ namespace AppStudio
         public ScriptPlan Plan;
         public bool HasPrevious;
 
+        // What the operator chose to hand over to an assistant.
+        //
+        // It is kept beside the code and not beside the editor, because it
+        // belongs to the recording rather than to the window: closing the window
+        // and coming back to the same session should not silently re-select
+        // things. It is nonetheless a separate state from `Language` above -
+        // which module the editor is showing has nothing to do with which code is
+        // handed over, and neither one moves the other.
+        public AiPicks Picks = AiPicks.Default();
+
         private CodeProject(string codeFolder)
         {
             folder = codeFolder;
@@ -245,10 +255,32 @@ namespace AppStudio
                 Directory.CreateDirectory(folder);
                 WriteSet(Path.Combine(folder, "current"), current);
                 WriteSet(Path.Combine(folder, "baseline"), baseline);
+                return SaveMeta();
+            }
+            catch (Exception exception)
+            {
+                return exception.GetType().Name + ": " + exception.Message;
+            }
+        }
+
+        // Just the note beside the code: which language the editor was on, the
+        // request an answer would be accepted against, and what was ticked to
+        // hand over.
+        //
+        // It is separate from `Save` because ticking one box is not a reason to
+        // rewrite twenty module files. The modules have not changed; the note
+        // beside them has.
+        public string SaveMeta()
+        {
+            if (folder == null) return "This session has no folder on disk.";
+            try
+            {
+                Directory.CreateDirectory(folder);
                 JsonObject meta = new JsonObject()
                     .Add("kind", "codeProject")
                     .Add("language", Language)
                     .Add("requestId", RequestId)
+                    .Add("aiPicks", Picks == null ? AiPicks.Default().StoreLine() : Picks.StoreLine())
                     .Add("files", Names());
                 JsonWriter.WriteFile(Path.Combine(folder, "code.json"), meta);
                 return null;
@@ -292,6 +324,12 @@ namespace AppStudio
                     string language = JsonReader.Text(meta, "language");
                     if (ScriptLanguages.IsKnown(language)) Language = language;
                     RequestId = JsonReader.Text(meta, "requestId");
+                    // A project written before any of this could be chosen has no
+                    // line here, and gets the starting point. An empty selection
+                    // is written as a mark of its own, so "chose nothing" is not
+                    // read back as "never chose".
+                    string stored = JsonReader.Text(meta, "aiPicks");
+                    Picks = AiPicks.Restore(stored);
                 }
                 string saved = Path.Combine(folder, "current");
                 if (!Directory.Exists(saved)) return;

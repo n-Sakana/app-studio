@@ -355,9 +355,88 @@ namespace AppStudio
             return outputs;
         }
 
-        // Copies the three finished files somewhere the operator chose. The
-        // assistant folder keeps its own name so the two file rule survives the
-        // copy.
+        // What one request to an assistant actually produced.
+        //
+        // A null here means "not selected", which is a different thing from a
+        // result that says it could not be written. Every place that reports to
+        // the operator or to an assistant has to be able to tell those apart.
+        public sealed class RequestOutputs
+        {
+            public ScreensPdfResult Pdf;
+            public SessionMdResult Markdown;
+            // Files that were in the assistant folder from an earlier request and
+            // are not part of this one. They are taken out rather than left
+            // there: the folder is what gets attached, so a document nobody
+            // selected sitting in it is a document that gets attached.
+            public List<string> Removed = new List<string>();
+        }
+
+        // The assistant folder, written for one request, from what the operator
+        // selected and the code as it is on screen right now.
+        //
+        // It is written again on every request. An attachment describing an older
+        // version of the code, or a selection the operator has since changed,
+        // would have an assistant answering about something nobody has any more -
+        // so nothing here is reused and nothing is kept because it happens to
+        // still be on disk.
+        //
+        // The session's own report is not touched: it describes the recording,
+        // not this request, and rewriting it to match a selection would make the
+        // record of the session depend on who was asked what afterwards.
+        public static RequestOutputs WriteForRequest(StudioSession session, int pdfBudgetBytes, CodeProject project, AiPicks picks)
+        {
+            RequestOutputs outputs = new RequestOutputs();
+            if (session == null) return outputs;
+            if (picks == null) picks = AiPicks.Default();
+            session.Omissions.Clear();
+            if (picks.Has(AiItems.Pdf))
+            {
+                outputs.Pdf = ScreensPdf.Write(session, session.ScreensPdfPath, pdfBudgetBytes);
+                for (int index = 0; index < outputs.Pdf.OmittedScreens.Count; index++)
+                {
+                    session.Omissions.Add("screens.pdf omits " + outputs.Pdf.OmittedScreens[index]);
+                }
+                for (int index = 0; index < outputs.Pdf.Notes.Count; index++) session.AddLimit(outputs.Pdf.Notes[index]);
+                if (!outputs.Pdf.Written && outputs.Pdf.Problem != null) session.AddLimit(outputs.Pdf.Problem);
+            }
+            else
+            {
+                Remove(session.ScreensPdfPath, outputs);
+            }
+            if (picks.AnyDocument)
+            {
+                outputs.Markdown = SessionMd.Write(session, session.SessionMdPath, outputs.Pdf, project, picks);
+                if (!outputs.Markdown.Written && outputs.Markdown.Problem != null) session.AddLimit("session.md: " + outputs.Markdown.Problem);
+                if (!outputs.Markdown.Written) Remove(session.SessionMdPath, outputs);
+            }
+            else
+            {
+                Remove(session.SessionMdPath, outputs);
+            }
+            SessionStore.WriteMeta(session);
+            return outputs;
+        }
+
+        private static void Remove(string path, RequestOutputs outputs)
+        {
+            if (String.IsNullOrEmpty(path)) return;
+            try
+            {
+                if (!File.Exists(path)) return;
+                File.Delete(path);
+                outputs.Removed.Add(Path.GetFileName(path));
+            }
+            catch
+            {
+                // A file that will not delete is not a reason to refuse to build
+                // the request. It is still not named as an attachment, which is
+                // what decides whether an assistant is told to read it.
+            }
+        }
+
+        // Copies the finished files somewhere the operator chose. The assistant
+        // folder keeps its own name, so whatever it holds stays identifiable as
+        // the set that was handed over.
         public static string CopyTo(StudioSession session, string folder)
         {
             if (session == null || String.IsNullOrEmpty(folder)) return "No folder was given.";

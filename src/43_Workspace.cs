@@ -40,7 +40,6 @@ namespace AppStudio
         private readonly TextBlock stateLine = new TextBlock();
         private readonly TextBlock moduleLine = new TextBlock();
         private readonly TextBlock moduleNote = new TextBlock();
-        private readonly TextBlock buildLine = new TextBlock();
         private readonly TextBlock aiLine = new TextBlock();
         private readonly StackPanel workflowBody = new StackPanel();
         private readonly StackPanel aiBody = new StackPanel();
@@ -55,7 +54,10 @@ namespace AppStudio
         private UIElement leftRail;
         private UIElement rightRail;
         private ColumnDefinition leftColumn;
+        private ColumnDefinition centreColumn;
         private ColumnDefinition rightColumn;
+        private ColumnDefinition leftSplitColumn;
+        private ColumnDefinition rightSplitColumn;
         private GridSplitter leftSplitter;
         private GridSplitter rightSplitter;
         private Button fullButton;
@@ -78,7 +80,21 @@ namespace AppStudio
         private bool ready;
         private bool leftOpen = true;
         private bool rightOpen = true;
+        private bool editorOnly;
         private bool diffShowing;
+
+        // The one place the three widths are held.
+        //
+        // They were previously held in the ColumnDefinitions alone, which two
+        // things wrote to: this class, when a pane was folded, and the splitter,
+        // when it was dragged. Folding rewrote the outer two from the constants
+        // and left the middle at whatever the splitter had made it, so the three
+        // no longer summed to anything in particular and every fold moved a pane
+        // the operator had not touched. They are shares of one hundred here, they
+        // always sum to one hundred, and every arrangement is written from them.
+        private double leftShare = Theme.PaneLeftShare;
+        private double centreShare = Theme.PaneCentreShare;
+        private double rightShare = Theme.PaneRightShare;
         private string tab = TabWorkflow;
         private string builtPath;
         private Button copyButton;
@@ -135,17 +151,27 @@ namespace AppStudio
             }
             root = new Grid();
             root.Margin = new Thickness(Theme.Space4, Theme.Space3, Theme.Space4, Theme.Space3);
+            // The panes are never allowed to be wider than the room there is, so
+            // nothing can be pushed past the right hand edge of the window.
+            root.ClipToBounds = true;
             leftColumn = Ui.ShareColumn(Theme.PaneLeftShare);
-            leftColumn.MinWidth = Theme.PaneLeftMin;
-            ColumnDefinition centreColumn = Ui.ShareColumn(Theme.PaneCentreShare);
-            centreColumn.MinWidth = Theme.PaneCentreMin;
+            centreColumn = Ui.ShareColumn(Theme.PaneCentreShare);
             rightColumn = Ui.ShareColumn(Theme.PaneRightShare);
-            rightColumn.MinWidth = Theme.PaneRightMin;
+            leftSplitColumn = Ui.FixedColumn(Theme.SplitterWidth);
+            rightSplitColumn = Ui.FixedColumn(Theme.SplitterWidth);
             root.ColumnDefinitions.Add(leftColumn);
-            root.ColumnDefinitions.Add(Ui.FixedColumn(Theme.SplitterWidth));
+            root.ColumnDefinitions.Add(leftSplitColumn);
             root.ColumnDefinitions.Add(centreColumn);
-            root.ColumnDefinitions.Add(Ui.FixedColumn(Theme.SplitterWidth));
+            root.ColumnDefinitions.Add(rightSplitColumn);
             root.ColumnDefinitions.Add(rightColumn);
+            // Every change of room re-decides what each pane may keep, so a
+            // window narrowed past the sum of the minimums shrinks the panes
+            // rather than letting the arrangement overflow. The window is
+            // listened to as well as this grid: once the grid is already wider
+            // than the window, narrowing the window further does not change the
+            // grid's own width, so the grid alone would never hear about it.
+            root.SizeChanged += delegate { ApplyWidths(); };
+            if (owner != null) owner.SizeChanged += delegate { ApplyWidths(); Settle(); };
 
             leftPane = ModulePane();
             leftRail = Rail(true);
@@ -176,15 +202,68 @@ namespace AppStudio
             return root;
         }
 
+        // A boundary between two panes.
+        //
+        // What it changes is read back into the shares the moment the drag ends,
+        // because the splitter writes straight into the columns and this class
+        // writes them from the shares. Two writers and one set of numbers is how
+        // a fold came to move a pane nobody had dragged.
         private GridSplitter Splitter()
         {
             GridSplitter splitter = new GridSplitter();
             splitter.SetResourceReference(FrameworkElement.StyleProperty, "AppSplitter");
             splitter.ResizeBehavior = GridResizeBehavior.PreviousAndNext;
             splitter.ResizeDirection = GridResizeDirection.Columns;
+            splitter.HorizontalAlignment = HorizontalAlignment.Stretch;
+            splitter.VerticalAlignment = VerticalAlignment.Stretch;
+            // Read after the arrangement has caught up, not during the drag. The
+            // splitter writes the two columns it moved and the measured sizes
+            // follow a moment later; reading them in the same instant mixes one
+            // new width with one old one, and the proportions that come out of
+            // that describe an arrangement that never existed - which is how a
+            // boundary that had just been dragged came back part of the way and
+            // took the pane at the far end of the window with it.
+            splitter.DragCompleted += delegate
+            {
+                if (owner == null) { TakeShares(); return; }
+                owner.Dispatcher.BeginInvoke(new Action(TakeShares), System.Windows.Threading.DispatcherPriority.Loaded);
+            };
             Ui.Name(splitter, Text("pane-resize.txt", "Pane boundary"),
                 Text("pane-resize-note.txt", "Drag sideways to change how wide the panes on either side are."));
             return splitter;
+        }
+
+        // What the operator has just dragged the panes to, as shares.
+        //
+        // A folded pane keeps the share it had. It is not on screen to have been
+        // dragged, and forgetting it would mean opening it again at whatever
+        // width the arithmetic happened to leave, rather than at the width it was
+        // folded from.
+        private void TakeShares()
+        {
+            if (root == null) return;
+            double left = leftColumn.ActualWidth;
+            double centre = centreColumn.ActualWidth;
+            double right = rightColumn.ActualWidth;
+            double shown = (leftOpen ? left : 0) + centre + (rightOpen ? right : 0);
+            if (shown <= 1) return;
+            double budget = 100.0 - (leftOpen ? 0 : leftShare) - (rightOpen ? 0 : rightShare);
+            if (budget <= 0) return;
+            if (leftOpen) leftShare = budget * left / shown;
+            if (rightOpen) rightShare = budget * right / shown;
+            centreShare = 100.0 - leftShare - rightShare;
+            if (centreShare < 1)
+            {
+                centreShare = 1;
+                double rest = 99.0;
+                double sum = leftShare + rightShare;
+                if (sum > 0)
+                {
+                    leftShare = rest * leftShare / sum;
+                    rightShare = rest * rightShare / sum;
+                }
+            }
+            ApplyWidths();
         }
 
         private static void Detach(UIElement child)
@@ -217,18 +296,154 @@ namespace AppStudio
         private void ApplyPanes()
         {
             if (root == null) return;
-            leftColumn.Width = leftOpen ? new GridLength(Theme.PaneLeftShare, GridUnitType.Star) : new GridLength(Theme.PaneRailWidth);
-            leftColumn.MinWidth = leftOpen ? Theme.PaneLeftMin : Theme.PaneRailWidth;
-            rightColumn.Width = rightOpen ? new GridLength(Theme.PaneRightShare, GridUnitType.Star) : new GridLength(Theme.PaneRailWidth);
-            rightColumn.MinWidth = rightOpen ? Theme.PaneRightMin : Theme.PaneRailWidth;
-            leftSplitter.Visibility = leftOpen ? Visibility.Visible : Visibility.Hidden;
-            rightSplitter.Visibility = rightOpen ? Visibility.Visible : Visibility.Hidden;
-            leftPane.Visibility = leftOpen ? Visibility.Visible : Visibility.Collapsed;
-            leftRail.Visibility = leftOpen ? Visibility.Collapsed : Visibility.Visible;
-            rightPane.Visibility = rightOpen ? Visibility.Visible : Visibility.Collapsed;
-            rightRail.Visibility = rightOpen ? Visibility.Collapsed : Visibility.Visible;
+            bool showLeft = leftOpen && !editorOnly;
+            bool showRight = rightOpen && !editorOnly;
+            leftSplitter.Visibility = showLeft ? Visibility.Visible : Visibility.Hidden;
+            rightSplitter.Visibility = showRight ? Visibility.Visible : Visibility.Hidden;
+            leftPane.Visibility = showLeft ? Visibility.Visible : Visibility.Collapsed;
+            leftRail.Visibility = (!editorOnly && !leftOpen) ? Visibility.Visible : Visibility.Collapsed;
+            rightPane.Visibility = showRight ? Visibility.Visible : Visibility.Collapsed;
+            rightRail.Visibility = (!editorOnly && !rightOpen) ? Visibility.Visible : Visibility.Collapsed;
+            ApplyWidths();
+            Settle();
             PaintFullButton();
             if (LayoutChanged != null) LayoutChanged();
+        }
+
+        // The five columns, worked out here and written as widths rather than as
+        // proportions for the grid to work out.
+        //
+        // Proportions and minimums together are not something a grid settles the
+        // way a reader expects: given minimums that do not fit, it keeps them and
+        // becomes wider than the window rather than becoming narrower than its
+        // minimums, and what hangs over the edge is the last pane and the control
+        // that folds it. So the arithmetic is done once, here, from three things
+        // - what the operator dragged the panes to, what each pane needs, and how
+        // much room there is - and the answer is three exact widths that add up
+        // to the room. Nothing downstream can then disagree about the total.
+        private void ApplyWidths()
+        {
+            if (root == null || leftColumn == null) return;
+            bool showLeft = leftOpen && !editorOnly;
+            bool showRight = rightOpen && !editorOnly;
+            bool leftRailOn = !editorOnly && !leftOpen;
+            bool rightRailOn = !editorOnly && !rightOpen;
+
+            leftSplitColumn.Width = new GridLength(showLeft ? Theme.SplitterWidth : 0);
+            rightSplitColumn.Width = new GridLength(showRight ? Theme.SplitterWidth : 0);
+
+            double fixedTaken = (showLeft ? Theme.SplitterWidth : 0) + (showRight ? Theme.SplitterWidth : 0) +
+                (leftRailOn ? Theme.PaneRailWidth : 0) + (rightRailOn ? Theme.PaneRailWidth : 0);
+            double had = Available();
+            double room = had - fixedTaken;
+            if (room < 0) room = 0;
+
+            leftColumn.MinWidth = 0;
+            centreColumn.MinWidth = 0;
+            rightColumn.MinWidth = 0;
+
+            if (room <= 0)
+            {
+                // Nothing has been measured yet. The proportions stand until
+                // there is a width to divide.
+                leftColumn.Width = showLeft ? new GridLength(leftShare, GridUnitType.Star)
+                    : new GridLength(leftRailOn ? Theme.PaneRailWidth : 0);
+                rightColumn.Width = showRight ? new GridLength(rightShare, GridUnitType.Star)
+                    : new GridLength(rightRailOn ? Theme.PaneRailWidth : 0);
+                centreColumn.Width = new GridLength(centreShare, GridUnitType.Star);
+                return;
+            }
+
+            double minLeft = showLeft ? Theme.PaneLeftMin : 0;
+            double minRight = showRight ? Theme.PaneRightMin : 0;
+            double minCentre = Theme.PaneCentreMin;
+            double minSum = minLeft + minCentre + minRight;
+            // Too narrow for every minimum at once: they are given up together
+            // and in proportion, so no pane is sacrificed to keep another whole.
+            if (minSum > room && minSum > 0)
+            {
+                double give = room / minSum;
+                minLeft = minLeft * give;
+                minCentre = minCentre * give;
+                minRight = minRight * give;
+            }
+
+            // Folding a pane gives its width to the middle and to nothing else.
+            //
+            // So the two side panes are measured against the room there would be
+            // with both of them open, and the middle takes whatever is left over.
+            // Sharing the freed width out in proportion instead would widen the
+            // pane at the far end of the window - a pane the operator had not
+            // touched, moving because something at the other end was folded.
+            double open = had - Theme.SplitterWidth * 2;
+            if (open < 0) open = 0;
+            double left = showLeft ? open * leftShare / 100.0 : 0;
+            double right = showRight ? open * rightShare / 100.0 : 0;
+            double centre = room - left - right;
+
+            // Nothing under what it needs...
+            if (left < minLeft) left = minLeft;
+            if (right < minRight) right = minRight;
+            if (centre < minCentre) centre = minCentre;
+            // ...and nothing over the room there is. What the minimums took is
+            // paid back by whichever panes are above theirs, in proportion to how
+            // far above they are. The minimums fit by now, so this always settles.
+            double over = left + centre + right - room;
+            if (over > 0.5)
+            {
+                double spare = (left - minLeft) + (centre - minCentre) + (right - minRight);
+                if (spare > 0)
+                {
+                    left = left - over * (left - minLeft) / spare;
+                    centre = centre - over * (centre - minCentre) / spare;
+                    right = right - over * (right - minRight) / spare;
+                }
+            }
+            if (left < 0) left = 0;
+            if (right < 0) right = 0;
+            if (centre < 0) centre = 0;
+
+            leftColumn.Width = showLeft ? new GridLength(left) : new GridLength(leftRailOn ? Theme.PaneRailWidth : 0);
+            rightColumn.Width = showRight ? new GridLength(right) : new GridLength(rightRailOn ? Theme.PaneRailWidth : 0);
+            centreColumn.Width = new GridLength(centre);
+
+            // Under the width a pane stops holding anything readable, its head
+            // drops to the drawings alone. The words are still on them as name
+            // and tooltip, so nothing is lost but the room they took.
+            SetTight(showRight && right > 0 && right < Theme.PaneFloorWidth * 2.4);
+        }
+
+        // Decide the widths again once the window has finished changing size.
+        //
+        // A window announces its new size while its content is still being
+        // arranged, so the cell this grid stands in can still be reporting the
+        // width it had a moment ago. Deciding from that number gives the panes
+        // more than there is, and because the arrangement is then pinned by its
+        // own minimums nothing changes size again - so nothing asks a second
+        // time, and the panes stay hanging over the edge until something else
+        // moves. This is that second time.
+        private void Settle()
+        {
+            if (owner == null) return;
+            owner.Dispatcher.BeginInvoke(new Action(ApplyWidths), System.Windows.Threading.DispatcherPriority.Loaded);
+        }
+
+        // How much width there actually is.
+        //
+        // Not this grid's own width: when the columns' minimums add up to more
+        // than the window, a Grid does not shrink - it reports the larger number
+        // and hangs over the edge. Measuring against that is measuring the
+        // symptom, and the arrangement would never be told to give anything up.
+        // The cell this grid stands in is the honest number, because a star sized
+        // cell is exactly as wide as what is there to fill.
+        private double Available()
+        {
+            if (root == null) return 0;
+            FrameworkElement holder = root.Parent as FrameworkElement;
+            if (holder == null) return root.ActualWidth;
+            double width = holder.ActualWidth - root.Margin.Left - root.Margin.Right;
+            if (width <= 0) return root.ActualWidth;
+            return width;
         }
 
         private UIElement Rail(bool left)
@@ -252,27 +467,43 @@ namespace AppStudio
 
         public void SetLeftOpen(bool value) { leftOpen = value; ApplyPanes(); }
         public void SetRightOpen(bool value) { rightOpen = value; ApplyPanes(); }
+        public bool EditorOnly { get { return editorOnly; } }
 
-        // The middle pane taking the whole window is the two side panes folded,
-        // not a third layout. So it cannot lose anything, and coming back out of
-        // it puts both panes back the way they were.
-        private void ToggleFull()
+        // Whether the window still shows its bar and its status line. The editor
+        // asks for them to go, because a screen kept for reading one file has no
+        // room for controls that act on the window around it.
+        public Action<bool> ShowChrome;
+
+        // The editor with the window to itself.
+        //
+        // Folding the two side panes was not this. The bar over them stayed, so
+        // what the operator got was the same window with two panes missing - and
+        // the thing they had asked for was the file, larger. This takes the bar
+        // and the status line with the panes, and the only thing on screen is the
+        // file and the one control that gives the rest back.
+        public void SetEditorOnly(bool value)
         {
-            bool full = !leftOpen && !rightOpen;
-            leftOpen = full;
-            rightOpen = full;
+            if (editorOnly == value) return;
+            editorOnly = value;
+            if (ShowChrome != null) ShowChrome(!editorOnly);
             ApplyPanes();
-            editor.FocusEditor();
+            if (editorOnly) editor.FocusEditor();
         }
 
+        private void ToggleFull()
+        {
+            SetEditorOnly(!editorOnly);
+        }
+
+        // The standard pair of drawings for this, so it is recognised without
+        // being read: the four corners going out, and the four coming back in.
         private void PaintFullButton()
         {
             if (fullButton == null) return;
-            bool full = !leftOpen && !rightOpen;
-            fullButton.Content = Icons.Make(full ? Icons.FullscreenExit : Icons.Fullscreen, 18, Theme.TextSub);
+            fullButton.Content = Icons.Make(editorOnly ? Icons.FullscreenExit : Icons.Fullscreen, 18, Theme.TextSub);
             Ui.Name(fullButton,
-                full ? Text("code-full-exit.txt", "Leave full width") : Text("code-full-enter.txt", "Make the editor full width"),
-                full ? Text("code-full-exit-note.txt", "Puts both side panes back.")
+                editorOnly ? Text("code-full-exit.txt", "Leave full width") : Text("code-full-enter.txt", "Make the editor full width"),
+                editorOnly ? Text("code-full-exit-note.txt", "Puts both side panes back.")
                      : Text("code-full-enter-note.txt", "Folds both side panes away and gives the editor the whole width."));
         }
 
@@ -287,6 +518,7 @@ namespace AppStudio
             session = studioSession;
             project = codeProject;
             handoff = null;
+            lastWritten = null;
             copied = false;
             parts = new IntakeParts();
             pending = null;
@@ -296,6 +528,9 @@ namespace AppStudio
             ready = false;
             currentLanguage = project == null ? ScriptLanguages.PowerShell : project.Language;
             currentFile = CodeModules.Workflow;
+            // What the assistant said about the session before this one is not
+            // about this one.
+            AiSaid("", Theme.TextMuted);
             PaintSession();
         }
 
@@ -308,7 +543,7 @@ namespace AppStudio
             PaintAssistant();
             PaintState();
             ShowEditorFace();
-            buildLine.Text = "";
+            ClearResult();
             if (launchButton != null) launchButton.IsEnabled = false;
         }
 
@@ -334,6 +569,7 @@ namespace AppStudio
         {
             Grid pane = new Grid();
             pane.RowDefinitions.Add(Ui.AutoRow());
+            pane.RowDefinitions.Add(Ui.AutoRow());
             pane.RowDefinitions.Add(Ui.StarRow());
             pane.RowDefinitions.Add(Ui.AutoRow());
 
@@ -345,6 +581,9 @@ namespace AppStudio
             head.Children.Add(fold);
             Grid.SetRow(head, 0);
             pane.Children.Add(head);
+
+            Grid.SetRow(LanguageSwitch(), 1);
+            pane.Children.Add(languageSwitch);
 
             tree.SetResourceReference(FrameworkElement.StyleProperty, "AppTree");
             tree.FontSize = Theme.LabelSize;
@@ -358,7 +597,7 @@ namespace AppStudio
             Grid holder = new Grid();
             holder.Children.Add(tree);
             holder.Children.Add(moduleEmpty);
-            Grid.SetRow(holder, 1);
+            Grid.SetRow(holder, 2);
             pane.Children.Add(holder);
 
             moduleFoot = new StackPanel();
@@ -372,10 +611,85 @@ namespace AppStudio
             baseline.HorizontalAlignment = HorizontalAlignment.Stretch;
             baseline.Margin = new Thickness(0, Theme.Space3, 0, 0);
             moduleFoot.Children.Add(baseline);
-            Grid.SetRow(moduleFoot, 2);
+            Grid.SetRow(moduleFoot, 3);
             pane.Children.Add(moduleFoot);
 
             return Ui.Panel(pane);
+        }
+
+        private Border languageSwitch;
+        private System.Windows.Controls.Primitives.ToggleButton psSegment;
+        private System.Windows.Controls.Primitives.ToggleButton vbaSegment;
+
+        // Which of the two languages this pane is showing.
+        //
+        // They used to be two headings in one list, next to a third for the
+        // wrapper, which read as three peers to choose between - and one of the
+        // three is not a thing anybody edits. They are two ways of writing the
+        // same recording, so this is one control with two positions rather than
+        // two places to go: the pane underneath changes, the pane itself does
+        // not, and nothing about it suggests another screen.
+        private UIElement LanguageSwitch()
+        {
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(Ui.StarColumn());
+            row.ColumnDefinitions.Add(Ui.StarColumn());
+            psSegment = Ui.Segment(Text("lang-powershell.txt", "PowerShell"),
+                Text("lang-powershell-note.txt", "The C# engine and the thin PowerShell wrapper the build puts over it. This is the one that becomes Workflow.cmd."));
+            vbaSegment = Ui.Segment(Text("lang-vba.txt", "VBA"),
+                Text("lang-vba-note.txt", "The same recorded procedure written for Excel. This is the one that becomes Workflow.xlsm."));
+            // Checked rather than Click, because a screen reader and the
+            // automation tree turn this control on through its toggle rather
+            // than by pressing it, and a handler on Click alone is one this
+            // window can be driven past without it ever running. Click puts the
+            // mark back on the half that is already chosen, so pressing it twice
+            // does not leave both halves blank.
+            psSegment.Checked += delegate { ChooseLanguage(ScriptLanguages.PowerShell); };
+            vbaSegment.Checked += delegate { ChooseLanguage(ScriptLanguages.Vba); };
+            psSegment.Click += delegate { psSegment.IsChecked = true; };
+            vbaSegment.Click += delegate { vbaSegment.IsChecked = true; };
+            Grid.SetColumn(psSegment, 0);
+            Grid.SetColumn(vbaSegment, 1);
+            row.Children.Add(psSegment);
+            row.Children.Add(vbaSegment);
+
+            languageSwitch = new Border();
+            languageSwitch.Background = Theme.SurfaceSunken;
+            languageSwitch.BorderBrush = Theme.Border;
+            languageSwitch.BorderThickness = new Thickness(1);
+            languageSwitch.CornerRadius = new CornerRadius(Theme.RadiusMd);
+            languageSwitch.Padding = new Thickness(2);
+            languageSwitch.Margin = new Thickness(Theme.Space4, 0, Theme.Space4, Theme.Space3);
+            languageSwitch.Child = row;
+            System.Windows.Automation.AutomationProperties.SetName(languageSwitch, Text("lang-switch.txt", "Language"));
+            return languageSwitch;
+        }
+
+        private bool switching;
+
+        private void ChooseLanguage(string languageName)
+        {
+            if (switching) return;
+            if (String.Equals(currentLanguage, languageName, StringComparison.Ordinal) && !IsWrapper(currentFile)) return;
+            Remember();
+            currentLanguage = languageName;
+            currentFile = CodeModules.Workflow;
+            if (project != null) project.Language = languageName;
+            PaintTree();
+            LoadEditor();
+            PaintState();
+            ShowEditorFace();
+        }
+
+        private void PaintLanguageSwitch()
+        {
+            if (psSegment == null) return;
+            bool vba = String.Equals(currentLanguage, ScriptLanguages.Vba, StringComparison.Ordinal);
+            switching = true;
+            psSegment.IsChecked = !vba;
+            vbaSegment.IsChecked = vba;
+            switching = false;
+            if (languageSwitch != null) languageSwitch.Visibility = project == null ? Visibility.Collapsed : Visibility.Visible;
         }
 
         // A tree with the whole of what was generated in it, grouped by what each
@@ -392,6 +706,14 @@ namespace AppStudio
         private UIElement moduleEmpty;
         private StackPanel moduleFoot;
 
+        // What the chosen language is made of, arranged as what it is made of.
+        //
+        // PowerShell mode is not a list of PowerShell files. It is one handed
+        // over file, and that file is a C# engine with a thin PowerShell wrapper
+        // over it. Shown as a flat list beside the C#, the wrapper read as a peer
+        // of the thing it wraps and as somewhere the operator might work; shown
+        // under the file both belong to, the relation is the arrangement. The
+        // whole of it is still here to read, including the wrapper.
         private void PaintTree()
         {
             loading = true;
@@ -403,27 +725,38 @@ namespace AppStudio
             // that is on screen and does nothing is a control that has to be
             // pressed before it can be ruled out.
             if (moduleFoot != null) moduleFoot.Visibility = has ? Visibility.Visible : Visibility.Collapsed;
+            PaintLanguageSwitch();
             if (!has)
             {
                 loading = false;
                 return;
             }
+            if (String.Equals(currentLanguage, ScriptLanguages.Vba, StringComparison.Ordinal))
+            {
+                TreeViewItem book = Group(Text("code-artefact-vba.txt", "Workflow.xlsm - the one file handed over"),
+                    Text("code-artefact-vba-note.txt", "The workbook the build makes. These five modules go into it as they are."), true);
+                List<CodeFile> basic = project.Files(ScriptLanguages.Vba);
+                for (int index = 0; index < basic.Count; index++) book.Items.Add(ModuleItem(basic[index]));
+                tree.Items.Add(book);
+                loading = false;
+                return;
+            }
+
+            TreeViewItem artefact = Group(Text("code-artefact-ps.txt", "Workflow.cmd - the one file handed over"),
+                Text("code-artefact-ps-note.txt", "The single file the build makes. It is the C# below, with a wrapper over it that compiles and calls it."), true);
+
             TreeViewItem sharp = Group(Text("code-group-cs.txt", "C# (the main thing to edit)"),
                 Text("code-group-cs-note.txt", "The automation itself. The recorded procedure is in Workflow.cs."), true);
             List<CodeFile> csharp = project.Files(ScriptLanguages.PowerShell);
             for (int index = 0; index < csharp.Count; index++) sharp.Items.Add(ModuleItem(csharp[index]));
-            tree.Items.Add(sharp);
+            artefact.Items.Add(sharp);
 
             TreeViewItem wrapper = Group(Text("code-group-wrapper.txt", "PowerShell wrapper (written by the build)"),
                 Text("code-group-wrapper-note.txt", "A thin layer that compiles the C# and calls it. Rewritten on every build."), false);
             wrapper.Items.Add(WrapperItem());
-            tree.Items.Add(wrapper);
+            artefact.Items.Add(wrapper);
 
-            TreeViewItem vba = Group(Text("code-group-vba.txt", "VBA (the same procedure, for Excel)"),
-                Text("code-group-vba-note.txt", "The same automation written as an Excel macro."), false);
-            List<CodeFile> basic = project.Files(ScriptLanguages.Vba);
-            for (int index = 0; index < basic.Count; index++) vba.Items.Add(ModuleItem(basic[index]));
-            tree.Items.Add(vba);
+            tree.Items.Add(artefact);
             loading = false;
         }
 
@@ -503,6 +836,7 @@ namespace AppStudio
             currentLanguage = languageName;
             currentFile = name;
             if (project != null && !IsWrapper(name)) project.Language = languageName;
+            PaintLanguageSwitch();
             LoadEditor();
             PaintState();
             ShowEditorFace();
@@ -570,38 +904,34 @@ namespace AppStudio
             strip.RowDefinitions.Add(Ui.AutoRow());
             strip.RowDefinitions.Add(Ui.AutoRow());
 
-            StackPanel row = new StackPanel();
-            row.Orientation = Orientation.Horizontal;
-            row.Margin = new Thickness(0, 0, 0, Theme.Space2);
-            row.Children.Add(Ui.IconTextButton(Icons.Check, Text("code-check.txt", "Check"),
-                Text("code-check-note.txt", "Only checks that it compiles. Nothing is run."), delegate { Check(); }, false));
+            // Four operations, on as many rows as the pane's width needs. In one
+            // row that could not fit they went on past the pane and off the side
+            // of the window, and the last of them - the one that starts what was
+            // just built - was the first to go.
+            WrapPanel row = Ui.Row();
+            row.Margin = new Thickness(0, 0, 0, Theme.Space1);
+            Button check = Ui.IconTextButton(Icons.Check, Text("code-check.txt", "Check"),
+                Text("code-check-note.txt", "Only checks that it compiles. Nothing is run."), delegate { Check(); }, false);
+            check.Margin = new Thickness(0, 0, Theme.Space2, Theme.Space1);
+            row.Children.Add(check);
             Button build = Ui.IconTextButton(Icons.Build, Text("code-build.txt", "Build"),
                 Text("code-build-note.txt", "Folds the modules into the single file somebody is given."), delegate { BuildIt(); }, true);
-            build.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            build.Margin = new Thickness(0, 0, Theme.Space2, Theme.Space1);
             row.Children.Add(build);
             Button run = Ui.IconTextButton(Icons.Play, Text("code-run.txt", "Run"),
                 Text("code-run-note.txt", "Runs this automation against the real applications on this machine."), delegate { RunIt(); }, false);
-            run.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            run.Margin = new Thickness(0, 0, Theme.Space2, Theme.Space1);
             row.Children.Add(run);
             launchButton = Ui.IconTextButton(Icons.Launch, Text("code-launch.txt", "Start the built file"),
                 Text("code-launch-note.txt", "Starts the built file the way the person handed it would start it."), delegate { LaunchBuilt(); }, false);
-            launchButton.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            launchButton.Margin = new Thickness(0, 0, 0, Theme.Space1);
             launchButton.IsEnabled = false;
             row.Children.Add(launchButton);
             Grid.SetRow(row, 0);
             strip.Children.Add(row);
 
-            buildLine.FontSize = Theme.MetaSize;
-            buildLine.LineHeight = Theme.MetaSize * Theme.BodyLine;
-            buildLine.Foreground = Theme.TextMuted;
-            buildLine.TextWrapping = TextWrapping.Wrap;
-            ScrollViewer scroll = new ScrollViewer();
-            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-            scroll.MaxHeight = 96;
-            scroll.Content = buildLine;
-            Grid.SetRow(scroll, 1);
-            strip.Children.Add(scroll);
+            Grid.SetRow(ResultBox(), 1);
+            strip.Children.Add(resultBox);
 
             buildStrip = new Border();
             buildStrip.BorderBrush = Theme.BorderSubtle;
@@ -609,6 +939,201 @@ namespace AppStudio
             buildStrip.Padding = new Thickness(Theme.Space4, Theme.Space3, Theme.Space4, Theme.Space3);
             buildStrip.Child = strip;
             return buildStrip;
+        }
+
+        private Border resultBox;
+        private TextBlock resultHead;
+        private StackPanel resultBody;
+        private Border resultRule;
+
+        // What checking, building or running just did, beside the code it was
+        // done to.
+        //
+        // It is a region rather than a line of prose. A build produces a verdict,
+        // a path to something that now exists on disk, a size and a list of what
+        // went into it; written as one paragraph those become a wall with a very
+        // long path in the middle of it, and the path - the one part somebody
+        // needs to hand to another person - is the hardest thing in it to pick
+        // out. Each part is given its own place here, and the path can be copied
+        // without being selected by hand.
+        private UIElement ResultBox()
+        {
+            resultHead = new TextBlock();
+            resultHead.FontSize = Theme.MetaSize;
+            resultHead.FontWeight = FontWeights.SemiBold;
+            resultHead.TextWrapping = TextWrapping.Wrap;
+            resultHead.Foreground = Theme.TextSub;
+
+            resultBody = new StackPanel();
+
+            StackPanel stack = new StackPanel();
+            stack.Children.Add(resultHead);
+            stack.Children.Add(resultBody);
+
+            ScrollViewer scroll = new ScrollViewer();
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            scroll.MaxHeight = Theme.ResultHeight;
+            scroll.Content = stack;
+
+            Grid inner = new Grid();
+            inner.ColumnDefinitions.Add(Ui.AutoColumn());
+            inner.ColumnDefinitions.Add(Ui.StarColumn());
+            resultRule = new Border();
+            resultRule.Width = 3;
+            resultRule.CornerRadius = new CornerRadius(2);
+            resultRule.Background = Theme.BorderSubtle;
+            resultRule.Margin = new Thickness(0, 0, Theme.Space3, 0);
+            Grid.SetColumn(resultRule, 0);
+            inner.Children.Add(resultRule);
+            Grid.SetColumn(scroll, 1);
+            inner.Children.Add(scroll);
+
+            resultBox = new Border();
+            resultBox.Background = Theme.SurfaceSunken;
+            resultBox.BorderBrush = Theme.BorderSubtle;
+            resultBox.BorderThickness = new Thickness(1);
+            resultBox.CornerRadius = new CornerRadius(Theme.RadiusSm);
+            resultBox.Padding = new Thickness(Theme.Space3, Theme.Space2, Theme.Space3, Theme.Space2);
+            resultBox.Visibility = Visibility.Collapsed;
+            resultBox.Child = inner;
+            System.Windows.Automation.AutomationProperties.SetName(resultBox, Text("code-result.txt", "What happened"));
+            return resultBox;
+        }
+
+        private void ClearResult()
+        {
+            if (resultBox == null) return;
+            resultHead.Text = "";
+            resultBody.Children.Clear();
+            resultBox.Visibility = Visibility.Collapsed;
+        }
+
+        // tone: Success, Danger, Caution or null for "still going".
+        private void SayResult(string headline, string tone)
+        {
+            if (resultBox == null) return;
+            resultBody.Children.Clear();
+            resultBox.Visibility = Visibility.Visible;
+            resultHead.Text = headline;
+            Brush ink = Theme.TextMuted;
+            Brush rule = Theme.BorderSubtle;
+            if (String.Equals(tone, "Success", StringComparison.Ordinal)) { ink = Theme.SuccessText; rule = Theme.Success; }
+            else if (String.Equals(tone, "Danger", StringComparison.Ordinal)) { ink = Theme.DangerText; rule = Theme.Danger; }
+            else if (String.Equals(tone, "Caution", StringComparison.Ordinal)) { ink = Theme.CautionText; rule = Theme.Caution; }
+            resultHead.Foreground = ink;
+            resultRule.Background = rule;
+        }
+
+        private void ResultLines(List<string> lines, int limit)
+        {
+            if (lines == null) return;
+            for (int index = 0; index < lines.Count && index < limit; index++)
+            {
+                TextBlock line = Ui.Note(lines[index]);
+                line.Margin = new Thickness(0, Theme.Space1, 0, 0);
+                resultBody.Children.Add(line);
+            }
+        }
+
+        // A path is not prose. It is one thing, it does not wrap where a sentence
+        // would, and what the reader does with it is copy it - so it is given a
+        // box of its own, in the code face, with the control that copies it.
+        private void ResultPath(string label, string path)
+        {
+            if (String.IsNullOrEmpty(path)) return;
+            StackPanel block = new StackPanel();
+            block.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            block.Children.Add(Ui.Note(label));
+
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(Ui.StarColumn());
+            row.ColumnDefinitions.Add(Ui.AutoColumn());
+            row.ColumnDefinitions[0].MinWidth = 0;
+            row.Margin = new Thickness(0, Theme.Space1, 0, 0);
+
+            TextBox box = new TextBox();
+            box.SetResourceReference(FrameworkElement.StyleProperty, "AppTextBox");
+            box.Text = path;
+            box.IsReadOnly = true;
+            box.FontFamily = Theme.CodeFont;
+            box.FontSize = Theme.MetaSize;
+            box.TextWrapping = TextWrapping.NoWrap;
+            box.HorizontalScrollBarVisibility = ScrollBarVisibility.Auto;
+            Ui.Name(box, label, Text("code-path-note.txt", "The place on disk. It can be selected and copied."));
+            Grid.SetColumn(box, 0);
+            row.Children.Add(box);
+
+            string copied = path;
+            Button copy = Ui.IconButton(Icons.Copy, Text("code-copy-path.txt", "Copy this path"),
+                Text("code-copy-path-note.txt", "Puts the path on the clipboard."),
+                delegate { CopyText(copied); });
+            copy.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            Grid.SetColumn(copy, 1);
+            row.Children.Add(copy);
+
+            block.Children.Add(row);
+            resultBody.Children.Add(block);
+        }
+
+        // The names of the modules that went in, as chips. A row of names run
+        // together with two spaces between them is one long word to the eye.
+        private void ResultChips(List<string> names)
+        {
+            if (names == null || names.Count == 0) return;
+            WrapPanel chips = new WrapPanel();
+            chips.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            for (int index = 0; index < names.Count; index++)
+            {
+                TextBlock text = new TextBlock();
+                text.Text = names[index];
+                text.FontSize = Theme.MicroSize;
+                text.FontFamily = Theme.CodeFont;
+                text.Foreground = Theme.TextSub;
+                Border chip = new Border();
+                chip.Background = Theme.Surface;
+                chip.BorderBrush = Theme.BorderSubtle;
+                chip.BorderThickness = new Thickness(1);
+                chip.CornerRadius = new CornerRadius(Theme.RadiusSm);
+                chip.Padding = new Thickness(Theme.Space2, 1, Theme.Space2, 1);
+                chip.Margin = new Thickness(0, 0, Theme.Space1, Theme.Space1);
+                chip.Child = text;
+                chips.Children.Add(chip);
+            }
+            resultBody.Children.Add(chips);
+        }
+
+        // What a program printed while it ran. It keeps the shape it was printed
+        // in, because that is how the reader finds the line they are looking for.
+        private void ResultOutput(string output)
+        {
+            if (String.IsNullOrEmpty(output)) return;
+            TextBox box = new TextBox();
+            box.SetResourceReference(FrameworkElement.StyleProperty, "AppTextBox");
+            box.Text = output;
+            box.IsReadOnly = true;
+            box.AcceptsReturn = true;
+            box.FontFamily = Theme.CodeFont;
+            box.FontSize = Theme.MetaSize;
+            box.TextWrapping = TextWrapping.Wrap;
+            box.MaxHeight = Theme.ResultOutputHeight;
+            box.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            box.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            Ui.Name(box, Text("code-output.txt", "What it printed"), Text("code-output-note.txt", "Everything the run wrote out. It can be selected and copied."));
+            resultBody.Children.Add(box);
+        }
+
+        private void CopyText(string text)
+        {
+            try
+            {
+                Clipboard.SetText(text);
+                Say(Text("code-path-copied.txt", "The path is on the clipboard."), "Success");
+            }
+            catch (Exception exception)
+            {
+                Say(Text("code-copy-failed.txt", "The clipboard refused the request") + ": " + exception.Message, "Danger");
+            }
         }
 
         private void ShowEditorFace()
@@ -671,14 +1196,23 @@ namespace AppStudio
             pane.RowDefinitions.Add(Ui.AutoRow());
             pane.RowDefinitions.Add(Ui.StarRow());
 
+            // The control that folds this pane away is declared before the tabs
+            // and given a column that cannot be squeezed. The tabs take what is
+            // left and trim. When the tabs held an Auto column they kept their
+            // full width at any pane width and pushed the fold control past the
+            // right hand edge, which is how narrowing this pane took away the one
+            // control that would have widened it again.
             Grid head = new Grid();
-            head.ColumnDefinitions.Add(Ui.AutoColumn());
             head.ColumnDefinitions.Add(Ui.StarColumn());
             head.ColumnDefinitions.Add(Ui.AutoColumn());
+            head.ColumnDefinitions[0].MinWidth = 0;
             head.Margin = new Thickness(Theme.Space3, 0, Theme.Space2, 0);
 
-            StackPanel tabs = new StackPanel();
-            tabs.Orientation = Orientation.Horizontal;
+            Grid tabs = new Grid();
+            tabs.ColumnDefinitions.Add(Ui.AutoColumn());
+            tabs.ColumnDefinitions.Add(Ui.AutoColumn());
+            tabs.HorizontalAlignment = HorizontalAlignment.Left;
+            tabs.ClipToBounds = true;
             workflowTab = Ui.Tab(Icons.Workflow, Text("tab-workflow.txt", "Workflow"),
                 Text("tab-workflow-note.txt", "What this session holds, in what order it was done, and replay."));
             assistantTab = Ui.Tab(Icons.Assistant, Text("tab-assistant.txt", "Ask an assistant"),
@@ -687,6 +1221,8 @@ namespace AppStudio
             assistantTab.Checked += delegate { SetTab(TabAssistant); };
             workflowTab.Click += delegate { workflowTab.IsChecked = true; };
             assistantTab.Click += delegate { assistantTab.IsChecked = true; };
+            Grid.SetColumn(workflowTab, 0);
+            Grid.SetColumn(assistantTab, 1);
             tabs.Children.Add(workflowTab);
             tabs.Children.Add(assistantTab);
             Grid.SetColumn(tabs, 0);
@@ -696,7 +1232,7 @@ namespace AppStudio
                 Text("pane-hide-note.txt", "Folds this pane away and gives the room to the editor."),
                 delegate { rightOpen = false; ApplyPanes(); });
             fold.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(fold, 2);
+            Grid.SetColumn(fold, 1);
             head.Children.Add(fold);
             Grid.SetRow(head, 0);
             pane.Children.Add(head);
@@ -711,6 +1247,31 @@ namespace AppStudio
         }
 
         private ContentControl rightFace;
+        private Grid requestHolder;
+        private bool tight;
+
+        // Under the width its words fit in, a tab keeps its drawing and drops its
+        // caption. The caption is still its accessible name and its tooltip, so
+        // what is lost is the room the words took and not the words.
+        private void SetTight(bool value)
+        {
+            if (tight == value) return;
+            tight = value;
+            TrimTab(workflowTab, value);
+            TrimTab(assistantTab, value);
+        }
+
+        private static void TrimTab(System.Windows.Controls.Primitives.ToggleButton tab, bool value)
+        {
+            if (tab == null) return;
+            Panel row = tab.Content as Panel;
+            if (row == null || row.Children.Count < 2) return;
+            for (int index = 0; index < row.Children.Count; index++)
+            {
+                TextBlock text = row.Children[index] as TextBlock;
+                if (text != null) text.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
+            }
+        }
 
         private void SetTab(string which)
         {
@@ -769,22 +1330,95 @@ namespace AppStudio
             report.Margin = new Thickness(0, 0, 0, Theme.Space4);
             workflowBody.Children.Add(report);
 
-            workflowBody.Children.Add(Ui.Label(Text("detail-steps.txt", "What was done")));
-            workflowBody.Children.Add(StepList());
+            // The recorded actions are a list of their own, in a box of their own,
+            // with a height of its own. A recording of sixty steps used to make
+            // this pane sixty steps long, so reaching replay - which is above
+            // them - meant scrolling the whole pane back up past all of them.
+            workflowBody.Children.Add(Section(Text("detail-steps.txt", "What was done"),
+                verdict.Steps > 0 ? verdict.Steps.ToString(CultureInfo.InvariantCulture) : null,
+                Scrolled(StepList(), Theme.StepListHeight)));
 
             if (session.Limits.Count > 0)
             {
-                TextBlock limits = Ui.Label(Text("detail-limits.txt", "What could not be obtained"));
-                limits.Margin = new Thickness(0, Theme.Space4, 0, 0);
-                workflowBody.Children.Add(limits);
+                StackPanel limits = new StackPanel();
                 for (int index = 0; index < session.Limits.Count; index++)
                 {
-                    TextBlock line = Ui.Note(session.Limits[index]);
-                    line.Foreground = Theme.CautionText;
-                    line.Margin = new Thickness(0, Theme.Space1, 0, 0);
-                    workflowBody.Children.Add(line);
+                    limits.Children.Add(LimitRow(session.Limits[index], index == 0));
                 }
+                workflowBody.Children.Add(Section(Text("detail-limits.txt", "What could not be obtained"),
+                    session.Limits.Count.ToString(CultureInfo.InvariantCulture),
+                    Scrolled(limits, Theme.LimitListHeight)));
             }
+        }
+
+        // A named region with what is in it, and how many. Everything variable in
+        // this product goes in one of these rather than being written into
+        // whatever space was free: a heading says what the reader is looking at,
+        // a count says how much of it there is, and the frame says where it stops.
+        private static UIElement Section(string title, string count, UIElement body)
+        {
+            StackPanel block = new StackPanel();
+            block.Margin = new Thickness(0, Theme.Space4, 0, 0);
+            Grid head = new Grid();
+            head.ColumnDefinitions.Add(Ui.StarColumn());
+            head.ColumnDefinitions.Add(Ui.AutoColumn());
+            head.Margin = new Thickness(0, 0, 0, Theme.Space2);
+            TextBlock label = Ui.Label(title);
+            Grid.SetColumn(label, 0);
+            head.Children.Add(label);
+            if (!String.IsNullOrEmpty(count))
+            {
+                TextBlock number = new TextBlock();
+                number.Text = count;
+                number.FontSize = Theme.MicroSize;
+                number.FontWeight = FontWeights.SemiBold;
+                number.Foreground = Theme.TextMuted;
+                number.VerticalAlignment = VerticalAlignment.Center;
+                Grid.SetColumn(number, 1);
+                head.Children.Add(number);
+            }
+            block.Children.Add(head);
+            Border frame = new Border();
+            frame.Background = Theme.SurfaceSunken;
+            frame.BorderBrush = Theme.BorderSubtle;
+            frame.BorderThickness = new Thickness(1);
+            frame.CornerRadius = new CornerRadius(Theme.RadiusSm);
+            frame.Padding = new Thickness(Theme.Space2);
+            frame.Child = body;
+            block.Children.Add(frame);
+            return block;
+        }
+
+        // A list that stops at a height and scrolls inside itself, so the pane
+        // around it stays the length of the pane.
+        private static UIElement Scrolled(UIElement body, double maxHeight)
+        {
+            ScrollViewer scroll = new ScrollViewer();
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            scroll.MaxHeight = maxHeight;
+            scroll.Content = body;
+            return scroll;
+        }
+
+        private static UIElement LimitRow(string text, bool first)
+        {
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(Ui.AutoColumn());
+            row.ColumnDefinitions.Add(Ui.StarColumn());
+            row.Margin = new Thickness(0, first ? 0 : Theme.Space2, 0, 0);
+            Border mark = new Border();
+            mark.Width = 3;
+            mark.CornerRadius = new CornerRadius(2);
+            mark.Background = Theme.Caution;
+            mark.Margin = new Thickness(0, 1, Theme.Space2, 1);
+            Grid.SetColumn(mark, 0);
+            row.Children.Add(mark);
+            TextBlock line = Ui.Note(text);
+            line.Foreground = Theme.CautionText;
+            Grid.SetColumn(line, 1);
+            row.Children.Add(line);
+            return row;
         }
 
         // The wait between steps, as a thing the operator sets rather than a
@@ -847,30 +1481,55 @@ namespace AppStudio
                 body.Children.Add(Ui.Note(Text("steps-none.txt", "This session has no recorded action.")));
                 return body;
             }
+            // One recorded action, as a row of its own: its place in the order, a
+            // mark for how it went the last time it was played back, and what it
+            // was. Run together as sentences these were a paragraph in which the
+            // reader had to find the boundaries between actions themselves.
             for (int index = 0; index < session.Steps.Count; index++)
             {
                 StepRecord step = session.Steps[index];
+                bool bad = step.LastReplay != null && step.LastReplay.State != "done";
                 Grid row = new Grid();
                 row.ColumnDefinitions.Add(Ui.AutoColumn());
+                row.ColumnDefinitions.Add(Ui.AutoColumn());
                 row.ColumnDefinitions.Add(Ui.StarColumn());
-                row.Margin = new Thickness(0, Theme.Space1, 0, Theme.Space1);
+                row.ColumnDefinitions[2].MinWidth = 0;
+
+                Border mark = new Border();
+                mark.Width = 3;
+                mark.CornerRadius = new CornerRadius(2);
+                mark.Background = bad ? Theme.Caution : Theme.BorderSubtle;
+                mark.Margin = new Thickness(0, 0, Theme.Space2, 0);
+                Grid.SetColumn(mark, 0);
+                row.Children.Add(mark);
+
                 TextBlock number = new TextBlock();
                 number.Text = (index + 1).ToString(CultureInfo.InvariantCulture);
                 number.FontSize = Theme.MicroSize;
                 number.FontWeight = FontWeights.SemiBold;
                 number.Foreground = Theme.TextMuted;
-                number.MinWidth = 22;
-                Grid.SetColumn(number, 0);
+                number.MinWidth = 20;
+                number.Margin = new Thickness(0, 0, Theme.Space2, 0);
+                number.VerticalAlignment = VerticalAlignment.Top;
+                Grid.SetColumn(number, 1);
                 row.Children.Add(number);
+
                 TextBlock label = new TextBlock();
                 label.Text = step.Headline;
                 label.FontSize = Theme.MetaSize;
+                label.LineHeight = Theme.MetaSize * Theme.BodyLine;
                 label.TextWrapping = TextWrapping.Wrap;
-                bool bad = step.LastReplay != null && step.LastReplay.State != "done";
                 label.Foreground = bad ? Theme.CautionText : Theme.TextSub;
-                Grid.SetColumn(label, 1);
+                Grid.SetColumn(label, 2);
                 row.Children.Add(label);
-                body.Children.Add(row);
+
+                Border card = new Border();
+                card.Background = index % 2 == 0 ? Theme.Surface : Brushes.Transparent;
+                card.CornerRadius = new CornerRadius(Theme.RadiusSm);
+                card.Padding = new Thickness(Theme.Space2, Theme.Space1, Theme.Space2, Theme.Space1);
+                card.Child = row;
+                Ui.Name(card, (index + 1).ToString(CultureInfo.InvariantCulture) + ". " + step.Headline, null);
+                body.Children.Add(card);
             }
             return body;
         }
@@ -906,6 +1565,7 @@ namespace AppStudio
         private void PaintAssistant()
         {
             aiBody.Children.Clear();
+            pickBoxes.Clear();
             if (project == null)
             {
                 aiBody.Children.Add(Ui.Empty(Text("empty-ai.txt", "There is no code to discuss yet."),
@@ -913,7 +1573,7 @@ namespace AppStudio
                 return;
             }
             aiBody.Children.Add(Ui.Note(Text("code-ai-note.txt",
-                "Copy the request, paste it, and attach the two files it names. What comes back is shown as a difference across the whole editor before anything is replaced.")));
+                "Choose what to hand over, write the request, and copy it. Whatever is named in the request is written beside it and nothing else is. What comes back is shown as a difference across the whole editor before anything is replaced.")));
 
             requestBox.SetResourceReference(FrameworkElement.StyleProperty, "AppTextBox");
             requestBox.AcceptsReturn = true;
@@ -922,14 +1582,30 @@ namespace AppStudio
             requestBox.MaxHeight = 160;
             requestBox.Margin = new Thickness(0, Theme.Space3, 0, 0);
             requestBox.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            if (requestBox.Text.Length == 0)
-            {
-                requestBox.Text = Text("code-ai-request-default.txt",
-                    "Make this run reliably against the recorded application. Keep every safety rule in section 10 of the attached file.");
-            }
+            // Empty, and it stays empty. This box used to open with a request
+            // already typed into it, so a product that knows nothing about what
+            // the operator wants was stating what they wanted - and a request
+            // nobody wrote is one that gets sent unread. The prompt behind the
+            // box says what the box is for without putting words in it.
             System.Windows.Automation.AutomationProperties.SetName(requestBox, Text("code-ai-request-name.txt", "What to ask for"));
             Detach(requestBox);
-            aiBody.Children.Add(requestBox);
+            if (requestHolder == null)
+            {
+                requestHolder = Ui.Placeholder(requestBox, Text("code-ai-request-hint.txt", "Type what to ask the assistant for"));
+            }
+            Detach(requestHolder);
+            aiBody.Children.Add(requestHolder);
+
+            // What goes with it, one thing at a time. It sits between what is
+            // being asked and the button that sends it, because that is the order
+            // the decisions are made in.
+            aiBody.Children.Add(PickCard());
+
+            // What the selection costs, said before anything is generated and
+            // never in the way of generating it.
+            if (pickWarnings == null) pickWarnings = new StackPanel();
+            Detach(pickWarnings);
+            aiBody.Children.Add(pickWarnings);
 
             copyButton = Ui.IconTextButton(Icons.Copy, Text("code-ai-copy.txt", "Copy the request"),
                 Text("code-ai-copy-note.txt", "Puts the request on the clipboard. The two files to attach are written here too."),
@@ -951,13 +1627,411 @@ namespace AppStudio
             paste.HorizontalAlignment = HorizontalAlignment.Stretch;
             aiBody.Children.Add(paste);
 
+            // What the last generation actually produced, read back from the
+            // files it produced. It is not a restatement of the selection: a
+            // selection is what was asked for, and this is what exists.
+            if (generatedBox == null)
+            {
+                generatedBody = new StackPanel();
+                ScrollViewer scroll = new ScrollViewer();
+                scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+                scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+                scroll.MaxHeight = Theme.PickHeight;
+                scroll.Content = generatedBody;
+                generatedBox = new Border();
+                generatedBox.Background = Theme.SurfaceSunken;
+                generatedBox.BorderBrush = Theme.BorderSubtle;
+                generatedBox.BorderThickness = new Thickness(1);
+                generatedBox.CornerRadius = new CornerRadius(Theme.RadiusSm);
+                generatedBox.Padding = new Thickness(Theme.Space3, Theme.Space2, Theme.Space3, Theme.Space2);
+                generatedBox.Margin = new Thickness(0, Theme.Space3, 0, 0);
+                generatedBox.ClipToBounds = true;
+                generatedBox.Child = scroll;
+                System.Windows.Automation.AutomationProperties.SetName(generatedBox,
+                    Text("ai-made-title.txt", "What was generated"));
+            }
+            Detach(generatedBox);
+            aiBody.Children.Add(generatedBox);
+
+            // What the last exchange with the assistant came to, in a place of
+            // its own rather than as a sentence left under the last button. It is
+            // hidden until there is something to say, so an empty tab is not a
+            // tab with a blank line at the bottom of it.
             aiLine.FontSize = Theme.MetaSize;
             aiLine.LineHeight = Theme.MetaSize * Theme.BodyLine;
             aiLine.TextWrapping = TextWrapping.Wrap;
             aiLine.Foreground = Theme.TextMuted;
-            aiLine.Margin = new Thickness(0, Theme.Space3, 0, 0);
             Detach(aiLine);
-            aiBody.Children.Add(aiLine);
+            if (aiBox == null)
+            {
+                ScrollViewer scroll = new ScrollViewer();
+                scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+                scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+                scroll.MaxHeight = Theme.ResultHeight;
+                scroll.Content = aiLine;
+                aiBox = new Border();
+                aiBox.Background = Theme.SurfaceSunken;
+                aiBox.BorderBrush = Theme.BorderSubtle;
+                aiBox.BorderThickness = new Thickness(1);
+                aiBox.CornerRadius = new CornerRadius(Theme.RadiusSm);
+                aiBox.Padding = new Thickness(Theme.Space3, Theme.Space2, Theme.Space3, Theme.Space2);
+                aiBox.Margin = new Thickness(0, Theme.Space3, 0, 0);
+                aiBox.Child = scroll;
+                System.Windows.Automation.AutomationProperties.SetName(aiBox, Text("code-ai-said.txt", "What came of the last exchange"));
+            }
+            else
+            {
+                ScrollViewer holder = aiBox.Child as ScrollViewer;
+                if (holder != null) holder.Content = aiLine;
+            }
+            aiBox.Visibility = aiLine.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+            Detach(aiBox);
+            aiBody.Children.Add(aiBox);
+
+            PaintPickState();
+            PaintGenerated();
+        }
+
+        private Border aiBox;
+        private readonly List<CheckBox> pickBoxes = new List<CheckBox>();
+        private StackPanel pickWarnings;
+        private TextBlock pickCount;
+        private StackPanel generatedBody;
+        private Border generatedBox;
+        private Outputs.RequestOutputs lastWritten;
+        // Set while every box is being moved at once, so the fourteen handlers
+        // that fire do not each rebuild the panel underneath the press that
+        // started it.
+        private bool pickSetting;
+
+        // The list of what can be handed over.
+        //
+        // It is a flat list of items with a sentence each, in a fixed order, with
+        // a ceiling and a scrollbar. There is no preset, no recommended set and no
+        // grouping that acts: the four headings are labels over a continuous list,
+        // not switches of their own. Nothing in here is ever disabled - every
+        // combination, including none of them, is allowed and is generated as
+        // asked.
+        private UIElement PickCard()
+        {
+            StackPanel stack = new StackPanel();
+            stack.Children.Add(Ui.Label(Text("ai-picks-title.txt", "What to hand over")));
+            pickCount = Ui.Note("");
+            pickCount.Margin = new Thickness(0, Theme.Space1, 0, 0);
+            stack.Children.Add(pickCount);
+            stack.Children.Add(Ui.Note(Text("ai-picks-note.txt",
+                "Each one is separate. Only what is ticked is written, and the request describes exactly that.")));
+
+            WrapPanel both = Ui.Row();
+            both.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            Button all = Ui.IconTextButton(Icons.Check, Text("ai-pick-all.txt", "Tick all"),
+                Text("ai-pick-all-note.txt", "Ticks every item once. It is not remembered and nothing re-applies it."),
+                delegate { SelectAll(true); }, false);
+            all.Margin = new Thickness(0, 0, Theme.Space2, Theme.Space1);
+            both.Children.Add(all);
+            Button none = Ui.IconTextButton(Icons.Cross, Text("ai-pick-none.txt", "Clear all"),
+                Text("ai-pick-none-note.txt", "Unticks every item once. A request with nothing attached is allowed."),
+                delegate { SelectAll(false); }, false);
+            none.Margin = new Thickness(0, 0, 0, Theme.Space1);
+            both.Children.Add(none);
+            stack.Children.Add(both);
+
+            StackPanel list = new StackPanel();
+            list.Margin = new Thickness(0, Theme.Space2, Theme.Space2, 0);
+            PickGroup(list, Text("ai-group-record.txt", "About the recording"), AiItems.Context());
+            PickGroup(list, Text("ai-group-code.txt", "The code"), new string[] { AiItems.Engine, AiItems.Vba, AiItems.Wrapper });
+            PickGroup(list, Text("ai-group-attach.txt", "A separate attachment"), new string[] { AiItems.Pdf });
+            PickGroup(list, Text("ai-group-answer.txt", "How the answer comes back"), new string[] { AiItems.Protocol });
+
+            ScrollViewer scroll = new ScrollViewer();
+            scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            scroll.MaxHeight = Theme.PickHeight;
+            scroll.Content = list;
+            stack.Children.Add(scroll);
+
+            Border card = new Border();
+            card.Background = Theme.SurfaceSunken;
+            card.BorderBrush = Theme.BorderSubtle;
+            card.BorderThickness = new Thickness(1);
+            card.CornerRadius = new CornerRadius(Theme.RadiusSm);
+            card.Padding = new Thickness(Theme.Space3, Theme.Space3, Theme.Space3, Theme.Space3);
+            card.Margin = new Thickness(0, Theme.Space3, 0, 0);
+            card.ClipToBounds = true;
+            card.Child = stack;
+            return card;
+        }
+
+        private void PickGroup(Panel into, string title, string[] ids)
+        {
+            TextBlock label = Ui.Note(title);
+            label.FontWeight = FontWeights.SemiBold;
+            label.Foreground = Theme.TextSub;
+            label.Margin = new Thickness(0, Theme.Space3, 0, Theme.Space2);
+            into.Children.Add(label);
+            for (int index = 0; index < ids.Length; index++)
+            {
+                AiItem item = AiItems.Of(ids[index]);
+                CheckBox box = Ui.Check(item.Label, item.Note, project.Picks.Has(item.Id));
+                string id = item.Id;
+                box.Checked += delegate { SetPick(id, true); };
+                box.Unchecked += delegate { SetPick(id, false); };
+                pickBoxes.Add(box);
+                into.Children.Add(Ui.CheckBlock(box, item.Note));
+            }
+        }
+
+        // One item changed, and nothing else.
+        //
+        // No other item is read and no other item is written. What is dropped is
+        // the last generation: files written for a different selection are not
+        // this selection's handover, and leaving the summary of them on screen
+        // would present them as if they were.
+        private void SetPick(string id, bool on)
+        {
+            if (pickSetting || project == null) return;
+            project.Picks.Set(id, on);
+            Invalidate();
+            PaintPickState();
+        }
+
+        private void SelectAll(bool on)
+        {
+            if (project == null) return;
+            pickSetting = true;
+            string[] order = AiItems.Order();
+            for (int index = 0; index < order.Length; index++) project.Picks.Set(order[index], on);
+            for (int index = 0; index < pickBoxes.Count; index++) pickBoxes[index].IsChecked = on;
+            pickSetting = false;
+            Invalidate();
+            PaintPickState();
+        }
+
+        // Whatever was generated belongs to the selection it was generated from.
+        // Once that changes there is nothing ready any more, and saying so is the
+        // difference between a stale attachment and a missing one.
+        private void Invalidate()
+        {
+            handoff = null;
+            copied = false;
+            lastWritten = null;
+            PaintCopy();
+            PaintGenerated();
+            SavePicks();
+        }
+
+        // Only the note beside the code is rewritten. Ticking a box does not
+        // change a module, so it does not rewrite twenty module files.
+        private void SavePicks()
+        {
+            if (project == null) return;
+            string problem = project.SaveMeta();
+            if (problem != null) Say(Text("code-save-failed.txt", "The code folder could not be written") + ": " + problem, "Danger");
+        }
+
+        private void PaintPickState()
+        {
+            if (project == null) return;
+            if (pickCount != null)
+            {
+                pickCount.Text = project.Picks.Count.ToString(CultureInfo.InvariantCulture) + " / " +
+                    AiItems.Order().Length.ToString(CultureInfo.InvariantCulture) + "   " +
+                    Text("ai-picks-chosen.txt", "ticked");
+            }
+            if (pickWarnings == null) return;
+            pickWarnings.Children.Clear();
+            List<AiWarning> warnings = project.Picks.Warnings();
+            for (int index = 0; index < warnings.Count; index++)
+            {
+                pickWarnings.Children.Add(WarningRow(warnings[index].Text));
+            }
+            pickWarnings.Margin = new Thickness(0, warnings.Count == 0 ? 0 : Theme.Space3, 0, 0);
+        }
+
+        // A consequence, stated. It is not an error and it does not stop
+        // anything: it says what will be missing from the handover and leaves the
+        // decision where it was.
+        private UIElement WarningRow(string message)
+        {
+            TextBlock text = new TextBlock();
+            text.Text = message;
+            text.FontSize = Theme.MetaSize;
+            text.LineHeight = Theme.MetaSize * Theme.BodyLine;
+            text.TextWrapping = TextWrapping.Wrap;
+            text.Foreground = Theme.CautionText;
+            Border row = new Border();
+            row.Background = Theme.SurfaceSunken;
+            row.BorderBrush = Theme.CautionText;
+            row.BorderThickness = new Thickness(2, 0, 0, 0);
+            row.CornerRadius = new CornerRadius(0, Theme.RadiusSm, Theme.RadiusSm, 0);
+            row.Padding = new Thickness(Theme.Space3, Theme.Space2, Theme.Space3, Theme.Space2);
+            row.Margin = new Thickness(0, 0, 0, Theme.Space2);
+            row.ClipToBounds = true;
+            row.Child = text;
+            Ui.Name(row, Text("ai-warn-name.txt", "What this selection leaves out"), message);
+            return row;
+        }
+
+        // What the last generation produced, counted from the files themselves.
+        private void PaintGenerated()
+        {
+            if (generatedBody == null || generatedBox == null) return;
+            generatedBody.Children.Clear();
+            if (lastWritten == null || handoff == null)
+            {
+                generatedBox.Visibility = Visibility.Collapsed;
+                return;
+            }
+            generatedBox.Visibility = Visibility.Visible;
+            SessionMdResult markdown = lastWritten.Markdown;
+            generatedBody.Children.Add(Ui.Label(Text("ai-made-title.txt", "What was generated")));
+
+            WrapPanel stats = new WrapPanel();
+            stats.Margin = new Thickness(0, Theme.Space2, 0, 0);
+            Stat(stats, markdown == null ? 0 : markdown.Sections.Count, Text("ai-made-parts.txt", "parts"));
+            Stat(stats, markdown == null ? 0 : markdown.EngineModules, Text("ai-made-cs.txt", "C# modules"));
+            Stat(stats, markdown == null ? 0 : markdown.VbaModules, Text("ai-made-vba.txt", "VBA modules"));
+            Stat(stats, lastWritten.Pdf == null || !lastWritten.Pdf.Written ? 0 : lastWritten.Pdf.PageCount,
+                Text("ai-made-pages.txt", "PDF pages"));
+            generatedBody.Children.Add(stats);
+
+            // The files that exist, with what each one weighs. Named from the
+            // handover, so a file that is not an attachment is not listed as one.
+            generatedBody.Children.Add(Sub(Text("ai-made-files.txt", "Files written for this request")));
+            if (handoff.Attachments.Count == 0)
+            {
+                generatedBody.Children.Add(Ui.Note(Text("ai-made-none.txt",
+                    "No attachment. The request carries the question on its own and says so.")));
+            }
+            for (int index = 0; index < handoff.Attachments.Count; index++)
+            {
+                HandoffAttachment attachment = handoff.Attachments[index];
+                generatedBody.Children.Add(FileRow(attachment.Name, attachment.Bytes));
+            }
+            if (handoff.Path != null) generatedBody.Children.Add(FileRow("request.md", Weigh(handoff.Path)));
+
+            if (markdown != null && markdown.Sections.Count > 0)
+            {
+                generatedBody.Children.Add(Sub(Text("ai-made-included.txt", "Parts included, in this order")));
+                WrapPanel chips = new WrapPanel();
+                for (int index = 0; index < markdown.Sections.Count; index++)
+                {
+                    SessionMdSection section = markdown.Sections[index];
+                    // The number is the part's place in the file this time, and
+                    // the words are the item that was ticked. The heading as it
+                    // is written in the file is on the tooltip, so the two can be
+                    // matched up without the chip being in a language nobody
+                    // chose in.
+                    chips.Children.Add(Chip(section.Number.ToString(CultureInfo.InvariantCulture) + ". " +
+                        AiItems.Of(section.Id).Label, section.Title));
+                }
+                generatedBody.Children.Add(chips);
+            }
+
+            List<string> applied = new List<string>();
+            if (markdown != null) applied.AddRange(markdown.LimitsApplied);
+            if (lastWritten.Pdf != null && lastWritten.Pdf.Written)
+            {
+                applied.Add("screens.pdf: " + lastWritten.Pdf.PageCount.ToString(CultureInfo.InvariantCulture) +
+                    " page(s), " + lastWritten.Pdf.SizeText + ", stored " + lastWritten.Pdf.Quality +
+                    ", budget " + (lastWritten.Pdf.BudgetBytes / 1024).ToString(CultureInfo.InvariantCulture) + " KB.");
+            }
+            if (lastWritten.Pdf != null && !lastWritten.Pdf.Written && lastWritten.Pdf.Problem != null)
+            {
+                applied.Add(lastWritten.Pdf.Problem);
+            }
+            for (int index = 0; index < lastWritten.Removed.Count; index++)
+            {
+                applied.Add(Text("ai-made-removed.txt", "Left over from an earlier request and taken out of the attachment folder") +
+                    ": " + lastWritten.Removed[index]);
+            }
+            generatedBody.Children.Add(Sub(Text("ai-made-limits.txt", "Ceilings, compression and omissions applied")));
+            if (applied.Count == 0)
+            {
+                generatedBody.Children.Add(Ui.Note(Text("ai-made-nolimits.txt", "None. Nothing was cut, shrunk or left out.")));
+            }
+            for (int index = 0; index < applied.Count; index++)
+            {
+                TextBlock line = Ui.Note("- " + applied[index]);
+                line.Margin = new Thickness(0, 0, 0, Theme.Space1);
+                generatedBody.Children.Add(line);
+            }
+        }
+
+        private static long Weigh(string path)
+        {
+            try
+            {
+                return File.Exists(path) ? new FileInfo(path).Length : 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static TextBlock Sub(string text)
+        {
+            TextBlock block = Ui.Note(text);
+            block.FontWeight = FontWeights.SemiBold;
+            block.Foreground = Theme.TextSub;
+            block.Margin = new Thickness(0, Theme.Space3, 0, Theme.Space1);
+            return block;
+        }
+
+        private static UIElement FileRow(string name, long bytes)
+        {
+            Grid row = new Grid();
+            row.ColumnDefinitions.Add(Ui.StarColumn());
+            row.ColumnDefinitions.Add(Ui.AutoColumn());
+            row.ColumnDefinitions[0].MinWidth = 0;
+            TextBlock label = new TextBlock();
+            label.Text = name;
+            label.FontSize = Theme.MetaSize;
+            label.FontFamily = Theme.CodeFont;
+            label.Foreground = Theme.Text;
+            label.TextTrimming = TextTrimming.CharacterEllipsis;
+            Grid.SetColumn(label, 0);
+            row.Children.Add(label);
+            TextBlock size = new TextBlock();
+            size.Text = bytes.ToString("#,##0", CultureInfo.InvariantCulture) + " bytes";
+            size.FontSize = Theme.MicroSize;
+            size.Foreground = Theme.TextMuted;
+            size.Margin = new Thickness(Theme.Space3, 0, 0, 0);
+            Grid.SetColumn(size, 1);
+            row.Children.Add(size);
+            row.Margin = new Thickness(0, 0, 0, Theme.Space1);
+            Ui.Name(row, name, name + " - " + size.Text);
+            return row;
+        }
+
+        private static UIElement Chip(string label, string tooltip)
+        {
+            TextBlock text = new TextBlock();
+            text.Text = label;
+            text.FontSize = Theme.MicroSize;
+            text.Foreground = Theme.TextSub;
+            text.TextTrimming = TextTrimming.CharacterEllipsis;
+            Border chip = new Border();
+            chip.Background = Theme.Surface;
+            chip.BorderBrush = Theme.BorderSubtle;
+            chip.BorderThickness = new Thickness(1);
+            chip.CornerRadius = new CornerRadius(Theme.RadiusSm);
+            chip.Padding = new Thickness(Theme.Space2, 1, Theme.Space2, 1);
+            chip.Margin = new Thickness(0, 0, Theme.Space1, Theme.Space1);
+            chip.MaxWidth = 240;
+            chip.Child = text;
+            Ui.Name(chip, label, tooltip);
+            return chip;
+        }
+
+        // Everything the assistant tab has to say goes through here, so it always
+        // lands in the same place and the place appears only when it is used.
+        private void AiSaid(string message, Brush ink)
+        {
+            aiLine.Text = message;
+            aiLine.Foreground = ink;
+            if (aiBox != null) aiBox.Visibility = message.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         }
 
         // ---------- the difference, across the whole middle pane ----------
@@ -992,19 +2066,30 @@ namespace AppStudio
             Grid.SetColumn(head, 0);
             bar.Children.Add(head);
 
-            StackPanel choose = new StackPanel();
-            choose.Orientation = Orientation.Horizontal;
+            WrapPanel choose = Ui.Row();
             choose.VerticalAlignment = VerticalAlignment.Center;
             Button drop = Ui.IconTextButton(Icons.Cross, Text("diff-reject.txt", "Reject"),
                 Text("diff-reject-note.txt", "Drops this answer. Nothing on screen changes."), delegate { DropPending(); }, false);
+            drop.Margin = new Thickness(0, 0, Theme.Space2, Theme.Space1);
             choose.Children.Add(drop);
             Button apply = Ui.IconTextButton(Icons.Check, Text("diff-apply.txt", "Take this in"),
                 Text("diff-apply-note.txt", "Replaces the code exactly as this difference shows."), delegate { ApplyPending(); }, true);
-            apply.Margin = new Thickness(Theme.Space2, 0, 0, 0);
+            apply.Margin = new Thickness(0, 0, 0, Theme.Space1);
             choose.Children.Add(apply);
             Grid.SetColumn(choose, 1);
             bar.Children.Add(choose);
             diffBody.Children.Add(bar);
+
+            // An answer that parsed against a request which never asked for this
+            // shape is still shown, and can still be accepted - the difference
+            // below and the two buttons above are the check. What is not done is
+            // presenting it as something the request contracted for.
+            if (!ProtocolPromised)
+            {
+                UIElement caution = WarningRow(Text("diff-noprotocol.txt",
+                    "The request that was sent did not ask for a machine readable answer, so nothing here was agreed in advance. Read the difference before taking it in."));
+                diffBody.Children.Add(caution);
+            }
 
             for (int index = 0; index < pendingDiff.Count; index++)
             {
@@ -1121,8 +2206,7 @@ namespace AppStudio
             LoadEditor();
             PaintState();
             ShowEditorFace();
-            aiLine.Text = Text("code-diff-applied.txt", "Taken in.");
-            aiLine.Foreground = Theme.SuccessText;
+            AiSaid(Text("code-diff-applied.txt", "Taken in."), Theme.SuccessText);
             Say(aiLine.Text, "Success");
         }
 
@@ -1132,8 +2216,7 @@ namespace AppStudio
             pendingDiff = null;
             diffBody.Children.Clear();
             ShowEditorFace();
-            aiLine.Text = Text("code-diff-dropped.txt", "Left alone. Nothing on screen was changed.");
-            aiLine.Foreground = Theme.TextMuted;
+            AiSaid(Text("code-diff-dropped.txt", "Left alone. Nothing on screen was changed."), Theme.TextMuted);
             Say(aiLine.Text, "Caution");
         }
 
@@ -1201,8 +2284,7 @@ namespace AppStudio
             string module = currentFile;
             List<CodeFile> modules = project.Files(languageName);
             Say(Text("code-checking.txt", "Checking..."), null);
-            buildLine.Text = Text("code-checking.txt", "Checking...");
-            buildLine.Foreground = Theme.TextMuted;
+            SayResult(Text("code-checking.txt", "Checking..."), null);
             System.Threading.Thread work = new System.Threading.Thread(delegate()
             {
                 CheckResult result = ScriptRun.Check(languageName, modules, text, module);
@@ -1215,14 +2297,19 @@ namespace AppStudio
 
         private void ShowCheck(CheckResult result)
         {
-            StringBuilder text = new StringBuilder();
-            text.Append(result.Headline).Append("  (").Append(result.Method).Append(")");
+            SayResult(result.Headline, result.Ok ? "Success" : "Danger");
+            List<string> lines = new List<string>();
+            lines.Add(Text("code-check-how.txt", "checked by") + ": " + result.Method);
             for (int index = 0; index < result.Problems.Count && index < 8; index++)
             {
-                text.Append(Environment.NewLine).Append("- ").Append(result.Problems[index]);
+                lines.Add("- " + result.Problems[index]);
             }
-            buildLine.Text = text.ToString();
-            buildLine.Foreground = result.Ok ? Theme.SuccessText : Theme.DangerText;
+            if (result.Problems.Count > 8)
+            {
+                lines.Add(Text("code-check-more.txt", "further problems not shown here") + ": " +
+                    (result.Problems.Count - 8).ToString(CultureInfo.InvariantCulture));
+            }
+            ResultLines(lines, 12);
             Say(result.Headline, result.Ok ? "Success" : "Danger");
         }
 
@@ -1240,8 +2327,7 @@ namespace AppStudio
             List<CodeFile> modules = project.Files(languageName);
             string folder = BuildFolder();
             Say(Text("code-building.txt", "Building..."), null);
-            buildLine.Text = Text("code-building.txt", "Building...");
-            buildLine.Foreground = Theme.TextMuted;
+            SayResult(Text("code-building.txt", "Building..."), null);
             if (launchButton != null) launchButton.IsEnabled = false;
             System.Threading.Thread work = new System.Threading.Thread(delegate()
             {
@@ -1255,29 +2341,29 @@ namespace AppStudio
             work.Start();
         }
 
+        // A build produces four different kinds of thing, so it is reported as
+        // four things rather than as one sentence with a path buried in it: the
+        // verdict, the file that now exists, how large it is, and what went into
+        // it.
         private void ShowBuild(BuildResult result)
         {
-            StringBuilder text = new StringBuilder();
             if (!result.Ok)
             {
                 builtPath = null;
                 if (launchButton != null) launchButton.IsEnabled = false;
-                text.Append(Text("code-build-failed.txt", "Nothing was built.")).Append("  ").Append(result.Problem);
-                buildLine.Text = text.ToString();
-                buildLine.Foreground = Theme.DangerText;
+                SayResult(Text("code-build-failed.txt", "Nothing was built."), "Danger");
+                List<string> why = new List<string>();
+                if (!String.IsNullOrEmpty(result.Problem)) why.Add(result.Problem);
+                ResultLines(why, 6);
                 Say(Text("code-build-failed.txt", "Nothing was built."), "Danger");
                 return;
             }
             builtPath = result.Path;
             if (launchButton != null) launchButton.IsEnabled = true;
-            text.Append(Text("code-build-done.txt", "Built one file.")).Append("  ").Append(result.Path);
-            text.Append("  (").Append(result.Bytes.ToString(CultureInfo.InvariantCulture)).Append(" bytes)");
-            if (result.Modules.Count > 0)
-            {
-                text.Append(Environment.NewLine).Append(String.Join("  ", result.Modules.ToArray()));
-            }
-            buildLine.Text = text.ToString();
-            buildLine.Foreground = Theme.SuccessText;
+            SayResult(Text("code-build-done.txt", "Built one file."), "Success");
+            ResultPath(Text("code-built-file.txt", "the file to hand over") + "  (" +
+                result.Bytes.ToString(CultureInfo.InvariantCulture) + " bytes)", result.Path);
+            ResultChips(result.Modules);
             Say(Text("code-build-done.txt", "Built one file."), "Success");
         }
 
@@ -1324,8 +2410,7 @@ namespace AppStudio
             List<CodeFile> modules = project.Files(languageName);
             string folder = Path.Combine(project.Folder == null ? Path.GetTempPath() : project.Folder, "run");
             Say(Text("code-running.txt", "Running..."), null);
-            buildLine.Text = Text("code-running.txt", "Running...");
-            buildLine.Foreground = Theme.TextMuted;
+            SayResult(Text("code-running.txt", "Running..."), null);
             System.Threading.Thread work = new System.Threading.Thread(delegate()
             {
                 RunResult result = String.Equals(languageName, ScriptLanguages.Vba, StringComparison.Ordinal)
@@ -1340,23 +2425,20 @@ namespace AppStudio
 
         private void ShowRun(RunResult result)
         {
-            StringBuilder text = new StringBuilder();
-            if (!result.Started) text.Append(Text("code-run-nostart.txt", "It was not run.")).Append("  ").Append(result.Problem);
-            else if (result.Problem != null) text.Append(Text("code-run-stopped.txt", "It stopped.")).Append("  ").Append(result.Problem);
-            else
-            {
-                text.Append(result.Ok ? Text("code-run-done.txt", "It ran to the end.") : Text("code-run-failed.txt", "It ended with a failure."));
-                text.Append("  (exit ").Append(result.ExitCode.ToString(CultureInfo.InvariantCulture)).Append(")");
-            }
-            if (result.Output.Length > 0)
-            {
-                string output = result.Output.Length > 1200 ? result.Output.Substring(0, 1200) + " ..." : result.Output;
-                text.Append(Environment.NewLine).Append(output);
-            }
-            buildLine.Text = text.ToString();
             bool good = result.Started && result.Problem == null && result.Ok;
-            buildLine.Foreground = good ? Theme.SuccessText : Theme.DangerText;
-            Say(good ? Text("code-run-done.txt", "It ran to the end.") : Text("code-run-failed.txt", "It ended with a failure."), good ? "Success" : "Danger");
+            string headline;
+            if (!result.Started) headline = Text("code-run-nostart.txt", "It was not run.");
+            else if (result.Problem != null) headline = Text("code-run-stopped.txt", "It stopped.");
+            else headline = result.Ok ? Text("code-run-done.txt", "It ran to the end.") : Text("code-run-failed.txt", "It ended with a failure.");
+            SayResult(headline, good ? "Success" : "Danger");
+            List<string> lines = new List<string>();
+            if (!String.IsNullOrEmpty(result.Problem)) lines.Add(result.Problem);
+            if (result.Started) lines.Add("exit " + result.ExitCode.ToString(CultureInfo.InvariantCulture));
+            ResultLines(lines, 6);
+            // What it printed keeps its own lines, in its own box, because that
+            // is what somebody reads to find out where it stopped.
+            ResultOutput(result.Output);
+            Say(headline, good ? "Success" : "Danger");
         }
 
         private void Baseline()
@@ -1381,26 +2463,37 @@ namespace AppStudio
 
         // ---------- out to the assistant, and back ----------
 
+        // Everything is written again, every time.
+        //
+        // Nothing is reused: not a document from the last press, not one from an
+        // earlier selection, not code from before the last edit. What is attached
+        // has to be what is on screen now and what was ticked now, or the answer
+        // comes back about something nobody has any more.
+        //
+        // The request id is the one exception, and deliberately: it is minted once
+        // per session on screen, so pressing this again after changing the
+        // selection does not silently invalidate an answer somebody is already
+        // writing.
         private void CopyRequest()
         {
             if (project == null || session == null) return;
             Remember();
-            if (handoff == null)
-            {
-                project.RequestId = Handoff.NewRequestId();
-                Outputs.WriteAll(session, PdfBudgetBytes == null ? ScreensPdf.DefaultBudgetBytes : PdfBudgetBytes(), project);
-                handoff = Handoff.Build(session, project, requestBox.Text, project.RequestId);
-                Handoff.Write(project, handoff);
-                parts = new IntakeParts();
-                Save();
-            }
+            if (handoff == null || String.IsNullOrEmpty(project.RequestId)) project.RequestId = Handoff.NewRequestId();
+            lastWritten = Outputs.WriteForRequest(session,
+                PdfBudgetBytes == null ? ScreensPdf.DefaultBudgetBytes : PdfBudgetBytes(), project, project.Picks);
+            handoff = Handoff.Build(session, project, requestBox.Text, project.RequestId,
+                project.Picks, lastWritten.Markdown, lastWritten.Pdf);
+            Handoff.Write(project, handoff);
+            parts = new IntakeParts();
+            Save();
             if (!handoff.AttachmentsReady)
             {
-                aiLine.Text = Text("code-ai-attach-failed.txt", "The files the request tells the assistant to read were not written, so the request was not copied.") +
-                    " " + handoff.MissingText();
-                aiLine.Foreground = Theme.DangerText;
+                AiSaid(Text("code-ai-attach-failed.txt", "The files the request tells the assistant to read were not written, so the request was not copied.") +
+                    " " + handoff.MissingText(), Theme.DangerText);
                 Say(aiLine.Text, "Danger");
                 handoff = null;
+                lastWritten = null;
+                PaintGenerated();
                 return;
             }
             try
@@ -1414,9 +2507,37 @@ namespace AppStudio
             }
             copied = true;
             PaintCopy();
-            aiLine.Text = Text("code-copy-done.txt", "The request is on the clipboard. Paste it into the chat and attach the two files beside it.");
-            aiLine.Foreground = Theme.SuccessText;
+            PaintGenerated();
+            // What to do next is said in terms of what was actually made, so it
+            // never asks for a file that does not exist.
+            string done;
+            if (handoff.Attachments.Count == 0)
+            {
+                done = Text("code-copy-done-alone.txt", "The request is on the clipboard. There is no attachment: paste it on its own.");
+            }
+            else if (handoff.Attachments.Count == 1)
+            {
+                done = Text("code-copy-done-one.txt", "The request is on the clipboard. Paste it and attach the one file beside it") +
+                    ": " + handoff.Attachments[0].Name;
+            }
+            else
+            {
+                done = Text("code-copy-done-many.txt", "The request is on the clipboard. Paste it and attach the files beside it") +
+                    ": " + Names(handoff.Attachments);
+            }
+            AiSaid(done, Theme.SuccessText);
             Say(aiLine.Text, "Success");
+        }
+
+        private static string Names(List<HandoffAttachment> attachments)
+        {
+            StringBuilder text = new StringBuilder();
+            for (int index = 0; index < attachments.Count; index++)
+            {
+                if (index != 0) text.Append(", ");
+                text.Append(attachments[index].Name);
+            }
+            return text.ToString();
         }
 
         // Once a request has been copied, the button says so. Pressing it again
@@ -1456,6 +2577,29 @@ namespace AppStudio
             Open(session.AiFolder);
         }
 
+        // Whether the request that was sent actually asked for an answer this can
+        // read. When it did not, everything downstream says so: an answer that
+        // happens to parse is still an answer to a request that never promised
+        // this shape, and it is shown as a difference to be judged rather than
+        // presented as something that was contracted for.
+        //
+        // It is not forbidden. A person looking at a difference and pressing
+        // accept is the check that matters, and it is still there.
+        private bool ProtocolPromised
+        {
+            get
+            {
+                // What the request that was actually sent asked for, while that
+                // is still known. Once the selection is changed the generated
+                // request is dropped, and the current selection is used instead -
+                // which errs towards warning, and warning about an answer that
+                // was in fact contracted for costs a sentence, while the reverse
+                // costs the operator the reason to look.
+                if (handoff != null && handoff.Picks != null) return handoff.Picks.Has(AiItems.Protocol);
+                return project != null && project.Picks.Has(AiItems.Protocol);
+            }
+        }
+
         private void TakeIn()
         {
             if (project == null) return;
@@ -1483,8 +2627,7 @@ namespace AppStudio
                 if (!added.Ok) { Refused(added); return; }
                 if (!parts.Complete)
                 {
-                    aiLine.Text = Text("code-intake-partial.txt", "Part taken in. Still needed") + ": " + parts.MissingText();
-                    aiLine.Foreground = Theme.CautionText;
+                    AiSaid(Text("code-intake-partial.txt", "Part taken in. Still needed") + ": " + parts.MissingText(), Theme.CautionText);
                     Say(aiLine.Text, "Caution");
                     return;
                 }
@@ -1493,8 +2636,7 @@ namespace AppStudio
             }
             if (parsed.NoChange != null)
             {
-                aiLine.Text = Refusal(parsed.NoChange);
-                aiLine.Foreground = Theme.CautionText;
+                AiSaid(Refusal(parsed.NoChange), Theme.CautionText);
                 Say(aiLine.Text, "Caution");
                 return;
             }
@@ -1518,9 +2660,18 @@ namespace AppStudio
 
         private void Refused(IntakeResult result)
         {
-            aiLine.Text = Text("code-intake-refused.txt", "The answer was not taken in.") + " " + result.Message + "  [" + result.Reason + "]";
-            aiLine.Foreground = Theme.DangerText;
-            Say(Text("code-intake-refused.txt", "The answer was not taken in.") + " " + result.Message, "Danger");
+            string why = Text("code-intake-refused.txt", "The answer was not taken in.") + " " + result.Message;
+            // When the request never asked for a marked answer, an answer without
+            // the marks is the expected outcome rather than a misbehaving
+            // assistant, and saying which of the two it is saves the operator
+            // hunting for a fault that is a setting.
+            if (!ProtocolPromised)
+            {
+                why = why + " " + Text("code-intake-noprotocol.txt",
+                    "This request did not ask for a machine readable answer, so there is nothing here to read back. Apply the answer by hand, or tick the answer format and ask again.");
+            }
+            AiSaid(why + "  [" + result.Reason + "]", Theme.DangerText);
+            Say(why, "Danger");
         }
 
         private void Open(string path)

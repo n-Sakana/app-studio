@@ -20,6 +20,7 @@ $tests = @(
     'test-code-build.ps1',
     'test-vba-binary.ps1',
     'test-handoff.ps1',
+    'test-ai-picks.ps1',
     'test-intake.ps1',
     'test-diagnostics.ps1',
     'test-acq-diagnostics.ps1',
@@ -33,6 +34,7 @@ $tests = @(
     'test-autosave.ps1',
     'test-scan.ps1',
     'test-ui-shell.ps1',
+    'test-pane-layout.ps1',
     'test-layout-audit.ps1',
     'test-hud-fit.ps1',
     'test-hang-recovery.ps1'

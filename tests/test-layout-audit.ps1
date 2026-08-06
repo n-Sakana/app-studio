@@ -79,6 +79,27 @@ function InScroller($element) {
     return $false
 }
 
+# A tooltip, a menu and a dropped-down list are drawn in windows of their own and
+# are placed relative to the pointer, so standing outside the window that owns
+# them is what they are supposed to do - a tooltip near the right hand edge is
+# meant to hang past it. They are still audited for having a place on screen at
+# all; they are only exempt from having to be inside their owner.
+function InPopup($element, $window) {
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $node = $element
+    for ($depth = 0; $depth -lt 16 -and $null -ne $node; $depth++) {
+        try { if ([System.Windows.Automation.Automation]::Compare($node, $window)) { return $false } } catch { }
+        try {
+            $kind = $node.Current.ControlType
+            if ($kind -eq [System.Windows.Automation.ControlType]::ToolTip -or
+                $kind -eq [System.Windows.Automation.ControlType]::Menu -or
+                $kind -eq [System.Windows.Automation.ControlType]::Window) { return $true }
+        } catch { }
+        try { $node = $walker.GetParent($node) } catch { return $false }
+    }
+    return $false
+}
+
 # Everything visible under a window, with its rectangle, its kind and its name.
 function Walk($element) {
     $found = New-Object 'System.Collections.Generic.List[object]'
@@ -125,7 +146,7 @@ function Audit($screen, $window, $bounds) {
         $overLeft = $bounds.X - $rect.X
         $overTop = $bounds.Y - $rect.Y
         if ($overRight -gt 1 -or $overBottom -gt 1 -or $overLeft -gt 1 -or $overTop -gt 1) {
-            if (-not (InScroller $item)) {
+            if (-not (InScroller $item) -and -not (InPopup $item $window)) {
                 $how = @()
                 if ($overRight -gt 1) { $how += ([int]$overRight).ToString() + 'px past the right' }
                 if ($overBottom -gt 1) { $how += ([int]$overBottom).ToString() + 'px past the bottom' }

@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSEdition -eq 'Core') {
     $windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -STA -File $PSCommandPath
@@ -102,6 +102,20 @@ function Start-App($baseDir) {
     try { $a.Kill() } catch { }
     throw 'the window never appeared'
 }
+# A past session is reached from the picker and from nowhere else. Opening the
+# product no longer puts one on screen by itself, so every check below that needs
+# a session in the panes says so by choosing one here.
+function Choose-Session($window, $which) {
+    $pickers = @(All-Of $window ([System.Windows.Automation.ControlType]::ComboBox))
+    if ($pickers.Count -lt 1) { throw 'the window has no session picker' }
+    $expand = $pickers[0].GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+    $expand.Expand(); Start-Sleep -Milliseconds 800
+    $items = $pickers[0].FindAll([System.Windows.Automation.TreeScope]::Descendants,
+        (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)))
+    if ($items.Count -le $which) { throw ('the picker holds ' + $items.Count + ' sessions, not ' + ($which + 1)) }
+    $items[$which].GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern).Select()
+    Start-Sleep -Milliseconds 2200
+}
 function Editor-Text($window) {
     $b = Wait-Named $window ([System.Windows.Automation.ControlType]::Edit) (M 'code-editor-name.txt' 'The automation, as code') 15000
     if ($null -eq $b) { throw ('the code editor is not on screen. Screen says: ' + (Screen-Text $window)) }
@@ -161,9 +175,19 @@ try {
     $h.App.Kill(); Start-Sleep -Milliseconds 900
 
     # ---------- 2. a session, the three panes, and folding down and back ----
+    #
+    # There is a recording on disk and the window still opens on the empty state:
+    # what somebody finished yesterday is not what they came here to look at. It
+    # is put on screen the way a person puts it there, from the picker.
     $session = Seed $temp
     $h = Start-App $temp
     $w = $h.Win
+    $opening = Screen-Text $w
+    if ($opening.IndexOf((M 'empty-code.txt' 'No code has been generated yet.'), [StringComparison]::Ordinal) -lt 0) {
+        throw ('a session on disk was put on screen at startup. The window says: ' + $opening)
+    }
+    Shoot $w 'opened-with-a-session-on-disk'
+    Choose-Session $w 0
     $before = Editor-Text $w
     if ($before.Length -lt 40) { throw ('the editor opened with ' + $before.Length + ' characters in it') }
     if ($before.IndexOf('Workflow', [StringComparison]::Ordinal) -lt 0) { throw 'the editor did not open on the procedure' }
@@ -172,20 +196,47 @@ try {
     # headings the PowerShell wrapper the build writes and the VBA spelling of
     # the same procedure. A folded heading is closed, not absent, so the two are
     # opened here before they are looked for.
-    $groups = @()
-    foreach ($i in All-Of $w ([System.Windows.Automation.ControlType]::TreeItem)) { $groups += $i.Current.Name }
-    foreach ($heading in @((M 'code-group-wrapper.txt' 'PowerShell wrapper (written by the build)'),
-                           (M 'code-group-vba.txt' 'VBA (the same procedure, for Excel)'))) {
-        if ($groups -notcontains $heading) { throw ('the module list has no heading "' + $heading + '". It has: ' + ($groups -join ', ')) }
-        $node = Find-Named $w ([System.Windows.Automation.ControlType]::TreeItem) $heading
-        $node.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern).Expand()
-        Start-Sleep -Milliseconds 500
+    function Expand-All($window) {
+        for ($round = 0; $round -lt 4; $round++) {
+            foreach ($i in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) {
+                try {
+                    $p = $i.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
+                    if ($p.Current.ExpandCollapseState -eq [System.Windows.Automation.ExpandCollapseState]::Collapsed) { $p.Expand() }
+                } catch { }
+            }
+            Start-Sleep -Milliseconds 400
+        }
     }
-    $names = @()
-    foreach ($i in All-Of $w ([System.Windows.Automation.ControlType]::TreeItem)) { $names += $i.Current.Name }
-    foreach ($wanted in @('Workflow.cs', 'RuntimeCore.cs', 'Wrapper.ps1', 'Workflow.bas')) {
-        if ($names -notcontains $wanted) { throw ('the module list has no ' + $wanted + '. It has: ' + ($names -join ', ')) }
+    function Tree-Names($window) {
+        $out = @()
+        foreach ($i in All-Of $window ([System.Windows.Automation.ControlType]::TreeItem)) { $out += $i.Current.Name }
+        return $out
     }
+    # The two languages are two positions of one control rather than two headings
+    # in one list, so each is looked for where it now lives. Everything that was
+    # reachable before still is: the five C# modules and the wrapper the build
+    # writes under PowerShell, the five VBA modules under VBA.
+    foreach ($segment in @((M 'lang-powershell.txt' 'PowerShell'), (M 'lang-vba.txt' 'VBA'))) {
+        if ($null -eq (Find-Named $w ([System.Windows.Automation.ControlType]::Button) $segment)) {
+            throw ('the module pane has no "' + $segment + '" position')
+        }
+    }
+    Expand-All $w
+    $names = Tree-Names $w
+    foreach ($wanted in @('Workflow.cs', 'RecordedFacts.cs', 'RuntimeCore.cs', 'RuntimeLocator.cs', 'RuntimeNative.cs', 'Wrapper.ps1')) {
+        if ($names -notcontains $wanted) { throw ('the PowerShell side has no ' + $wanted + '. It has: ' + ($names -join ', ')) }
+    }
+    if ($names -contains 'Workflow.bas') { throw 'the PowerShell side is listing the VBA modules beside the C# ones again' }
+    Shoot $w 'modules-powershell'
+    Press $w (M 'lang-vba.txt' 'VBA') | Out-Null
+    Expand-All $w
+    $names = Tree-Names $w
+    foreach ($wanted in @('Workflow.bas', 'RecordedFacts.bas', 'RuntimeCore.bas', 'RuntimeLocator.bas', 'RuntimeNative.bas')) {
+        if ($names -notcontains $wanted) { throw ('the VBA side has no ' + $wanted + '. It has: ' + ($names -join ', ')) }
+    }
+    Shoot $w 'modules-vba'
+    Press $w (M 'lang-powershell.txt' 'PowerShell') | Out-Null
+    Expand-All $w
     Shoot $w 'three-panes'
 
     # ---------- the editor actually draws the file ------------------------
@@ -297,6 +348,118 @@ try {
     $row = Find-Named $w ([System.Windows.Automation.ControlType]::TreeItem) 'Workflow.cs'
     if ($null -eq $row -or $row.Current.IsOffscreen) { throw 'the module list did not come back' }
 
+    # ---------- 3b. what goes to an assistant is picked, item by item -------
+    #
+    # The window has to let every combination be asked for. That means the boxes
+    # are all really there, none of them is greyed out because of what it was
+    # combined with, and nothing else on the window moves them: which module the
+    # editor is showing and which language a build targets are separate states
+    # from this one, and the point of separating them is that they do not touch.
+    Press $w (M 'tab-assistant.txt' 'Ask an assistant') | Out-Null
+    Start-Sleep -Milliseconds 600
+    function Picks($window) {
+        $found = @{}
+        foreach ($i in All-Of $window ([System.Windows.Automation.ControlType]::CheckBox)) {
+            $found[$i.Current.Name] = $i
+        }
+        return $found
+    }
+    function Pick-State($window) {
+        $state = @{}
+        foreach ($pair in (Picks $window).GetEnumerator()) {
+            $state[$pair.Key] = $pair.Value.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Current.ToggleState.ToString()
+        }
+        return $state
+    }
+    $pickLabels = @(
+        (M 'ai-pick-environment.txt' 'Machine, screens and coordinates'),
+        (M 'ai-pick-privacy.txt' 'What was and was not written down'),
+        (M 'ai-pick-apps.txt' 'The applications'),
+        (M 'ai-pick-screens.txt' 'The screen and window ledger'),
+        (M 'ai-pick-elements.txt' 'The element ledger'),
+        (M 'ai-pick-actions.txt' 'What the operator did'),
+        (M 'ai-pick-replay.txt' 'The replay results'),
+        (M 'ai-pick-coverage.txt' 'Coverage, limits and diagnostics'),
+        (M 'ai-pick-guidance.txt' 'Guidance and the safety rules'),
+        (M 'ai-pick-engine.txt' 'The C# automation code'),
+        (M 'ai-pick-vba.txt' 'The VBA code'),
+        (M 'ai-pick-wrapper.txt' 'The PowerShell launch wrapper'),
+        (M 'ai-pick-pdf.txt' 'The screen picture document'),
+        (M 'ai-pick-protocol.txt' 'The answer format and the take-back protocol'))
+    $boxes = Picks $w
+    foreach ($label in $pickLabels) {
+        if (-not $boxes.ContainsKey($label)) {
+            throw ('the assistant tab has no box for "' + $label + '". It has: ' + (($boxes.Keys | Sort-Object) -join ' / '))
+        }
+        if (-not $boxes[$label].Current.IsEnabled) {
+            throw ('"' + $label + '" is greyed out, so some combination cannot be asked for')
+        }
+    }
+    Shoot $w 'ai-picks'
+    # Every box, toggled, with everything else left alone. Nothing may be
+    # disabled by the combination it lands in, and nothing else may move.
+    foreach ($label in $pickLabels) {
+        $pickBefore = Pick-State $w
+        $boxes[$label].GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+        Start-Sleep -Milliseconds 220
+        $pickAfter = Pick-State $w
+        foreach ($other in $pickLabels) {
+            if (-not (Picks $w)[$other].Current.IsEnabled) {
+                throw ('toggling "' + $label + '" greyed out "' + $other + '"')
+            }
+            if ($other -eq $label) {
+                if ($pickAfter[$other] -eq $pickBefore[$other]) { throw ('"' + $label + '" did not change when toggled') }
+                continue
+            }
+            if ($pickAfter[$other] -ne $pickBefore[$other]) {
+                throw ('toggling "' + $label + '" also moved "' + $other + '"')
+            }
+        }
+        $boxes[$label].GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+        Start-Sleep -Milliseconds 220
+    }
+    # Three separate states. The editor language and the build target are moved
+    # here, and not one tick may follow them.
+    $settled = Pick-State $w
+    Press $w (M 'lang-vba.txt' 'VBA') | Out-Null
+    Press $w (M 'tab-assistant.txt' 'Ask an assistant') | Out-Null
+    $afterVba = Pick-State $w
+    foreach ($label in $pickLabels) {
+        if ($afterVba[$label] -ne $settled[$label]) { throw ('switching the editor to VBA moved "' + $label + '"') }
+    }
+    Press $w (M 'lang-powershell.txt' 'PowerShell') | Out-Null
+    Press $w (M 'tab-assistant.txt' 'Ask an assistant') | Out-Null
+    $afterBack = Pick-State $w
+    foreach ($label in $pickLabels) {
+        if ($afterBack[$label] -ne $settled[$label]) { throw ('switching the editor back moved "' + $label + '"') }
+    }
+    # Switching the pictures off says what that costs, and still generates.
+    $pdfLabel = M 'ai-pick-pdf.txt' 'The screen picture document'
+    (Picks $w)[$pdfLabel].GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+    Start-Sleep -Milliseconds 500
+    $warned = Screen-Text $w
+    $pdfWarning = (M 'ai-warn-no-pdf.txt' 'The picture document is off').Substring(0, 12)
+    if ($warned.IndexOf($pdfWarning, [StringComparison]::Ordinal) -lt 0) {
+        throw ('switching the pictures off did not warn. Screen says: ' + $warned)
+    }
+    Shoot $w 'ai-picks-warning'
+    Press $w (M 'code-ai-copy.txt' 'Copy the request') | Out-Null
+    Start-Sleep -Milliseconds 3500
+    $aiFolder = Join-Path $session.Folder 'out\ai'
+    $attached = @(Get-ChildItem -LiteralPath $aiFolder -File | ForEach-Object { $_.Name })
+    if ($attached -contains 'screens.pdf') {
+        throw 'the picture document was switched off but is still sitting in the attachment folder'
+    }
+    if ($attached -notcontains 'session.md') { throw 'nothing was written for a request that selected the text' }
+    $made = Screen-Text $w
+    if ($made.IndexOf((M 'ai-made-title.txt' 'What was generated'), [StringComparison]::Ordinal) -lt 0) {
+        throw ('the window does not say what it generated. Screen says: ' + $made)
+    }
+    Shoot $w 'ai-generated'
+    # Back on, so the section below runs against the whole handover.
+    (Picks $w)[$pdfLabel].GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern).Toggle()
+    Start-Sleep -Milliseconds 500
+
     # ---------- 4. an answer from an assistant becomes a difference ---------
     #
     # Nothing an assistant returns may reach the editor without being read
@@ -390,9 +553,18 @@ try {
         throw ('the build result is not stated beside the code. Screen says: ' + $said)
     }
     Shoot $w 'build-done'
+    # A build is the third of the three separate states, so it is checked against
+    # the second here rather than earlier: it must not have moved a single tick.
+    Press $w (M 'tab-assistant.txt' 'Ask an assistant') | Out-Null
+    $afterBuild = Pick-State $w
+    foreach ($label in $pickLabels) {
+        if ($afterBuild[$label] -ne $settled[$label]) { throw ('building moved "' + $label + '"') }
+    }
+    Press $w (M 'tab-workflow.txt' 'Workflow') | Out-Null
 
     Write-Output ('PASS test-ui-shell empty=stated modules=' + $names.Count +
-        ' inkTop=' + $inkAtTop + ' miniKeepsEditor=1 paneFold=1 diff=centre,reject-kept,apply-replaced buildEnablesLaunch=1')
+        ' inkTop=' + $inkAtTop + ' miniKeepsEditor=1 paneFold=1 diff=centre,reject-kept,apply-replaced buildEnablesLaunch=1' +
+        ' aiPicks=' + $pickLabels.Count + ' disabled=0 crossTalk=0 langIndependent=1 buildIndependent=1 pdfOffWarned=1 generatedSummary=1')
 } finally {
     if ($null -ne $app) { try { $app.Kill() } catch { } }
     if ($null -ne $h -and $null -ne $h.App) { try { if (-not $h.App.HasExited) { $h.App.Kill() } } catch { } }

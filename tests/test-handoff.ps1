@@ -41,12 +41,13 @@ $requestId=[AppStudio.Handoff]::NewRequestId()
 if(-not[AppStudio.Handoff]::IsRequestId($requestId)){throw 'a freshly made request id is not accepted by its own reader'}
 if([AppStudio.Handoff]::IsRequestId('not-an-id')){throw 'anything at all is being accepted as a request id'}
 
-# The two files the request tells the assistant to read have to exist before it
-# is worth pasting anything, so they are written the way the product writes
-# them.
-$null=[AppStudio.Outputs]::WriteAll($session,6291456,$project)
+# The files the request tells the assistant to read have to exist before it is
+# worth pasting anything, so they are written exactly the way the window writes
+# them: from a selection, on every request.
+$picks=[AppStudio.AiPicks]::Default()
+$made=[AppStudio.Outputs]::WriteForRequest($session,6291456,$project,$picks)
 
-$result=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId)
+$result=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId,$picks,$made.Markdown,$made.Pdf)
 $text=$result.Text
 
 # ---- one copy, one paste -----------------------------------------------------
@@ -68,7 +69,17 @@ if(-not$text.Contains('Make the save reliable.')){throw 'the request dropped wha
 foreach($name in @('session.md','screens.pdf')){
  if(-not$text.Contains($name)){throw ('the request does not name the attachment '+$name)}
 }
-if(-not$text.Contains('section 10')){throw 'the request does not say where in the attachment the code is'}
+# Where the code is, is read from the file that was written, not asserted from a
+# fixed number. A part can be left out, so "section 10" named a different thing
+# every time and, once anything above it was dropped, named the wrong one.
+if($text.Contains('section 10 of')){throw 'the request still points at a fixed section number'}
+$engineSection=$result.Markdown.Section('engine')
+if($null-eq$engineSection){throw 'the C# code was selected but is not a section of the file'}
+if(-not$text.Contains('section '+$engineSection.Number+', "'+$engineSection.Title+'"')){throw 'the request does not say where in the attachment the code is'}
+if(-not$text.Contains('`session.md` has these parts, and only these:')){throw 'the request does not list what is actually in the attachment'}
+foreach($part in $result.Markdown.Sections){
+ if(-not$text.Contains($part.Number.ToString()+'. '+$part.Title)){throw ('the request does not list the part '+$part.Title)}
+}
 
 # ---- what is NOT in it -------------------------------------------------------
 #
@@ -103,16 +114,25 @@ foreach($attachment in $result.Attachments){
  if($attachment.Bytes-le0){throw ($attachment.Name+' is empty')}
 }
 Remove-Item (Join-Path $session.AiFolder 'screens.pdf') -Force
-$gone=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId)
+$gone=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId,$picks,$made.Markdown,$made.Pdf)
 if($gone.AttachmentsReady){throw 'a missing attachment was reported as ready'}
 if($gone.MissingText()-ne'screens.pdf'){throw ('the missing attachment was named as '+$gone.MissingText())}
 
 # ---- the code really is in the attachment ------------------------------------
 $markdown=[IO.File]::ReadAllText($session.SessionMdPath,(New-Object Text.UTF8Encoding($false)))
-if(-not$markdown.Contains('## 10. The automation as it stands')){throw 'session.md does not carry the automation'}
+$csSection=$result.Markdown.Section('engine')
+$vbaSection=$result.Markdown.Section('vba')
+if(-not$markdown.Contains('## '+$csSection.Number+'. '+$csSection.Title)){throw 'session.md does not carry the C# automation under its own heading'}
+if(-not$markdown.Contains('## '+$vbaSection.Number+'. '+$vbaSection.Title)){throw 'session.md does not carry the VBA automation under its own heading'}
+if(-not$markdown.Contains('## Contents')){throw 'session.md does not list what is in it'}
 foreach($module in @('Workflow.cs','RecordedFacts.cs','RuntimeCore.cs','Workflow.bas','RuntimeCore.bas')){
  if(-not$markdown.Contains($module)){throw ('session.md does not carry '+$module)}
 }
+# The C# is fenced as C#. It used to be fenced as PowerShell, because the
+# internal name for this language is `powershell` - which is what the build
+# wrapper is written in, not what these modules are.
+if(-not$markdown.Contains('```csharp')){throw 'the C# modules are not fenced as C#'}
+if($markdown.Contains('```powershell')-and-not$picks.Has('wrapper')){throw 'C# is still being fenced as PowerShell'}
 foreach($op in @('FindWindow','FocusElement','InvokeElement','SetElementText','ReadElementText','SendKeys','WaitGap','WaitIdle','AskSecret')){
  if(-not$markdown.Contains('`'+$op+'`')){throw ('session.md does not describe the operation '+$op)}
 }
@@ -122,12 +142,18 @@ foreach($claim in @('Never press a remembered screen coordinate','physical scree
 if(-not$markdown.Contains('namespace AppStudioRun')){throw 'session.md does not carry the engine as it stands'}
 if(-not$markdown.Contains('Attribute VB_Name')){throw 'session.md does not carry the VBA as it stands'}
 
-# ---- the handover is still exactly two files ---------------------------------
+# ---- the assistant folder holds exactly what this request names ---------------
+#
+# Not "two files" any more: exactly the set the selection asked for, rebuilt on
+# every request, so a document left over from a different selection is never
+# sitting there waiting to be attached.
 $aiFiles=@(Get-ChildItem $session.AiFolder -File)
 if($aiFiles.Count-ne1){throw 'the assistant folder changed shape while one file was deleted for the test'}
-$null=[AppStudio.Outputs]::WriteAll($session,6291456,$project)
+$again=[AppStudio.Outputs]::WriteForRequest($session,6291456,$project,$picks)
 $aiFiles=@(Get-ChildItem $session.AiFolder -File)
-if($aiFiles.Count-ne2){throw ('the assistant folder holds '+$aiFiles.Count+' files instead of 2')}
+if($aiFiles.Count-ne2){throw ('the assistant folder holds '+$aiFiles.Count+' files instead of the 2 that were selected')}
+$back=[AppStudio.Handoff]::Build($session,$project,'Make the save reliable.',$requestId,$picks,$again.Markdown,$again.Pdf)
+if(-not$back.AttachmentsReady){throw 'the files were rewritten but the request still says they are missing'}
 
 # The request is written beside the code, not into the assistant folder: that
 # folder is exactly two files and has to stay that way.

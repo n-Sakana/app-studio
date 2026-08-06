@@ -90,17 +90,46 @@ namespace AppStudio
         // A collapsed pane is not gone: it leaves the rail that brings it back.
         public const double PaneRailWidth = 34;
         public const double SplitterWidth = 6;
-        // The small window. It is a bar with the recording controls on it, so it
-        // is measured by what those controls need rather than by a shape chosen
-        // for a launcher.
-        // Wide enough for everything the small bar has to carry at once: the two
-        // ways to start a session, the recording settings, which session, replay
-        // and its speed, the theme, the settings and the way back. Narrower than
-        // this and the session picker - the only route to a past recording - is
-        // the thing that gets squeezed off the end.
-        public const double MiniWidth = 940;
+        // What a pane keeps when the window is too narrow for every minimum at
+        // once. The minimums above are what a pane wants; this is the width under
+        // which it holds nothing a person could use, and no arrangement is
+        // allowed to take a pane below it while it is open. Between the two the
+        // minimums are given up in proportion, which is what keeps the whole
+        // arrangement inside the window instead of letting it run off the right.
+        public const double PaneFloorWidth = 96;
+        // A recorded procedure can be any length, and the pane it is shown in
+        // cannot. These are where the two lists inside the workflow pane stop and
+        // start scrolling within themselves, so the pane stays the length of the
+        // pane whatever was recorded into it.
+        public const double StepListHeight = 260;
+        public const double LimitListHeight = 150;
+        // What a check, a build or a run said, beside the code. It stops here and
+        // scrolls inside itself so the editor above it keeps its height whatever
+        // came back.
+        public const double ResultHeight = 132;
+        public const double ResultOutputHeight = 96;
+        // The list of things that can be handed over is longer than the pane it
+        // sits in, so it is given a ceiling and scrolls inside it. Without one it
+        // pushes the button that acts on it off the bottom of the pane.
+        public const double PickHeight = 300;
+
+        // ---- the small window ----
+        // A column, not a bar. What it holds is a recording being made and the
+        // steps arriving one under another, and steps arrive downwards, so the
+        // shape that fits them is tall and narrow. It also has to sit beside the
+        // application being recorded rather than across it.
+        public const double MiniWidth = 372;
+        public const double MiniMinWidth = 320;
+        public const double MiniHeight = 620;
+        public const double MiniMinHeight = 300;
+        // With the step list folded away: the controls, the session and the one
+        // row that opens the list again, and nothing else.
+        public const double MiniFoldedHeight = 340;
         public const double MiniBarHeight = 56;
         public const double MiniListHeight = 260;
+        // How long the window takes to change shape. Long enough to be followed
+        // by eye, short enough not to be waited for.
+        public const int ShapeChangeMs = 170;
 
         private static readonly Dictionary<string, SolidColorBrush> Brushes = new Dictionary<string, SolidColorBrush>(StringComparer.Ordinal);
         private static readonly List<ResourceDictionary> Installed = new List<ResourceDictionary>();
@@ -553,6 +582,42 @@ namespace AppStudio
 "          </Trigger>" +
 "          <Trigger Property='IsEnabled' Value='False'>" +
 "            <Setter TargetName='shell' Property='Opacity' Value='0.35'/>" +
+"          </Trigger>" +
+"        </ControlTemplate.Triggers>" +
+"      </ControlTemplate>" +
+"    </Setter.Value>" +
+"  </Setter>" +
+"</Style>" +
+
+// One half of a two position control. The chosen half is a filled surface
+// rather than an underline, because the two are alternatives to each other
+// rather than two tabs of one set - and because the pair sits inside a sunken
+// track that has to read as one control from across a desk.
+"<Style x:Key='AppSegment' TargetType='ToggleButton'>" +
+"  <Setter Property='MinHeight' Value='28'/>" +
+"  <Setter Property='Cursor' Value='Hand'/>" +
+"  <Setter Property='FontSize' Value='12'/>" +
+"  <Setter Property='FontWeight' Value='SemiBold'/>" +
+"  <Setter Property='Padding' Value='8,0,8,0'/>" +
+"  <Setter Property='SnapsToDevicePixels' Value='True'/>" +
+"  <Setter Property='Template'>" +
+"    <Setter.Value>" +
+"      <ControlTemplate TargetType='ToggleButton'>" +
+"        <Border x:Name='face' Background='Transparent' CornerRadius='4' Padding='{TemplateBinding Padding}'>" +
+"          <ContentPresenter x:Name='label' HorizontalAlignment='Center' VerticalAlignment='Center' " +
+"                            TextBlock.Foreground='{DynamicResource TextMuted}'/>" +
+"        </Border>" +
+"        <ControlTemplate.Triggers>" +
+"          <Trigger Property='IsMouseOver' Value='True'>" +
+"            <Setter TargetName='label' Property='TextBlock.Foreground' Value='{DynamicResource TextSub}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsChecked' Value='True'>" +
+"            <Setter TargetName='face' Property='Background' Value='{DynamicResource Surface}'/>" +
+"            <Setter TargetName='label' Property='TextBlock.Foreground' Value='{DynamicResource Text}'/>" +
+"          </Trigger>" +
+"          <Trigger Property='IsKeyboardFocused' Value='True'>" +
+"            <Setter TargetName='face' Property='BorderBrush' Value='{DynamicResource Focus}'/>" +
+"            <Setter TargetName='face' Property='BorderThickness' Value='1'/>" +
 "          </Trigger>" +
 "        </ControlTemplate.Triggers>" +
 "      </ControlTemplate>" +
