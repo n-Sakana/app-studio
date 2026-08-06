@@ -43,6 +43,12 @@ namespace AppStudio
         // no byte order mark as ANSI unless it is told otherwise - which would
         // turn what a step aims at into question marks. A byte order mark cannot
         // be used instead: cmd would read it as part of the first line.
+        // The name the artefact reads to decide where to write its log, and the
+        // one an operator sets when something else is going to read the exit code
+        // rather than a person reading the window.
+        public const string ArtefactVariable = "APPSTUDIO_ARTEFACT";
+        public const string NoPauseVariable = "APPSTUDIO_NO_PAUSE";
+
         private static string[] BatchHeader()
         {
             return new string[]
@@ -50,8 +56,30 @@ namespace AppStudio
                 "<# :",
                 "@echo off",
                 "setlocal",
+                // Where the run writes what happened. The wrapper is PowerShell
+                // and has no idea which file cmd started it from, so cmd tells it.
+                "set \"" + ArtefactVariable + "=%~f0\"",
                 "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -STA -Command \"$script = [ScriptBlock]::Create((Get-Content -LiteralPath '%~f0' -Raw -Encoding UTF8)); & $script @args\" %*",
                 "set APPSTUDIO_EXIT=%errorlevel%",
+                // A failure must not close the window it was reported in.
+                //
+                // Double-clicked from a folder, this file gets a console of its
+                // own, and that console dies the instant the script returns. The
+                // reason was written to it and then thrown away with it, which is
+                // what "it flashed and closed and did nothing" was: the run had
+                // stopped for a stated reason nobody was ever given a chance to
+                // read. So a failed run says where the log is and waits.
+                //
+                // It waits for a person, so anything that is not a person - a
+                // test, a scheduled run, another script - sets the variable and
+                // gets the exit code without a prompt. Nothing is suppressed
+                // either way: the log is written on every run.
+                "if not \"%APPSTUDIO_EXIT%\"==\"0\" (",
+                "  echo.",
+                "  echo App Studio: the run stopped. What happened is above, and in:",
+                "  echo   %" + ArtefactVariable + "%.log",
+                "  if not \"%" + NoPauseVariable + "%\"==\"1\" pause",
+                ")",
                 "endlocal & exit /b %APPSTUDIO_EXIT%",
                 ": end batch #>"
             };
@@ -94,23 +122,60 @@ namespace AppStudio
             return lines.ToArray();
         }
 
+        // What the run does once the engine is in place, and what it leaves
+        // behind. Every run writes a line to a log beside the artefact - the
+        // start, the outcome, and the reason if it stopped - so that a run
+        // nobody was watching can still be accounted for afterwards.
         private static string[] Tail()
         {
+            string type = EngineGen.Namespace + "." + CodeModules.Workflow;
             return new string[]
             {
                 "",
-                "if ($null -eq ('" + EngineGen.Namespace + "." + CodeModules.Workflow + "' -as [type])) {",
-                "    Add-Type -TypeDefinition $engine -Language CSharp -ReferencedAssemblies $references",
+                "# Where this run says what it did. Beside the artefact when cmd",
+                "# started it, beside the script when something else did, and in the",
+                "# temporary folder when neither is writable. A log that cannot be",
+                "# written is never a reason to refuse to run.",
+                "$logPath = $null",
+                "if (-not [string]::IsNullOrEmpty($env:" + ArtefactVariable + ")) { $logPath = $env:" + ArtefactVariable + " + '.log' }",
+                "elseif (-not [string]::IsNullOrEmpty($PSCommandPath)) { $logPath = $PSCommandPath + '.log' }",
+                "else { $logPath = Join-Path ([IO.Path]::GetTempPath()) 'AppStudioRun.log' }",
+                "function Write-RunLog([string]$state, [string]$detail) {",
+                "    try {",
+                "        $line = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + '  ' + $state + '  ' + $detail",
+                "        [IO.File]::AppendAllText($logPath, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))",
+                "    } catch {",
+                "        # A read-only folder is not a reason to refuse to run. The",
+                "        # console still has the reason either way.",
+                "    }",
+                "}",
+                "Write-RunLog 'START' ('settleMs=' + $SettleMs)",
+                "",
+                "if ($null -eq ('" + type + "' -as [type])) {",
+                "    try {",
+                "        Add-Type -TypeDefinition $engine -Language CSharp -ReferencedAssemblies $references",
+                "    } catch {",
+                "        # The engine did not compile. This is a different failure",
+                "        # from the automation stopping, and it gets its own exit",
+                "        # code so a caller can tell them apart.",
+                "        $reason = $_.Exception",
+                "        while ($null -ne $reason.InnerException) { $reason = $reason.InnerException }",
+                "        Write-RunLog 'BUILD-FAILED' $reason.Message",
+                "        [Console]::Error.WriteLine($reason.Message)",
+                "        exit 2",
+                "    }",
                 "}",
                 "",
                 "try {",
-                "    [" + EngineGen.Namespace + "." + CodeModules.Workflow + "]::" + EngineGen.EntryPoint + "($SettleMs)",
+                "    [" + type + "]::" + EngineGen.EntryPoint + "($SettleMs)",
+                "    Write-RunLog 'DONE' 'every recorded step was carried out'",
                 "    exit 0",
                 "} catch {",
                 "    # The reason a run stopped is the innermost one. The layers above it",
                 "    # are how it reached here, which nobody asked about.",
                 "    $reason = $_.Exception",
                 "    while ($null -ne $reason.InnerException) { $reason = $reason.InnerException }",
+                "    Write-RunLog 'STOPPED' $reason.Message",
                 "    [Console]::Error.WriteLine($reason.Message)",
                 "    exit 1",
                 "}"

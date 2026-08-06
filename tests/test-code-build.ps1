@@ -66,6 +66,10 @@ try {
     $lastUsing = $text.LastIndexOf("`nusing ", [StringComparison]::Ordinal)
     if ($lastUsing -gt $firstNamespace) { throw 'a using directive was left after a namespace, so the artefact cannot compile' }
 
+    # A failed run holds its console open so the operator can read why. Nothing
+    # is watching this one, so it is told to report the exit code instead of
+    # waiting for a key. The log is written either way, and is checked below.
+    $env:APPSTUDIO_NO_PAUSE = '1'
     $stdout = Join-Path $temp 'out.txt'
     $stderr = Join-Path $temp 'err.txt'
     $watch = [Diagnostics.Stopwatch]::StartNew()
@@ -80,6 +84,24 @@ try {
     if ($run.ExitCode -eq 0) { throw 'the artefact reported success although the window it looks for does not exist' }
     if ($err -notmatch 'no window matches') { throw ('the reason that came back is not the runtime own one: ' + $err) }
     if ($err -notmatch [regex]::Escape($title)) { throw ('the window title did not survive the build: ' + $err) }
+
+    # A run that stopped has to leave something behind. Double-clicked, the
+    # console it wrote its reason to closes with it, so the reason has to also be
+    # somewhere that outlives the window.
+    $log = $build.Path + '.log'
+    if (-not (Test-Path -LiteralPath $log)) { throw ('the run left no log beside the artefact: ' + $log) }
+    $logText = [IO.File]::ReadAllText($log, (New-Object Text.UTF8Encoding($false)))
+    if ($logText -notmatch 'START') { throw ('the log does not record the run starting: ' + $logText) }
+    if ($logText -notmatch 'STOPPED') { throw ('the log does not record why the run stopped: ' + $logText) }
+    if ($logText -notmatch 'no window matches') { throw ('the log does not carry the runtime own reason: ' + $logText) }
+    # The artefact holds the wait, so a person who double-clicks it gets to read
+    # the reason instead of watching the window vanish.
+    if ($text.IndexOf('pause', [StringComparison]::Ordinal) -lt 0) {
+        throw 'the artefact does not hold the console open when a run fails'
+    }
+    if ($text.IndexOf('APPSTUDIO_NO_PAUSE', [StringComparison]::Ordinal) -lt 0) {
+        throw 'the artefact offers no way for an unattended caller to skip the wait'
+    }
 
     # A module holding a line that would end the literal the engine is carried in
     # is refused by name, rather than built into a file that compiles as something
