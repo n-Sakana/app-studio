@@ -320,12 +320,14 @@ namespace AppStudio
             return entry;
         }
 
-        // Running VBA needs a VBA host. Excel is the one that is normally
-        // there, and it will only accept a module when the operator has trusted
-        // access to the VBA project model. Every one of those conditions is
-        // reported by name when it is not met; none of them is quietly worked
-        // around, and a check that could not be carried out is never returned
-        // as a pass.
+        // Running VBA needs a VBA host, and Excel is the one that is normally
+        // there. It does not need anything else: the workbook is built first,
+        // by the same builder that writes the artefact, and Excel is then asked
+        // to open that finished workbook and call the procedure in it. Nothing
+        // reaches for the VBA project model, so "Trust access to the VBA
+        // project object model" is not required to run either - only Excel is,
+        // and its absence is reported by name rather than worked around.
+        //
         // A VBA host can stop answering - a modal dialog nobody can see, a macro
         // that never returns - and a caller with no ceiling would wait for it
         // for ever. The work runs on its own apartment thread, the wait is
@@ -343,7 +345,7 @@ namespace AppStudio
             worker.Start();
             if (worker.Join(timeoutMs) && carried != null) return carried;
             RunResult result = new RunResult();
-            result.Method = "Excel as the VBA host, through late binding";
+            result.Method = "the built workbook, opened in Excel as the VBA host";
             result.Started = true;
             result.Problem = "the VBA host did not answer within " + (timeoutMs / 1000).ToString(CultureInfo.InvariantCulture) +
                 " seconds. It usually means it is holding a dialog open where nobody can see it. " +
@@ -387,21 +389,25 @@ namespace AppStudio
         private static RunResult RunVbaCore(List<CodeFile> modules, string folder, string entryPoint, int[] hostProcess)
         {
             RunResult result = new RunResult();
-            result.Method = "Excel as the VBA host, through late binding";
+            result.Method = "the built workbook, opened in Excel as the VBA host";
             object excel = null;
             try
             {
                 Type type = Type.GetTypeFromProgID("Excel.Application");
                 if (type == null)
                 {
-                    result.Problem = "No VBA host is installed on this machine (Excel.Application is not registered), so this module cannot be run from here. " +
-                        "Import it into a VBA project on a machine that has one.";
+                    result.Problem = "No VBA host is installed on this machine (Excel.Application is not registered), so this automation cannot be run from here. " +
+                        "Build it and open the workbook on a machine that has one.";
                     return result;
                 }
-                string entry = Write(modules, folder, ScriptLanguages.Vba);
-                if (entry == null)
+                // The same workbook a build hands over, made by the same
+                // builder. A run that drove something assembled another way
+                // would be proving something adjacent to the artefact rather
+                // than the artefact.
+                BuildResult built = CodeBuild.BuildVba(modules, folder);
+                if (!built.Ok)
                 {
-                    result.Problem = "There is no " + CodeModules.Workflow + " module to start from, so nothing was run.";
+                    result.Problem = built.Problem;
                     return result;
                 }
                 result.Started = true;
@@ -410,28 +416,7 @@ namespace AppStudio
                 Set(excel, "Visible", false);
                 Set(excel, "DisplayAlerts", false);
                 object books = Get(excel, "Workbooks");
-                object book = Call(books, "Add");
-                object project;
-                try
-                {
-                    project = Get(book, "VBProject");
-                }
-                catch (Exception)
-                {
-                    result.Problem = "Excel refused access to the VBA project. Turn on " +
-                        "\"Trust access to the VBA project object model\" in Trust Center > Macro Settings, or import the module by hand. " +
-                        "Nothing was run.";
-                    return result;
-                }
-                // Every module goes in, not only the one that is started. A
-                // workflow imported on its own would not compile, and the error
-                // would be about a name rather than about the missing runtime.
-                object components = Get(project, "VBComponents");
-                for (int index = 0; index < modules.Count; index++)
-                {
-                    if (!String.Equals(modules[index].Language, ScriptLanguages.Vba, StringComparison.Ordinal)) continue;
-                    Call(components, "Import", Path.Combine(folder, modules[index].FileName));
-                }
+                object book = Call(books, "Open", built.Path);
                 // The module reports into a file rather than onto the screen,
                 // because a message box here would be a dialog behind an
                 // invisible window with nobody to close it.
@@ -443,12 +428,18 @@ namespace AppStudio
                 }
                 catch (Exception exception)
                 {
-                    result.Problem = "The module was imported but " + entryPoint + " stopped: " + Innermost(exception);
+                    result.Problem = "The workbook opened but " + entryPoint + " stopped: " + Innermost(exception);
                     return result;
+                }
+                finally
+                {
+                    try { Call(book, "Close", false); }
+                    catch { }
                 }
                 if (!File.Exists(report))
                 {
-                    result.Problem = "The module was imported and run but wrote no result, so what it did is unknown.";
+                    result.Problem = "The workbook opened and " + entryPoint + " was called but nothing was written, so what it did is unknown. " +
+                        "A machine whose policy refuses to run macros at all answers this way.";
                     return result;
                 }
                 string[] lines = File.ReadAllLines(report);
@@ -456,12 +447,12 @@ namespace AppStudio
                 string detail = lines.Length > 1 ? String.Join(" ", lines, 1, lines.Length - 1).Trim() : "";
                 if (!String.Equals(state, "done", StringComparison.Ordinal))
                 {
-                    result.Problem = detail.Length > 0 ? detail : "The module stopped without saying why.";
+                    result.Problem = detail.Length > 0 ? detail : "The automation stopped without saying why.";
                     return result;
                 }
                 result.Ok = true;
                 result.ExitCode = 0;
-                result.Output = "The module was imported into a temporary workbook and " + entryPoint + " ran to the end.";
+                result.Output = "The built workbook was opened and " + entryPoint + " ran to the end.";
                 return result;
             }
             catch (Exception exception)
@@ -481,8 +472,8 @@ namespace AppStudio
                     catch { }
                     // Asking a host to quit is not the same fact as the host
                     // being gone. A copy left running would hold the workbook
-                    // this created and would still be there tomorrow, so the
-                    // one this started is waited for and then closed.
+                    // this opened and would still be there tomorrow, so the one
+                    // this started is waited for and then closed.
                     if (!WaitForExit(hostProcess[0], 5000)) Kill(hostProcess[0]);
                 }
             }

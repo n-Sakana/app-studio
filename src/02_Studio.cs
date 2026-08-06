@@ -82,6 +82,8 @@ namespace AppStudio
             diagnostics = startupDiagnostics;
             Messages.Init(baseDir);
             Theme.Init(baseDir);
+            // The workbook a VBA build starts from ships beside the messages.
+            VbaWorkbook.Init(baseDir);
             Theme.Install(Resources);
 
             Title = Text("app-title.txt", "App Studio");

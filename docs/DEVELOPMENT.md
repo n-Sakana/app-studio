@@ -39,6 +39,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 
 - `src/*.cs` は C# 5.0 構文かつ ASCII だけを使う。文字列補間、`nameof`、pattern matching、tuple、null 条件演算子などを使わない。
 - 日本語 UI 文言は `assets/messages/*.txt` に置く。記号（`●` など）も文言である。
+- `assets/vba/seed.xlsm` は**製品の一部として同梱するバイナリ**である。VBA ビルドはこれを複製して作る。作り直しは `tests/make-vba-seed.ps1` だけが行い、それだけが Excel を必要とする。
 - `launch.vbs` は ASCII を保つ。
 - PowerShell は 5.1 互換にし、三項演算子や PowerShell 7 専用構文を使わない。
 - UI thread は対象へ直接問い合わせない。UIA 取得・UIA 操作は worker へ値渡しする。
@@ -94,10 +95,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `41_Intake` | 返答の解析。request id 照合、BEGIN/END/COMPLETE/PART、装飾除去、拒否理由 |
 | `42_Diff` | 行単位の差分。反映前に何が変わるのかを見せるためだけに使う |
 | `43_CodeScreen` | コード編集の専用ワークスペース。自前の workspace bar、役割で階層化した module tree、形式切替、通常／集中の2 layout、検証、実行、AI への送りと受け、差分と復帰 |
-| `44_ScriptRun` | engine（C#）を**実際にコンパイル**しての検証と module 一式での実行、VBA の構造検証（module 別）と VBA ホストへの全 module 取り込み実行。検証と実行は `47_CodeBuild` が組む同一のテキストを使う |
+| `44_ScriptRun` | engine（C#）を**実際にコンパイル**しての検証と module 一式での実行、VBA の構造検証（module 別）と、**ビルド済み `.xlsm` を Excel に開かせての `Application.Run`**。取り込みは行わないので VBA プロジェクトへのアクセスの信頼を要求しない。検証も実行も `47_CodeBuild` が組む同一のものを使う |
 | `45_CodeEditor` | コードを読み書きする箱。行番号、PowerShell/VBA の色分け、検索。色は透明前景の TextBox の背後へ描き、編集そのものは素の TextBox のまま保つ |
 | `46_Inspector` | 録画中の任意インスペクター用に、ポインタ下の1点を **Win32 だけで有界に**読む。UIA は使わない（数百 ms かかり、応答しないアプリで止まるため）。例外を投げず、読めなかったことを事実として返す |
-| `47_CodeBuild` | module を**渡せる1本**へ畳む層。PowerShell モードは batch ヘッダ + 最小 PowerShell ラッパー + C# engine を1つの `.cmd` にまとめる（実行時に `Add-Type` でコンパイルするので、追加ランタイムも未署名 EXE も生まない）。VBA モードは Excel を late binding で使って5 module を取り込んだ `.xlsm` を書き、ホストは必ず閉じる。VBA ホストが無い／VBA プロジェクトへのアクセスが許可されていない場合は名指しで失敗させ、迂回しない |
+| `47_CodeBuild` | module を**渡せる1本**へ畳む層。PowerShell モードは batch ヘッダ + 最小 PowerShell ラッパー + C# engine を1つの `.cmd` にまとめる（実行時に `Add-Type` でコンパイルするので、追加ランタイムも未署名 EXE も生まない）。VBA モードは `51_VbaWorkbook` に渡すだけで、**Excel も VBA プロジェクトへのアクセスの信頼も要求しない** |
+| `48_Ole2` | OLE2 複合ファイルの読みと**書き直し**。`vbaProject.bin` はこの形式で、stream を1つ足すと directory も配置も変わるため、patch ではなく毎回組み直す。読みは厳格 ― 相手は自分の種ブックか自分が書いたブックだけなので、合わない箇所は名指しで失敗させる |
+| `49_VbaCompress` | VBA が source を格納する圧縮形式（deflate ではない）。書いた module を読み戻すため両方向を持つ |
+| `50_VbaProject` | `vbaProject.bin` の読みと module 追加。`PROJECT` / `PROJECTwm` / `dir` の3か所は同時に更新し、追加は p-code を持てないのでプロジェクト全体の compiled state を落とす（前置除去・MODULEOFFSET 0・`__SRP_*` 空・`_VBA_PROJECT` の版）。**4つは分割できない。** 文字コードで表せない文字は `U+XXXX` を名指しして失敗させる |
+| `51_VbaWorkbook` | 同梱の種ブック `assets/vba/seed.xlsm` と、zip の中の1部品の差し替え。出力先の隣で組み立て、**読み戻して照合してから**移す。ここが「Excel 無しで `.xlsm` を作る」の入口 |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
 | `35_Verdict` | このセッションが何だったのかの唯一の判断。状態・件数・警告・再生可否・次の一手を1箇所で決め、画面/HTML/session.md が同じ言葉で言う |
@@ -129,7 +134,9 @@ runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test 
 - `test-code-ui`: 実 GUI を UI Automation で駆動し、結果画面からコード編集画面へ入ること、開いた瞬間に実行可能なコードが入っていること、PowerShell と VBA が同格に並ぶこと、**module tree が役割の階層になっていること**（先頭が「操作手順」／runtime 群が既定で閉じている／もう一方の言語も閉じている／日本語の役割語が実際に画面に出ている）、**開けば両言語の5 module すべてに到達できること**、**tree の行が module pane からはみ出してエディタの下へ潜っていないこと**、**エディタが窓の 28% 以上・高さ 420px 以上・幅 520px 以上を実際に占め、20 行以上が可視であること**、**最終行までスクロールしたあともエディタ下端に実際にコードが描かれていること**（同じ帯を先頭時と末尾時の2回撮って画素で比べる。色付け層が viewport の高さで切られていると末尾で空になる。コントロールの存在を見る試験では捕まらない）、**窓が作業領域の上下からはみ出していないこと**、**集中モードが形式切替と版ボタンを実際に外し、エディタが目に見えて広がり窓の 45% 以上になること**、**3種類の大きさへ resize してもエディタが 300x380 px を下回らず、主要ボタンが窓の下へ押し出されないこと**、往復しても編集中の内容と選択 module が失われないこと、**1回のコピー**で依頼文が出ること、**別の依頼への返答が理由付きで拒否され画面のコードが変わらないこと**、返答が差分として出てから反映されること、反映・取り消し・生成版への復帰、［← 戻る］が結果画面へ返ること
 - `test-code-run-e2e`: 生成した PowerShell を **5 module 一式のまま**実際に走らせ、**fixture の状態が実際に変わること**を合格条件にする。スクリプトが最後まで走ったことではなく、対象アプリが変わったことを見る。あわせて **Workflow から1行消すと、その操作だけが実機で起きなくなり、runtime module は byte 単位で無変更のまま**であることを確認する
 - `test-inspector`: 録画中インスペクターを**実デスクトップの実 fixture 窓**に対して確認する。overlay が4窓とも App Studio 自身であること、**click-through で pointer 所有が fixture のままであること**（枠が押下を奪わない証明）、自分の窓を説明しないこと、撮影時に画面から消えること、OFF で消えること、**終了後に残留しないこと**。合わせて `tests/.build/inspector/inspector.png` に実描画を残す
-- `test-vba-host`: 生成した VBA を **5 module すべて**実際の VBA ホストへ取り込んで走らせる。ホストが無い／VBA プロジェクトへのアクセスが信頼されていない／走って停止した、の**どれであっても名指しで報告されること**を確認し、どれも「合格」に丸めない。あわせて全 `Declare` が `Alias` を持つこと、呼出しに上限があること、**ホストを残さないこと**を見る
+- `test-vba-binary`: `.xlsm` が **Excel も VBIDE も使わずに**作られることを見る。ビルドの前後で EXCEL プロセスが1つも増えないこと、生成物が `Workflow.xlsm` 1つだけであること、zip の中に `xl/vbaProject.bin` が実在すること、**生成物をバイナリで読み戻して**5 module の名前・種別・本文が画面のものと一致し MODULEOFFSET が 0 であること、非 ASCII の題名と要素名が生き残ること、そして**種ブックが無い／種ブックが壊れている／VBA が受け付けない module 名／別名を宣言している module／文字コードで表せない文字**の5つが名指しで拒否され何も残らないこと。あわせて、ビルド経路と実行経路の source に `VBProject` / `VBComponents` / `Import` が残っていないことを見る。**Office の無い端末でも走るので既定の集合に入る**
+- `test-vba-build`: 上で作った `.xlsm` が**実際に Excel が開くブックであること**を見る。5 module が module として入っていること、Excel が source からコンパイルした結果として**画面の各行がそのまま入っていること**（VBE は識別子の後の空白を詰め直すので、空白は畳んで比較する）、`Workflow` に entry point と録画した step があること、**ホストを残さないこと**。Excel を起動するので既定では走らない
+- `test-vba-host`: 生成した VBA を**ビルド済みブックのまま**実際の VBA ホストで走らせる。ホストが無い／走って停止した、の**どちらであっても名指しで報告されること**を確認し、どちらも「合格」に丸めない。**VBA プロジェクトへのアクセスの信頼を求めたら不合格**とし、実行フォルダに取り込み用の `.bas` が書かれていないことを見る。あわせて全 `Declare` が `Alias` を持つこと、呼出しに上限があること、**ホストを残さないこと**を見る
 - `test-diagnostics` / `test-acq-diagnostics`: 診断 code が全投影へ届くこと、画像0のとき PDF 不在の理由が出ること
 - `test-hang-recovery`: 恒久 hang 20回、直後正常取得、resource/orphan/queue/UI
 - `test-live-basic`: Win32/WPF、deep tree、画像と黒塗り表明
@@ -158,7 +165,15 @@ fixture だけを build:
 
 `FixtureWinForms`、`FixtureWin32`、`FixtureWpf`、`FixtureCanvas`、`FixtureInputTarget`、`FixtureIme` を `tests/.build` に生成する。
 
-`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-input-timeline`、`test-gesture-e2e`、`test-ime-e2e`、`test-gui-e2e`、`test-notepad-e2e`、`test-calculator-e2e`、`test-code-run-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。`test-code-run-e2e` が駆動するのは UIA パターンを持つ fixture なので実際には合成入力へ落ちないが、`InvokeElement` はパターンが無ければ合成入力へ落ちる設計であり、**落ちうる以上こちら側に置く**。`test-vba-host` は VBA ホスト（Excel）を起動するため同じ扱いにする。実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
+`test-live-probe`、`test-input-probe`、`test-packaged-target`、`test-input-timeline`、`test-gesture-e2e`、`test-ime-e2e`、`test-gui-e2e`、`test-notepad-e2e`、`test-calculator-e2e`、`test-code-run-e2e` は**実マウス・実キーを出すため `run-all.ps1` の既定では実行されない**。`test-code-run-e2e` が駆動するのは UIA パターンを持つ fixture なので実際には合成入力へ落ちないが、`InvokeElement` はパターンが無ければ合成入力へ落ちる設計であり、**落ちうる以上こちら側に置く**。`test-vba-host` と `test-vba-build` は VBA ホスト（Excel）を起動するため同じ扱いにする ― **製品がホストを起動するからではなく、この2つが証拠を取るために自分で起動するからである。** 実行するのは `APPSTUDIO_ALLOW_REAL_INPUT=1` を立てたときだけで、立てない場合は `SKIP` 行を出して黙って飛ばさない。**誰かが使っている端末では立てないこと。**
+
+同梱の種ブックを作り直す:
+
+```powershell
+.\tests\make-vba-seed.ps1
+```
+
+`assets/vba/seed.xlsm` を書き直す。**このリポジトリで Excel と「VBA プロジェクト オブジェクト モデルへのアクセスを信頼する」を必要とするのはここだけで、必要なのは同梱物を作り直すときだけである。** ビルドにも実行にも要らない。種ブックは commit 済みなので、clone した側がこれを走らせる必要はない。Excel は project id と時刻を毎回入れるので **byte 単位では再現しない**。再現するのは形であり、それを検査するのが script 自身と `test-vba-binary` である。
 
 `test-gui-e2e` は自分で起動した fixture だけを操作する。全 click は押す直前に `WindowTools.ProcessIdAt` で対象プロセスのものだと確認し、違えば一度だけ対象を前面に出して確認し直し、それでも違えば例外にして何も押さない。再生の前には、記録した各ウィンドウ記述に一致する窓がちょうど1つであることを確かめ、複数あれば再生を行わずその事実を出力する。
 

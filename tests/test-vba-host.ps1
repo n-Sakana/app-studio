@@ -5,9 +5,11 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
     if ($LASTEXITCODE -ne 0) { throw ('Windows PowerShell test failed: ' + $LASTEXITCODE) }
     return
 }
-# Running VBA needs a VBA host, and a machine may not have one, or may not trust
-# a caller to touch its VBA project. None of those is allowed to look like a
-# pass: whichever of them is true, the product has to say which one by name.
+# Running VBA needs a VBA host, and a machine may not have one. That is the only
+# environment left that can stop a run: the workbook is built first and then
+# opened, so nothing here asks Excel for its VBA project and the trust setting
+# that used to be required is not. A machine with no host has to be said by
+# name rather than passed over.
 #
 # The module deliberately looks for a window that does not exist, so a run that
 # reaches the end is proving the host path and not driving anybody's application.
@@ -16,6 +18,7 @@ $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('pui-vba-host-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
+    [AppStudio.VbaWorkbook]::Init($root)
     $session = [AppStudio.SessionStore]::Create($temp, 'record', 'vba host')
     $step = New-Object AppStudio.StepRecord
     $step.Index = 1; $step.Kind = 'click'; $step.At = [DateTimeOffset]::Now; $step.GapMs = 150
@@ -66,7 +69,7 @@ try {
         if ($result.Problem -notmatch 'No VBA host is installed') { throw ('no host was found but the reason given was: ' + $result.Problem) }
         $outcome = 'noHost'
     } elseif ($result.Problem -match 'Trust access to the VBA project object model') {
-        $outcome = 'notTrusted'
+        throw 'the run still asks for trusted access to the VBA project, which this path does not need'
     } elseif ($result.Problem -match 'did not answer within') {
         throw ('the host stopped answering, which this test cannot accept as a result: ' + $result.Problem)
     } elseif ($result.Ok) {
@@ -79,13 +82,23 @@ try {
         }
         if ($result.Problem -notmatch 'A1') { throw 'the reason does not say which step stopped' }
         $outcome = 'ranAndRefused'
+        # What was run is the workbook a handover is, built by the same builder
+        # into the run folder. A run that assembled the automation some other
+        # way would be proving something adjacent to the artefact.
+        $ran = Join-Path (Join-Path $temp 'run') 'Workflow.xlsm'
+        if (-not (Test-Path -LiteralPath $ran)) { throw 'the run did not go through a built workbook' }
+        foreach ($stray in @('Workflow.bas','RecordedFacts.bas','RuntimeCore.bas','RuntimeLocator.bas','RuntimeNative.bas')) {
+            if (Test-Path -LiteralPath (Join-Path (Join-Path $temp 'run') $stray)) {
+                throw ('the run still writes modules out to be imported: ' + $stray)
+            }
+        }
     }
     Start-Sleep -Milliseconds 1500
     $after = @(Get-Process -Name EXCEL -ErrorAction SilentlyContinue).Count
     if ($after -gt $before) { throw ('a VBA host was left running: ' + $before + ' -> ' + $after) }
 
     Write-Output ('PASS test-vba-host outcome=' + $outcome + ' bounded=1 hostsLeft=0 elapsedMs=' + $watch.ElapsedMilliseconds +
-        ' declaresAliased=1 reason="' + ($result.Problem -replace '"', "'") + '"')
+        ' declaresAliased=1 trustNotRequired=1 reason="' + ($result.Problem -replace '"', "'") + '"')
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }

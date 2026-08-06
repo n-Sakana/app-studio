@@ -295,22 +295,28 @@ namespace AppStudio
 
         // The VBA side becomes a single .xlsm.
         //
-        // A workbook is a binary container, not text with a header on it, so it
-        // is written by the thing that owns the format. Excel is asked to make an
-        // empty one, the five modules go in, and it is saved as macro enabled.
-        // Nothing is left behind: the host this started is waited for and closed,
-        // because a copy still running would hold the file it just wrote.
+        // A workbook is a binary container rather than text with a header on it,
+        // but it does not follow that Excel has to write it. A macro enabled
+        // workbook is a zip, and the whole of its VBA project is one part inside
+        // that zip. So App Studio ships a seed workbook - a valid, empty VBA
+        // project - and the artefact is that seed with the part replaced by the
+        // same part with these five modules added to it, byte by byte.
         //
-        // A machine with no VBA host, or one that will not let a caller near its
-        // VBA project, cannot produce a workbook here. Both are said by name and
-        // neither is worked around - the modules are still on disk beside the
-        // output, so they can be imported by hand on a machine that can.
+        // Asking Excel to do it meant the operator needed Excel to build at all,
+        // and needed "Trust access to the VBA project object model" turned on -
+        // a setting whose whole purpose is to stop programs writing macros into
+        // workbooks, which is what that build was. Neither is required now. The
+        // build runs on a machine with no Office on it.
+        //
+        // What cannot be worked around is said by name: a seed that is not
+        // there or does not hold, a module name VBA will not take, a character
+        // the project's code page cannot carry. None of those is repaired
+        // quietly, because a workbook that opens holding something other than
+        // what is on screen is worse than a build that stopped.
         public static BuildResult BuildVba(List<CodeFile> modules, string folder)
         {
             BuildResult result = new BuildResult();
-            result.Method = "Excel as the workbook writer, through late binding";
-            object excel = null;
-            int host = 0;
+            result.Method = VbaWorkbook.Method;
             try
             {
                 List<CodeFile> mine = OfLanguage(modules, ScriptLanguages.Vba);
@@ -319,85 +325,14 @@ namespace AppStudio
                     result.Problem = "There is no " + CodeModules.Workflow + " module to start from, so nothing was built.";
                     return result;
                 }
-                Type type = Type.GetTypeFromProgID("Excel.Application");
-                if (type == null)
-                {
-                    result.Problem = "No VBA host is installed on this machine (Excel.Application is not registered), so no workbook can be written here. " +
-                        "The modules are in the code folder and can be imported into a VBA project on a machine that has one.";
-                    return result;
-                }
                 Directory.CreateDirectory(folder);
-                string staging = Path.Combine(folder, "modules");
-                ScriptRun.Write(modules, staging, ScriptLanguages.Vba);
                 string path = Path.Combine(folder, CodeModules.Workflow + "." + ScriptLanguages.ArtefactExtension(ScriptLanguages.Vba));
-                excel = Activator.CreateInstance(type);
-                host = ScriptRun.ProcessOf(excel);
-                ScriptRun.Set(excel, "Visible", false);
-                ScriptRun.Set(excel, "DisplayAlerts", false);
-                object books = ScriptRun.Get(excel, "Workbooks");
-                object book = ScriptRun.Call(books, "Add");
-                object project;
-                try
-                {
-                    project = ScriptRun.Get(book, "VBProject");
-                }
-                catch (Exception)
-                {
-                    result.Problem = "Excel refused access to the VBA project. Turn on " +
-                        "\"Trust access to the VBA project object model\" in Trust Center > Macro Settings, or import the modules by hand. " +
-                        "No workbook was written.";
-                    return result;
-                }
-                object components = ScriptRun.Get(project, "VBComponents");
-                string[] order = CodeModules.Order();
-                for (int index = 0; index < order.Length; index++)
-                {
-                    CodeFile file = Find(mine, order[index]);
-                    if (file == null) continue;
-                    ScriptRun.Call(components, "Import", Path.Combine(staging, file.FileName));
-                    result.Modules.Add(file.FileName);
-                }
-                for (int index = 0; index < mine.Count; index++)
-                {
-                    if (CodeModules.Rank(mine[index].Name) < order.Length) continue;
-                    ScriptRun.Call(components, "Import", Path.Combine(staging, mine[index].FileName));
-                    result.Modules.Add(mine[index].FileName);
-                }
-                if (File.Exists(path)) File.Delete(path);
-                // 52 is xlOpenXMLWorkbookMacroEnabled. Saving as anything else
-                // would drop the modules on the way out and report success.
-                ScriptRun.Call(book, "SaveAs", path, 52);
-                ScriptRun.Call(book, "Close", false);
-                if (!File.Exists(path))
-                {
-                    result.Problem = "Excel reported no error but no workbook is there, so what happened is unknown.";
-                    return result;
-                }
-                result.Ok = true;
-                result.Path = path;
-                result.Bytes = new FileInfo(path).Length;
-                return result;
+                return VbaWorkbook.Build(VbaWorkbook.SeedPath(), VbaWorkbook.ModulesOf(mine), path);
             }
             catch (Exception exception)
             {
-                result.Problem = exception.GetType().Name + ": " + ScriptRun.Innermost(exception);
+                result.Problem = exception.GetType().Name + ": " + exception.Message;
                 return result;
-            }
-            finally
-            {
-                if (excel != null)
-                {
-                    try { ScriptRun.Set(excel, "DisplayAlerts", false); }
-                    catch { }
-                    try { ScriptRun.Call(excel, "Quit"); }
-                    catch { }
-                    try { System.Runtime.InteropServices.Marshal.ReleaseComObject(excel); }
-                    catch { }
-                    // Asking a host to quit is not the same fact as the host being
-                    // gone. A copy left running would hold the workbook this just
-                    // wrote and would still be there tomorrow.
-                    if (!ScriptRun.WaitForExit(host, 5000)) ScriptRun.Kill(host);
-                }
             }
         }
 

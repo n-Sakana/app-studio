@@ -25,6 +25,9 @@ if ($null -eq ('AppStudio.App' -as [type])) {
         'System.Core',
         'System.Xml',
         'System.Web.Extensions',
+        # A macro enabled workbook is a zip, and the VBA artefact is written by
+        # replacing one part inside it. This is what reads and writes that zip.
+        'System.IO.Compression',
         'System.Drawing',
         'System.Windows.Forms',
         'WindowsBase',

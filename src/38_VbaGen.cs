@@ -72,7 +72,7 @@ namespace AppStudio
             text.AppendLine("' One line below is one recorded step, in the order it happened. Deleting a");
             text.AppendLine("' line takes that step out and changes nothing else.");
             text.AppendLine("'");
-            text.AppendLine("' Import all five modules into a VBA project and run " + EntryPoint + ".");
+            text.AppendLine("' The built workbook already holds all five modules. Open it and run " + EntryPoint + ".");
             text.AppendLine("' It drives the real applications on this machine. Read it before you run it.");
             text.AppendLine("'");
             text.AppendLine("' VBA reaches controls through Win32 only. A step whose only address is a UI");
