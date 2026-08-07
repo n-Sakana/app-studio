@@ -33,6 +33,14 @@ namespace AppStudio
     // nothing is unpacked beside it, and no unsigned executable is produced -
     // which is the only shape that satisfies both "no bundled runtime" and "no
     // unsigned EXE in the folder somebody is handed".
+    //
+    // Started by a person, it opens a small window rather than only writing to a
+    // console: one button that starts the automation and stops it again, one
+    // read-only field saying what the last run did, and the state in the title
+    // bar. That window is C# like the rest of the engine and is folded into the
+    // same one file - it is still one .cmd and nothing is produced beside it.
+    // Started by anything that is not a person, -Console gives exactly what it
+    // gave before: it runs, it says what happened, and it exits with a code.
     public static class CodeBuild
     {
         // The batch header. cmd parses these lines; PowerShell sees them inside a
@@ -94,7 +102,10 @@ namespace AppStudio
             List<string> lines = new List<string>();
             if (standalone) lines.Add("#requires -Version 5.1");
             lines.Add("[CmdletBinding()]");
-            lines.Add("param([int]$SettleMs = 2500)");
+            lines.Add("# Started by a person, this opens its window. -Console is for everything");
+            lines.Add("# that is not a person - a test, a scheduled run, another script - which");
+            lines.Add("# has no way to press a button and wants the outcome as an exit code.");
+            lines.Add("param([int]$SettleMs = 2500, [switch]$Console)");
             lines.Add("");
             lines.Add("Set-StrictMode -Version 2.0");
             lines.Add("$ErrorActionPreference = 'Stop'");
@@ -129,6 +140,7 @@ namespace AppStudio
         private static string[] Tail()
         {
             string type = EngineGen.Namespace + "." + CodeModules.Workflow;
+            string shell = EngineGen.Namespace + ".Shell";
             return new string[]
             {
                 "",
@@ -149,7 +161,9 @@ namespace AppStudio
                 "        # console still has the reason either way.",
                 "    }",
                 "}",
-                "Write-RunLog 'START' ('settleMs=' + $SettleMs)",
+                "$mode = 'window'",
+                "if ($Console) { $mode = 'console' }",
+                "Write-RunLog 'START' ('settleMs=' + $SettleMs + ' mode=' + $mode)",
                 "",
                 "if ($null -eq ('" + type + "' -as [type])) {",
                 "    try {",
@@ -164,6 +178,16 @@ namespace AppStudio
                 "        [Console]::Error.WriteLine($reason.Message)",
                 "        exit 2",
                 "    }",
+                "}",
+                "",
+                "if (-not $Console) {",
+                "    # The window. It is named after the file it was started from, so an",
+                "    # operator with two of these open can tell which is which, and the",
+                "    # window is where every run from here on says what it did.",
+                "    $title = 'App Studio'",
+                "    if (-not [string]::IsNullOrEmpty($env:" + ArtefactVariable + ")) { $title = [IO.Path]::GetFileName($env:" + ArtefactVariable + ") }",
+                "    elseif (-not [string]::IsNullOrEmpty($PSCommandPath)) { $title = [IO.Path]::GetFileName($PSCommandPath) }",
+                "    exit ([" + shell + "]::Show($SettleMs, $logPath, $title))",
                 "}",
                 "",
                 "try {",
@@ -205,6 +229,22 @@ namespace AppStudio
                 if (CodeModules.Rank(modules[index].Name) < order.Length) continue;
                 ordered.Add(modules[index]);
             }
+            // What goes in, in the order it is written. The five modules are the
+            // automation and come first; the window the finished file opens is
+            // added after them by the build, the same way and at the same moment
+            // as the header above and the wrapper around them. It is not a
+            // module, nothing in the project holds it and nobody edits it - but
+            // it is in the file, so it is named here rather than arriving in the
+            // artefact unannounced.
+            List<string> fileNames = new List<string>();
+            List<string> texts = new List<string>();
+            for (int index = 0; index < ordered.Count; index++)
+            {
+                fileNames.Add(ordered[index].FileName);
+                texts.Add(ordered[index].Text);
+            }
+            fileNames.Add(EngineGen.WindowFileName);
+            texts.Add(EngineGen.Window());
             // Each module is a whole C# file on its own, so each carries its own
             // using directives - which is what makes it readable by itself. C#
             // will not take a using after a namespace, so they are gathered here
@@ -213,21 +253,21 @@ namespace AppStudio
             // lifted out of it.
             List<string> imports = new List<string>();
             List<string> bodies = new List<string>();
-            for (int index = 0; index < ordered.Count; index++)
+            for (int index = 0; index < texts.Count; index++)
             {
                 StringBuilder body = new StringBuilder();
-                SplitImports(ordered[index].Text, imports, body);
+                SplitImports(texts[index], imports, body);
                 bodies.Add(body.ToString());
             }
             for (int index = 0; index < imports.Count; index++) text.AppendLine(imports[index]);
             if (imports.Count > 0) text.AppendLine();
-            for (int index = 0; index < ordered.Count; index++)
+            for (int index = 0; index < fileNames.Count; index++)
             {
-                named.Add(ordered[index].FileName);
+                named.Add(fileNames[index]);
                 if (index != 0) text.AppendLine();
-                text.AppendLine("#region " + ordered[index].FileName);
+                text.AppendLine("#region " + fileNames[index]);
                 text.Append(bodies[index]);
-                text.AppendLine("#endregion " + ordered[index].FileName);
+                text.AppendLine("#endregion " + fileNames[index]);
             }
             text.AppendLine("'@");
             return text.ToString();
@@ -312,7 +352,9 @@ namespace AppStudio
             Append(text, Wrapper(true));
             text.AppendLine("$engine = @'");
             text.AppendLine("// The C# modules are placed here by the build, in reading order, each in a");
-            text.AppendLine("// #region of its own. They are not repeated in this listing.");
+            text.AppendLine("// #region of its own, and after them " + EngineGen.WindowFileName + " - the window this file");
+            text.AppendLine("// opens when a person starts it, which the build adds and nobody edits.");
+            text.AppendLine("// None of it is repeated in this listing.");
             text.AppendLine("'@");
             Append(text, Tail());
             return text.ToString();
@@ -347,6 +389,16 @@ namespace AppStudio
                 if (Find(mine, CodeModules.Workflow) == null)
                 {
                     result.Problem = "There is no " + CodeModules.Workflow + " module to start from, so nothing was built.";
+                    return result;
+                }
+                // The window's wording is written into the file and stays there.
+                // Building one without it would hand somebody an automation that
+                // speaks a different language from the product that made it, and
+                // nothing on screen would have said so.
+                if (!Messages.Ready)
+                {
+                    result.Problem = "The wording the window is built with could not be found, so nothing was built. " +
+                        "App Studio has not been told where it was started from, and assets/messages is where it keeps what it says.";
                     return result;
                 }
                 string broken = HereStringBreak(mine);

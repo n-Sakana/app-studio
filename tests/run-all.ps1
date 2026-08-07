@@ -18,6 +18,7 @@ $tests = @(
     'test-codegen.ps1',
     'test-workflow-edit.ps1',
     'test-code-build.ps1',
+    'test-artefact-window.ps1',
     'test-vba-binary.ps1',
     'test-handoff.ps1',
     'test-ai-picks.ps1',

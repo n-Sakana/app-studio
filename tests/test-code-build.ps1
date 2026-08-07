@@ -14,8 +14,15 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
 # reaches the end would mean the artefact drove somebody's application, which a
 # test may not do; a run that stops with the runtime's own words proves the whole
 # path without touching anything.
+#
+# Started by a person the same file opens a window instead, which is what
+# test-artefact-window drives. Here it is run with -Console, because nothing is
+# watching and the answer wanted is an exit code.
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 & (Join-Path $root 'app-studio.ps1') -CompileOnly
+# The window in the built file is written with the product's own wording, so
+# the product has to know where its wording lives before anything is built.
+[AppStudio.Messages]::Init($root)
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('pui-code-build-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
 try {
@@ -40,15 +47,36 @@ try {
     $build = [AppStudio.CodeBuild]::BuildPowerShell($modules, (Join-Path $temp 'build'))
     if (-not $build.Ok) { throw ('nothing was built: ' + $build.Problem) }
     if ([IO.Path]::GetFileName($build.Path) -ne 'Workflow.cmd') { throw ('the artefact is ' + [IO.Path]::GetFileName($build.Path)) }
-    if ($build.Modules.Count -ne 5) { throw ('the artefact folded ' + $build.Modules.Count + ' modules instead of 5') }
+    # One file is the whole promise of this mode: nothing is written beside the
+    # thing somebody is handed.
+    $beside = @(Get-ChildItem -LiteralPath (Join-Path $temp 'build') -Force)
+    if ($beside.Count -ne 1) {
+        throw ('the build left ' + $beside.Count + ' files instead of one: ' + (($beside | ForEach-Object { $_.Name }) -join ', '))
+    }
+    # The five modules, and the window the build adds beside them. The window is
+    # named rather than folded in silently, because it is in the file.
+    if ($build.Modules.Count -ne 6) { throw ('the artefact folded ' + $build.Modules.Count + ' parts instead of the 5 modules and the window') }
+    foreach ($module in $modules) {
+        if ($build.Modules -notcontains $module.FileName) { throw ('the build does not report folding in ' + $module.FileName) }
+    }
+    if ($build.Modules -notcontains 'RunWindow.cs') { throw 'the build does not report folding the window in' }
 
     # cmd reads the first line of this file itself, so a byte order mark in front
     # of it is not a comment - it is part of the command.
     $bytes = [IO.File]::ReadAllBytes($build.Path)
     if ($bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { throw 'the built cmd carries a byte order mark' }
     $text = [IO.File]::ReadAllText($build.Path, (New-Object Text.UTF8Encoding($false)))
-    foreach ($part in @('<# :', '@echo off', 'Add-Type -TypeDefinition $engine', 'namespace AppStudioRun')) {
+    foreach ($part in @('<# :', '@echo off', 'Add-Type -TypeDefinition $engine', 'namespace AppStudioRun',
+        '#region RunWindow.cs', 'class RunWindow : Form', '[switch]$Console')) {
         if ($text.IndexOf($part, [StringComparison]::Ordinal) -lt 0) { throw ('the artefact is missing ' + $part) }
+    }
+    # The window says what App Studio says. The words are written into the file
+    # at build time and stay there, so a build that quietly fell back to the
+    # English stand-ins would hand somebody an automation speaking a different
+    # language from the product that made it.
+    foreach ($wording in @('artefact-run.txt', 'artefact-stop.txt', 'artefact-state-idle.txt', 'artefact-result-done.txt')) {
+        $word = ([IO.File]::ReadAllText((Join-Path $root ('assets\messages\' + $wording)), (New-Object Text.UTF8Encoding($false)))).Trim()
+        if ($text.IndexOf($word, [StringComparison]::Ordinal) -lt 0) { throw ('the artefact does not carry the wording of ' + $wording) }
     }
     # What the step aims at has to still be in the file, in the alphabet it was
     # recorded in.
@@ -73,7 +101,7 @@ try {
     $stdout = Join-Path $temp 'out.txt'
     $stderr = Join-Path $temp 'err.txt'
     $watch = [Diagnostics.Stopwatch]::StartNew()
-    $run = Start-Process -FilePath $env:ComSpec -ArgumentList @('/c', ('"' + $build.Path + '"'), '-SettleMs', '400') `
+    $run = Start-Process -FilePath $env:ComSpec -ArgumentList @('/c', ('"' + $build.Path + '"'), '-Console', '-SettleMs', '400') `
         -NoNewWindow -PassThru -Wait -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $watch.Stop()
     if ($watch.ElapsedMilliseconds -gt 90000) { throw ('the artefact was not bounded: ' + $watch.ElapsedMilliseconds + ' ms') }
@@ -92,6 +120,7 @@ try {
     if (-not (Test-Path -LiteralPath $log)) { throw ('the run left no log beside the artefact: ' + $log) }
     $logText = [IO.File]::ReadAllText($log, (New-Object Text.UTF8Encoding($false)))
     if ($logText -notmatch 'START') { throw ('the log does not record the run starting: ' + $logText) }
+    if ($logText -notmatch 'mode=console') { throw ('the log does not record which way it was started: ' + $logText) }
     if ($logText -notmatch 'STOPPED') { throw ('the log does not record why the run stopped: ' + $logText) }
     if ($logText -notmatch 'no window matches') { throw ('the log does not carry the runtime own reason: ' + $logText) }
     # The artefact holds the wait, so a person who double-clicks it gets to read
@@ -111,8 +140,20 @@ try {
     if ($broken.Ok) { throw 'a module that ends the engine literal early was built anyway' }
     if ($broken.Problem -notmatch 'RuntimeNative') { throw ('the refusal does not name the module: ' + $broken.Problem) }
 
-    Write-Output ('PASS test-code-build artefact=Workflow.cmd bytes=' + $build.Bytes + ' modules=' + $build.Modules.Count +
-        ' bom=0 exit=' + $run.ExitCode + ' elapsedMs=' + $watch.ElapsedMilliseconds + ' nonAsciiSurvived=1 literalBreak=refused')
+    # And a build with no wording to give the window is refused by name rather
+    # than producing a file that says something else.
+    [AppStudio.Messages]::Init($null)
+    try {
+        $wordless = [AppStudio.CodeBuild]::BuildPowerShell($modules, (Join-Path $temp 'build3'))
+        if ($wordless.Ok) { throw 'a file was built with wording nobody could find' }
+        if ($wordless.Problem -notmatch 'assets/messages') { throw ('the refusal does not say what was missing: ' + $wordless.Problem) }
+        if (Test-Path -LiteralPath (Join-Path $temp 'build3')) { throw 'the refused build left a folder behind' }
+    } finally {
+        [AppStudio.Messages]::Init($root)
+    }
+
+    Write-Output ('PASS test-code-build artefact=Workflow.cmd files=1 bytes=' + $build.Bytes + ' folded=' + $build.Modules.Count +
+        ' bom=0 mode=console exit=' + $run.ExitCode + ' elapsedMs=' + $watch.ElapsedMilliseconds + ' nonAsciiSurvived=1 literalBreak=refused')
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }

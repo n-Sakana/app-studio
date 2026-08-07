@@ -282,7 +282,12 @@ namespace AppStudio
                 string entry = Path.Combine(folder, CodeModules.Workflow + ".ps1");
                 File.WriteAllText(entry, CodeBuild.Script(mine), new UTF8Encoding(true));
                 result.Started = true;
-                ProcessResult run = Run(PowerShellPath(), "-NoProfile -ExecutionPolicy Bypass -STA -File \"" + entry + "\"", folder, timeoutMs);
+                // -Console, because this is not a person. The same script opens a
+                // window when somebody starts it, and a window is exactly what a
+                // run whose whole answer is its captured output and its exit code
+                // cannot use: nobody would be there to press the button, and the
+                // wait would end in a timeout rather than in a result.
+                ProcessResult run = Run(PowerShellPath(), "-NoProfile -ExecutionPolicy Bypass -STA -File \"" + entry + "\" -Console", folder, timeoutMs);
                 result.ExitCode = run.ExitCode;
                 result.Output = (run.Output + (run.Error.Length > 0 ? Environment.NewLine + run.Error : "")).Trim();
                 if (run.TimedOut)

@@ -37,6 +37,12 @@ namespace AppStudio
         public const string Namespace = "AppStudioRun";
         public const string EntryPoint = "Run";
 
+        // What the build calls the window when it names what it folded in. It is
+        // a file name like the modules beside it because that is what it is in
+        // the finished file - a region of its own, readable and splittable back
+        // out - even though nobody edits it and no project holds it.
+        public const string WindowFileName = "RunWindow.cs";
+
         public static List<CodeFile> BuildFiles(ScriptPlan plan, StudioSession session)
         {
             List<ScriptLine> lines = ScriptModel.Lines(plan);
@@ -467,6 +473,16 @@ namespace AppStudio
                 "        }",
                 "    }",
                 "",
+                "    // A run the operator stopped. It is not a failure and it is not a",
+                "    // success, and it is a type of its own so that neither is reported for",
+                "    // it: what happened is that somebody asked it to stop and it did.",
+                "    internal sealed class WorkflowAborted : Exception",
+                "    {",
+                "        internal WorkflowAborted(string message) : base(message)",
+                "        {",
+                "        }",
+                "    }",
+                "",
                 "    internal static class Runtime",
                 "    {",
                 "        internal static readonly Dictionary<string, Fact> Facts = new Dictionary<string, Fact>(StringComparer.Ordinal);",
@@ -474,11 +490,43 @@ namespace AppStudio
                 "        internal static string Step = \"-\";",
                 "        internal static int SettleMs = 2500;",
                 "",
+                "        // Whether somebody has asked this run to stop. Written from the",
+                "        // window's thread and read from the run's, so it is volatile.",
+                "        private static volatile bool stopAsked;",
+                "",
                 "        internal static void Start(int settleMs)",
                 "        {",
                 "            SettleMs = settleMs;",
                 "            Window = null;",
                 "            Native.SetProcessDPIAware();",
+                "        }",
+                "",
+                "        // Asking is all this does. The run stops itself, at the next boundary",
+                "        // it reaches, rather than being torn down from outside: a step that is",
+                "        // halfway through pressing something has to finish being halfway",
+                "        // through it before anything is safe to leave.",
+                "        internal static void RequestStop()",
+                "        {",
+                "            stopAsked = true;",
+                "        }",
+                "",
+                "        // Cleared by whoever is able to ask for a stop, before the run starts.",
+                "        // Clearing it inside the run instead would race with the press: an",
+                "        // operator who asked at the same moment the run began would have had",
+                "        // the request wiped by the run it was meant for.",
+                "        internal static void ClearStop()",
+                "        {",
+                "            stopAsked = false;",
+                "        }",
+                "",
+                "        // Where a run leaves when it has been asked to. It is called at the",
+                "        // points a run can be left from and nowhere else, so \"stopped\" always",
+                "        // means the same thing: between steps, or inside a wait.",
+                "        internal static void ThrowIfStopped()",
+                "        {",
+                "            if (!stopAsked) return;",
+                "            throw new WorkflowAborted(\"App Studio stopped at step \" + Step + \" because the operator asked it to. \" +",
+                "                \"Whatever the steps before it had already done to the application has been done.\");",
                 "        }",
                 "",
                 "        internal static void Complete()",
@@ -498,6 +546,9 @@ namespace AppStudio
                 "        private static Fact Begin(string stepId)",
                 "        {",
                 "            Step = stepId;",
+                "            // Between two steps is the one place where stopping leaves the",
+                "            // application in a state a person can reason about.",
+                "            ThrowIfStopped();",
                 "            if (!Facts.ContainsKey(stepId))",
                 "            {",
                 "                Stop(\"there is nothing recorded under this id. Either the line was renamed in \" +",
@@ -552,6 +603,7 @@ namespace AppStudio
                 "            List<TopWindow> candidates = Candidates(fact);",
                 "            while (candidates.Count == 0 && DateTime.UtcNow < deadline)",
                 "            {",
+                "                ThrowIfStopped();",
                 "                Thread.Sleep(150);",
                 "                candidates = Candidates(fact);",
                 "            }",
@@ -740,7 +792,23 @@ namespace AppStudio
                 "            int wait = ms;",
                 "            if (wait < 120) wait = 120;",
                 "            if (wait > 4000) wait = 4000;",
-                "            Thread.Sleep(wait);",
+                "            Wait(wait);",
+                "        }",
+                "",
+                "        // Waiting in slices rather than in one go. The interval an operator",
+                "        // left before a step can be four seconds, and four seconds is a long",
+                "        // time to watch a button that has been pressed and appears to do",
+                "        // nothing, so the wait is where an asked-for stop is noticed.",
+                "        private static void Wait(int ms)",
+                "        {",
+                "            int left = ms;",
+                "            while (left > 0)",
+                "            {",
+                "                ThrowIfStopped();",
+                "                int slice = left > 100 ? 100 : left;",
+                "                Thread.Sleep(slice);",
+                "                left -= slice;",
+                "            }",
                 "        }",
                 "",
                 "        // Waits for the front window to stop changing, up to a stated ceiling.",
@@ -752,6 +820,7 @@ namespace AppStudio
                 "            int stable = 0;",
                 "            while (watch.ElapsedMilliseconds < budgetMs)",
                 "            {",
+                "                ThrowIfStopped();",
                 "                IntPtr front = Native.GetForegroundWindow();",
                 "                if (front == lastFront) stable++;",
                 "                else stable = 0;",
@@ -789,11 +858,21 @@ namespace AppStudio
                 "        // The console is asked for the value with nothing echoed. There is no",
                 "        // masking character either, because a count of asterisks is a fact about",
                 "        // the value that nobody asked to publish.",
+                "        //",
+                "        // It waits for a key rather than blocking on one. A run that is waiting",
+                "        // to be typed into is still a run somebody may want to stop, and a",
+                "        // thread parked inside Console.ReadKey cannot be asked anything.",
                 "        private static StringBuilder ReadHidden()",
                 "        {",
                 "            StringBuilder typed = new StringBuilder();",
                 "            while (true)",
                 "            {",
+                "                ThrowIfStopped();",
+                "                if (!Console.KeyAvailable)",
+                "                {",
+                "                    Thread.Sleep(50);",
+                "                    continue;",
+                "                }",
                 "                ConsoleKeyInfo key = Console.ReadKey(true);",
                 "                if (key.Key == ConsoleKey.Enter) break;",
                 "                if (key.Key == ConsoleKey.Backspace)",
@@ -1243,6 +1322,417 @@ namespace AppStudio
                 "    }",
                 "}"
             };
+        }
+
+        // ---------- RunWindow.cs : the window the artefact opens ----------
+
+        // This is engine C#, but it is not one of the five modules and it is not
+        // offered as one.
+        //
+        // The five are the automation: what was recorded, what it aims at, and
+        // how any of it is carried out. This is how the finished file is met by
+        // the person who was handed it, which is the build's question rather
+        // than the recording's - the same question the batch header and the
+        // PowerShell wrapper answer, and it is added in the same place and at
+        // the same moment as those.
+        //
+        // Keeping it out of the module list is not hiding it: the wrapper the
+        // screen shows is the whole assembled script, and the build names it
+        // among the things it folded in.
+        public static string Window()
+        {
+            return Join(WindowLines());
+        }
+
+        // The window's wording, taken from App Studio's own message files at
+        // build time and written into the artefact as literals. The artefact is
+        // one file and reads nothing beside it, so what it says has to be
+        // decided while the product that knows the wording is still there.
+        private static string Word(string name, string fallback)
+        {
+            return Escape(Messages.Text(name, fallback));
+        }
+
+        private static string[] WindowLines()
+        {
+            List<string> lines = new List<string>();
+            lines.Add("//");
+            lines.Add("// The window this file opens when a person starts it.");
+            lines.Add("//");
+            lines.Add("// A file that only writes to a console is not something an operator can");
+            lines.Add("// use. There is nothing to press, nothing to stop, and the outcome goes");
+            lines.Add("// away with the console it was written to. So the same single file opens");
+            lines.Add("// one small window - one button and one read-only field - and says in its");
+            lines.Add("// title bar what it is doing.");
+            lines.Add("//");
+            lines.Add("// The console stays where it is. A step that needs a value the recording");
+            lines.Add("// deliberately did not keep asks for it there, and hiding the console");
+            lines.Add("// would have turned that question into a run that hangs with nothing on");
+            lines.Add("// screen to explain why.");
+            lines.Add("//");
+            lines.Add("// Stopping is asked for, never forced. The run leaves itself at a step");
+            lines.Add("// boundary; nothing is torn down from outside, because a step halfway");
+            lines.Add("// through pressing something has to finish being halfway through it");
+            lines.Add("// before anything is safe to leave.");
+            lines.Add("//");
+            lines.Add("// Runtime file. You should not need to change anything here to change");
+            lines.Add("// what the procedure does.");
+            lines.Add("//");
+            lines.Add("");
+            lines.Add("using System;");
+            lines.Add("using System.Diagnostics;");
+            lines.Add("using System.Drawing;");
+            lines.Add("using System.Globalization;");
+            lines.Add("using System.IO;");
+            lines.Add("using System.Text;");
+            lines.Add("using System.Threading;");
+            lines.Add("using System.Windows.Forms;");
+            lines.Add("");
+            lines.Add("namespace " + Namespace);
+            lines.Add("{");
+            lines.Add("    // What a finished run was. \"It stopped\" and \"it was stopped\" are");
+            lines.Add("    // different things, and reporting either as the other would be telling");
+            lines.Add("    // the operator something that did not happen.");
+            lines.Add("    internal enum RunOutcome");
+            lines.Add("    {");
+            lines.Add("        Done,");
+            lines.Add("        Stopped,");
+            lines.Add("        Aborted");
+            lines.Add("    }");
+            lines.Add("");
+            lines.Add("    internal sealed class RunWindow : Form");
+            lines.Add("    {");
+            lines.Add("        // Every word this window says.");
+            lines.Add("        private const string CaptionRun = \"" + Word("artefact-run.txt", "Run") + "\";");
+            lines.Add("        private const string CaptionStop = \"" + Word("artefact-stop.txt", "Stop") + "\";");
+            lines.Add("        private const string StateIdle = \"" + Word("artefact-state-idle.txt", "waiting") + "\";");
+            lines.Add("        private const string StateBusy = \"" + Word("artefact-state-busy.txt", "running") + "\";");
+            lines.Add("        private const string StateDone = \"" + Word("artefact-state-done.txt", "finished") + "\";");
+            lines.Add("        private const string StateFailed = \"" + Word("artefact-state-failed.txt", "failed") + "\";");
+            lines.Add("        private const string StateAborted = \"" + Word("artefact-state-aborted.txt", "stopped") + "\";");
+            lines.Add("        private const string ResultDone = \"" + Word("artefact-result-done.txt", "Success") + "\";");
+            lines.Add("        private const string ResultFailed = \"" + Word("artefact-result-failed.txt", "Failed") + "\";");
+            lines.Add("        private const string ResultAborted = \"" + Word("artefact-result-aborted.txt", "Stopped") + "\";");
+            lines.Add("        private const string Seconds = \"" + Word("artefact-seconds.txt", "s") + "\";");
+            lines.Add("        private const string ResultName = \"" + Word("artefact-result-name.txt", "the result of the run") + "\";");
+            lines.Add("        private const string LogNote = \"" + Word("artefact-log-note.txt", "The whole of it is in the log beside this file.") + "\";");
+            lines.Add("");
+            lines.Add("        // The names the window's two parts answer to. They are fixed, and");
+            lines.Add("        // they are not what is written on them: a test that looked for the");
+            lines.Add("        // button by its caption would stop finding it the moment the");
+            lines.Add("        // caption changed to the other one, which is the whole behaviour");
+            lines.Add("        // it is there to check.");
+            lines.Add("        internal const string ActionId = \"AppStudioAction\";");
+            lines.Add("        internal const string ResultId = \"AppStudioResult\";");
+            lines.Add("");
+            lines.Add("        // A reason longer than this does not fit the field below without");
+            lines.Add("        // pushing the line that says where the rest of it is off the bottom,");
+            lines.Add("        // and the whole of it is in the log either way. The field states");
+            lines.Add("        // what a run did; it is not somewhere to pour a log into.");
+            lines.Add("        private const int ReasonLimit = 300;");
+            lines.Add("");
+            lines.Add("        private readonly Button action;");
+            lines.Add("        private readonly TextBox field;");
+            lines.Add("        private readonly int settleMs;");
+            lines.Add("        private readonly string logPath;");
+            lines.Add("        private readonly string title;");
+            lines.Add("        private readonly object logLock = new object();");
+            lines.Add("        private Thread worker;");
+            lines.Add("        private Stopwatch watch;");
+            lines.Add("        private bool running;");
+            lines.Add("");
+            lines.Add("        internal RunWindow(int settleMs, string logPath, string title)");
+            lines.Add("        {");
+            lines.Add("            this.settleMs = settleMs;");
+            lines.Add("            this.logPath = logPath;");
+            lines.Add("            this.title = title;");
+            lines.Add("");
+            lines.Add("            // Measured from the font rather than in pixels. The process is");
+            lines.Add("            // told the real screen scale before any window exists, so on a");
+            lines.Add("            // display at 150% the message font is half as large again and");
+            lines.Add("            // every measure taken from it grows with it.");
+            lines.Add("            Font chrome = SystemFonts.MessageBoxFont;");
+            lines.Add("            int unit = chrome.Height;");
+            lines.Add("            int pad = unit;");
+            lines.Add("            int buttonWidth = unit * 7;");
+            lines.Add("            int buttonHeight = unit * 2;");
+            lines.Add("            // Tall enough for what a stopped run actually says: the outcome,");
+            lines.Add("            // the reason, and the line pointing at the log - without any of");
+            lines.Add("            // the three ending up half over the edge.");
+            lines.Add("            int fieldHeight = unit * 8;");
+            lines.Add("            int width = unit * 28;");
+            lines.Add("");
+            lines.Add("            SuspendLayout();");
+            lines.Add("            AutoScaleMode = AutoScaleMode.None;");
+            lines.Add("            Font = chrome;");
+            lines.Add("            FormBorderStyle = FormBorderStyle.FixedDialog;");
+            lines.Add("            MaximizeBox = false;");
+            lines.Add("            MinimizeBox = true;");
+            lines.Add("            ShowInTaskbar = true;");
+            lines.Add("            StartPosition = FormStartPosition.CenterScreen;");
+            lines.Add("            ClientSize = new Size(width, pad + fieldHeight + pad + buttonHeight + pad);");
+            lines.Add("");
+            lines.Add("            // The result. Read only, because it is what happened rather than");
+            lines.Add("            // something to fill in, and it carries a name of its own because");
+            lines.Add("            // there is no label beside it to lend it one.");
+            lines.Add("            field = new TextBox();");
+            lines.Add("            field.Name = ResultId;");
+            lines.Add("            field.AccessibleName = ResultName;");
+            lines.Add("            field.Multiline = true;");
+            lines.Add("            field.ReadOnly = true;");
+            lines.Add("            field.WordWrap = true;");
+            lines.Add("            field.ScrollBars = ScrollBars.Vertical;");
+            lines.Add("            field.TabIndex = 1;");
+            lines.Add("            field.Location = new Point(pad, pad);");
+            lines.Add("            field.Size = new Size(width - pad * 2, fieldHeight);");
+            lines.Add("            field.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom;");
+            lines.Add("");
+            lines.Add("            // One button for both things. Starting and stopping are the same");
+            lines.Add("            // question asked at two moments, and a second button would be a");
+            lines.Add("            // second thing to read on a window whose whole point is that");
+            lines.Add("            // there is only one thing to do.");
+            lines.Add("            action = new Button();");
+            lines.Add("            action.Name = ActionId;");
+            lines.Add("            action.Text = CaptionRun;");
+            lines.Add("            action.TabIndex = 0;");
+            lines.Add("            action.Size = new Size(buttonWidth, buttonHeight);");
+            lines.Add("            action.Location = new Point(width - pad - buttonWidth, pad + fieldHeight + pad);");
+            lines.Add("            action.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;");
+            lines.Add("            action.Click += new EventHandler(OnAction);");
+            lines.Add("");
+            lines.Add("            Controls.Add(field);");
+            lines.Add("            Controls.Add(action);");
+            lines.Add("            AcceptButton = action;");
+            lines.Add("            ActiveControl = action;");
+            lines.Add("            ResumeLayout(true);");
+            lines.Add("            Say(StateIdle);");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        // The state goes in the title bar and nowhere else. A line of text on");
+            lines.Add("        // the window saying what it is doing would be a third thing to read");
+            lines.Add("        // and a second place for the answer to live.");
+            lines.Add("        private void Say(string state)");
+            lines.Add("        {");
+            lines.Add("            Text = title + \" - \" + state;");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        private void OnAction(object sender, EventArgs args)");
+            lines.Add("        {");
+            lines.Add("            if (running) AskStop();");
+            lines.Add("            else Begin();");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        private void Begin()");
+            lines.Add("        {");
+            lines.Add("            // Cleared here, on the window's own thread, before there is a run");
+            lines.Add("            // to ask anything of. Nothing can have pressed the button between");
+            lines.Add("            // this line and the one that starts the thread, because both are");
+            lines.Add("            // this thread.");
+            lines.Add("            Runtime.ClearStop();");
+            lines.Add("            running = true;");
+            lines.Add("            action.Text = CaptionStop;");
+            lines.Add("            action.Enabled = true;");
+            lines.Add("            field.Text = \"\";");
+            lines.Add("            Say(StateBusy);");
+            lines.Add("            Log(\"START\", \"settleMs=\" + settleMs.ToString(CultureInfo.InvariantCulture));");
+            lines.Add("            watch = Stopwatch.StartNew();");
+            lines.Add("            // The automation drives other applications through UI Automation,");
+            lines.Add("            // which wants a single threaded apartment, and it runs on a thread");
+            lines.Add("            // of its own so that the window is still a window while it does.");
+            lines.Add("            worker = new Thread(new ThreadStart(Work));");
+            lines.Add("            worker.IsBackground = true;");
+            lines.Add("            worker.SetApartmentState(ApartmentState.STA);");
+            lines.Add("            worker.Start();");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        private void AskStop()");
+            lines.Add("        {");
+            lines.Add("            // Asked once. Until the run reaches a boundary and leaves there is");
+            lines.Add("            // nothing else this button can honestly offer, so it stops being");
+            lines.Add("            // pressable rather than pretending a second press would help.");
+            lines.Add("            action.Enabled = false;");
+            lines.Add("            Runtime.RequestStop();");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        private void Work()");
+            lines.Add("        {");
+            lines.Add("            RunOutcome outcome = RunOutcome.Done;");
+            lines.Add("            string detail = \"\";");
+            lines.Add("            try");
+            lines.Add("            {");
+            lines.Add("                " + CodeModules.Workflow + "." + EntryPoint + "(settleMs);");
+            lines.Add("            }");
+            lines.Add("            catch (WorkflowAborted aborted)");
+            lines.Add("            {");
+            lines.Add("                outcome = RunOutcome.Aborted;");
+            lines.Add("                detail = aborted.Message;");
+            lines.Add("            }");
+            lines.Add("            catch (Exception exception)");
+            lines.Add("            {");
+            lines.Add("                // The reason a run stopped is the innermost one. The layers");
+            lines.Add("                // above it are how it reached here, which nobody asked about.");
+            lines.Add("                Exception reason = exception;");
+            lines.Add("                while (reason.InnerException != null) reason = reason.InnerException;");
+            lines.Add("                outcome = RunOutcome.Stopped;");
+            lines.Add("                detail = reason.Message;");
+            lines.Add("            }");
+            lines.Add("            double seconds = 0;");
+            lines.Add("            Stopwatch taken = watch;");
+            lines.Add("            if (taken != null)");
+            lines.Add("            {");
+            lines.Add("                taken.Stop();");
+            lines.Add("                seconds = taken.Elapsed.TotalSeconds;");
+            lines.Add("            }");
+            lines.Add("            Log(Recorded(outcome), detail.Length == 0 ? \"every recorded step was carried out\" : detail);");
+            lines.Add("            Post(outcome, detail, seconds);");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        private static string Recorded(RunOutcome outcome)");
+            lines.Add("        {");
+            lines.Add("            if (outcome == RunOutcome.Aborted) return \"ABORTED\";");
+            lines.Add("            if (outcome == RunOutcome.Stopped) return \"STOPPED\";");
+            lines.Add("            return \"DONE\";");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        // Back to the window's thread, which is the only one allowed to touch");
+            lines.Add("        // the window. Posted and not called: closing the window waits for this");
+            lines.Add("        // thread to leave, and a call that waited back would be two threads");
+            lines.Add("        // each waiting for the other.");
+            lines.Add("        private void Post(RunOutcome outcome, string detail, double seconds)");
+            lines.Add("        {");
+            lines.Add("            try");
+            lines.Add("            {");
+            lines.Add("                if (!IsHandleCreated || IsDisposed) return;");
+            lines.Add("                BeginInvoke(new Action<RunOutcome, string, double>(Finished), outcome, detail, seconds);");
+            lines.Add("            }");
+            lines.Add("            catch (Exception)");
+            lines.Add("            {");
+            lines.Add("                // The window went away while the run was ending. What it did is");
+            lines.Add("                // in the log, which was written before this was attempted.");
+            lines.Add("            }");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        private void Finished(RunOutcome outcome, string detail, double seconds)");
+            lines.Add("        {");
+            lines.Add("            // The window can have been closed between the run ending and this");
+            lines.Add("            // arriving. Writing the answer into controls that are gone would");
+            lines.Add("            // throw where nothing is left to catch it, and a message loop");
+            lines.Add("            // that dies on the way out is how a closed window leaves a");
+            lines.Add("            // process behind. What the run did is in the log already.");
+            lines.Add("            if (IsDisposed || Disposing || !IsHandleCreated) return;");
+            lines.Add("            running = false;");
+            lines.Add("            worker = null;");
+            lines.Add("            action.Text = CaptionRun;");
+            lines.Add("            action.Enabled = true;");
+            lines.Add("            ActiveControl = action;");
+            lines.Add("            string elapsed = \"  \" + seconds.ToString(\"0.0\", CultureInfo.InvariantCulture) + \" \" + Seconds;");
+            lines.Add("            if (outcome == RunOutcome.Done)");
+            lines.Add("            {");
+            lines.Add("                Say(StateDone);");
+            lines.Add("                field.Text = ResultDone + elapsed;");
+            lines.Add("            }");
+            lines.Add("            else if (outcome == RunOutcome.Aborted)");
+            lines.Add("            {");
+            lines.Add("                Say(StateAborted);");
+            lines.Add("                field.Text = ResultAborted + elapsed;");
+            lines.Add("            }");
+            lines.Add("            else");
+            lines.Add("            {");
+            lines.Add("                Say(StateFailed);");
+            lines.Add("                field.Text = ResultFailed + elapsed + Environment.NewLine +");
+            lines.Add("                    Short(detail) + Environment.NewLine + LogNote;");
+            lines.Add("            }");
+            lines.Add("            // A run normally puts somebody else's application in front, so the");
+            lines.Add("            // answer would otherwise be written where nobody is looking.");
+            lines.Add("            try");
+            lines.Add("            {");
+            lines.Add("                Activate();");
+            lines.Add("            }");
+            lines.Add("            catch (Exception)");
+            lines.Add("            {");
+            lines.Add("                // Windows may refuse to bring a window forward. The answer is");
+            lines.Add("                // on it either way.");
+            lines.Add("            }");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        // One paragraph, bounded. Where it had to be cut it says so, rather");
+            lines.Add("        // than ending mid sentence as though that were all there was.");
+            lines.Add("        private static string Short(string reason)");
+            lines.Add("        {");
+            lines.Add("            if (String.IsNullOrEmpty(reason)) return \"\";");
+            lines.Add("            StringBuilder flat = new StringBuilder();");
+            lines.Add("            for (int index = 0; index < reason.Length; index++)");
+            lines.Add("            {");
+            lines.Add("                char character = reason[index];");
+            lines.Add("                if (character == '\\r' || character == '\\n' || character == '\\t') flat.Append(' ');");
+            lines.Add("                else flat.Append(character);");
+            lines.Add("            }");
+            lines.Add("            string one = flat.ToString().Trim();");
+            lines.Add("            if (one.Length <= ReasonLimit) return one;");
+            lines.Add("            return one.Substring(0, ReasonLimit) + \" ...\";");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        // Every run writes a line beside the artefact, whether anybody was");
+            lines.Add("        // watching the window or not.");
+            lines.Add("        private void Log(string state, string detail)");
+            lines.Add("        {");
+            lines.Add("            if (String.IsNullOrEmpty(logPath)) return;");
+            lines.Add("            try");
+            lines.Add("            {");
+            lines.Add("                string line = DateTime.Now.ToString(\"yyyy-MM-dd HH:mm:ss\", CultureInfo.InvariantCulture) +");
+            lines.Add("                    \"  \" + state + \"  \" + detail;");
+            lines.Add("                lock (logLock)");
+            lines.Add("                {");
+            lines.Add("                    File.AppendAllText(logPath, line + Environment.NewLine, new UTF8Encoding(false));");
+            lines.Add("                }");
+            lines.Add("            }");
+            lines.Add("            catch (Exception)");
+            lines.Add("            {");
+            lines.Add("                // A read-only folder is not a reason to refuse to run. The window");
+            lines.Add("                // still has the answer either way.");
+            lines.Add("            }");
+            lines.Add("        }");
+            lines.Add("");
+            lines.Add("        // Closing the window ends the run with it. Nothing is left behind to");
+            lines.Add("        // go on driving somebody's application after the thing that started it");
+            lines.Add("        // is gone.");
+            lines.Add("        protected override void OnFormClosing(FormClosingEventArgs args)");
+            lines.Add("        {");
+            lines.Add("            if (running)");
+            lines.Add("            {");
+            lines.Add("                Runtime.RequestStop();");
+            lines.Add("                Thread leaving = worker;");
+            lines.Add("                if (leaving != null) leaving.Join(8000);");
+            lines.Add("            }");
+            lines.Add("            base.OnFormClosing(args);");
+            lines.Add("        }");
+            lines.Add("    }");
+            lines.Add("");
+            lines.Add("    // Public, like " + CodeModules.Workflow + ", and for the same reason: the wrapper is");
+            lines.Add("    // PowerShell and PowerShell can only reach what is public. Everything");
+            lines.Add("    // else here stays internal, so the two ways in are the two the wrapper");
+            lines.Add("    // actually uses and there is no third.");
+            lines.Add("    public static class Shell");
+            lines.Add("    {");
+            lines.Add("        // What the window is worth as an exit code is nothing, and it says so.");
+            lines.Add("        // A window can run the automation no times or nine times, so there is");
+            lines.Add("        // no single outcome for it to stand for; each run says what it did in");
+            lines.Add("        // the field and in the log, neither of which is somewhere a person has");
+            lines.Add("        // to go looking. A caller that wants the outcome as an exit code is");
+            lines.Add("        // not a person and asks for the console instead.");
+            lines.Add("        public static int Show(int settleMs, string logPath, string title)");
+            lines.Add("        {");
+            lines.Add("            // Before any window exists, or the whole of it is drawn at 96 dots");
+            lines.Add("            // per inch and stretched by the desktop into a blur.");
+            lines.Add("            Native.SetProcessDPIAware();");
+            lines.Add("            Application.EnableVisualStyles();");
+            lines.Add("            Application.SetCompatibleTextRenderingDefault(false);");
+            lines.Add("            Application.Run(new RunWindow(settleMs, logPath, title));");
+            lines.Add("            return 0;");
+            lines.Add("        }");
+            lines.Add("    }");
+            lines.Add("}");
+            return lines.ToArray();
         }
 
         // ---------- shared helpers ----------

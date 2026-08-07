@@ -78,7 +78,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `21_Scan` | 取得の model と Win32 child 列挙、provider 統合 |
 | `22_ScanProviders` | UIA/MSAA tree の walk と座標 sampling（worker 側）|
 | `23_ScanRunner` | 専用 worker、進捗、打切り理由、人向け要約。録画用に worker を使い回す持続 mode を持つ |
-| `24_Messages` | `assets/messages` の日本語文言読み出し |
+| `24_Messages` | `assets/messages` の日本語文言読み出し。`Ready` は文言が実在するかを答える ― 画面なら欠けた文言は英語1行で目に見えるが、生成物では文字列が焼き込まれて残るので、ビルドは書き出す前にこれを訊く |
 | `25_Recorder` | アプリ横断の記録。入力監視スレッドと記述スレッドの分離、生タイムライン、前面/フォーカス追跡、入力欄の値読み戻し |
 | `26_JsonReader` | JSON 読み取り |
 | `27_Picker` | 全画面の選択オーバーレイ |
@@ -90,7 +90,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `33_ScreensPdf` | AI へ渡す `screens.pdf` と容量予算 |
 | `34_Acquire` | 取得と撮影の共通処理、秘密欄の黒塗り、出力の書き出し口 |
 | `36_ScriptModel` | 録画 step を両言語共通の操作列へ落とす唯一の場所。PowerShell と VBA が同じ録画について食い違わない根拠。`ScriptModel.Lines` が「1操作＝1行」の workflow 行列へ畳み、module 名と役割（`CodeModules` / `CodeRoles`）もここで決める |
-| `37_EngineGen` | PowerShell モードの初期コード生成。中身は **C#** で、`Workflow` / `RecordedFacts` / `RuntimeCore` / `RuntimeLocator` / `RuntimeNative` の5 module（`.cs`）を書く。UIA でウィンドウと要素を解決し、位置は要素矩形に対する割合で扱う。PowerShell を手書きさせないための層であり、PowerShell 側は `47_CodeBuild` が被せる最小ラッパーだけになる |
+| `37_EngineGen` | PowerShell モードの初期コード生成。中身は **C#** で、`Workflow` / `RecordedFacts` / `RuntimeCore` / `RuntimeLocator` / `RuntimeNative` の5 module（`.cs`）を書く。UIA でウィンドウと要素を解決し、位置は要素矩形に対する割合で扱う。PowerShell を手書きさせないための層であり、PowerShell 側は `47_CodeBuild` が被せる最小ラッパーだけになる。停止は runtime 側の協調停止（`RequestStop` / `ThrowIfStopped` / `WorkflowAborted`）で、step の切れ目・待ちの内側・窓探し・秘密の入力待ちで自分から降りる。あわせて `Window()` が生成物の窓 `RunWindow.cs` を書く ― **5 module の1つではなく**、ビルドが足す層なので `BuildFiles` は返さない |
 | `38_VbaGen` | VBA の初期コード生成。**同じ5 module 名**で書く。Win32 だけで届く範囲を書き、届かない step は workflow 上で `Unsupported` として理由付きで停止させる |
 | `39_CodeProject` | 生成版・現行版・取り込み直前版の3版保持と `runtime/sessions/<id>/code/` への保存・読み戻し。複数 module を module 順に並べ、`Workflow` を entry point として扱う |
 | `40_Handoff` | AI へ渡す依頼文1個の組み立て。**1回のコピー・1回の貼り付け**で、コード・操作ログ・台帳は入れず添付へ回す。添付の実在検査もここ。**添付が何個かは固定ではなく**、今回書き出した結果から数え、依頼文は実在するファイル・実際の見出し・実際に渡したコード系統だけを説明する。返答形式は `protocol` が選ばれたときだけ書く |
@@ -98,10 +98,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File .\app-studio.ps1 -H
 | `41_Intake` | 返答の解析。request id 照合、BEGIN/END/COMPLETE/PART、装飾除去、拒否理由 |
 | `42_Diff` | 行単位の差分。反映前に何が変わるのかを見せるためだけに使う |
 | `43_Workspace` | フル表示の本体となる3ペイン（左モジュール／中央コードエディター／右「ワークフロー」「AIに相談」タブ）。左右は折り畳みと GridSplitter でのリサイズが可能で、畳んだ分は中央が取る。生成コードは C# 本体・PowerShell ラッパー・VBA をすべて一覧に出す。検証・ビルド・実行・生成物の起動はコードの隣に置き、AI 返答は中央全面の差分にしてから反映／拒否を選ばせる |
-| `44_ScriptRun` | engine（C#）を**実際にコンパイル**しての検証と module 一式での実行、VBA の構造検証（module 別）と、**ビルド済み `.xlsm` を Excel に開かせての `Application.Run`**。取り込みは行わないので VBA プロジェクトへのアクセスの信頼を要求しない。検証も実行も `47_CodeBuild` が組む同一のものを使う |
+| `44_ScriptRun` | engine（C#）を**実際にコンパイル**しての検証と module 一式での実行、VBA の構造検証（module 別）と、**ビルド済み `.xlsm` を Excel に開かせての `Application.Run`**。取り込みは行わないので VBA プロジェクトへのアクセスの信頼を要求しない。検証も実行も `47_CodeBuild` が組む同一のものを使う。PowerShell の実行は `-Console` で呼ぶ ― 答えが出力と終了コードだけの実行に、押す人のいない窓は使えない |
 | `45_CodeEditor` | コードを読み書きする箱。行番号、PowerShell/VBA の色分け、検索。色は透明前景の TextBox の背後へ描き、編集そのものは素の TextBox のまま保つ |
 | `46_Inspector` | 録画中の任意インスペクター用に、ポインタ下の1点を **Win32 だけで有界に**読む。UIA は使わない（数百 ms かかり、応答しないアプリで止まるため）。例外を投げず、読めなかったことを事実として返す |
-| `47_CodeBuild` | module を**渡せる1本**へ畳む層。PowerShell モードは batch ヘッダ + 最小 PowerShell ラッパー + C# engine を1つの `.cmd` にまとめる（実行時に `Add-Type` でコンパイルするので、追加ランタイムも未署名 EXE も生まない）。VBA モードは `51_VbaWorkbook` に渡すだけで、**Excel も VBA プロジェクトへのアクセスの信頼も要求しない** |
+| `47_CodeBuild` | module を**渡せる1本**へ畳む層。PowerShell モードは batch ヘッダ + 最小 PowerShell ラッパー + C# engine + `RunWindow.cs` を1つの `.cmd` にまとめる（実行時に `Add-Type` でコンパイルするので、追加ランタイムも未署名 EXE も生まない）。人が起動すれば窓が開き、`-Console` なら従来どおり端末で走って終了コードを返す。窓の文言は `24_Messages` からビルド時に焼き込むので、**文言が見つからないビルドは名指しで拒否して何も作らない**。VBA モードは `51_VbaWorkbook` に渡すだけで、**Excel も VBA プロジェクトへのアクセスの信頼も要求しない** |
 | `48_Ole2` | OLE2 複合ファイルの読みと**書き直し**。`vbaProject.bin` はこの形式で、stream を1つ足すと directory も配置も変わるため、patch ではなく毎回組み直す。読みは厳格 ― 相手は自分の種ブックか自分が書いたブックだけなので、合わない箇所は名指しで失敗させる |
 | `49_VbaCompress` | VBA が source を格納する圧縮形式（deflate ではない）。書いた module を読み戻すため両方向を持つ |
 | `50_VbaProject` | `vbaProject.bin` の読みと module 追加。`PROJECT` / `PROJECTwm` / `dir` の3か所は同時に更新し、追加は p-code を持てないのでプロジェクト全体の compiled state を落とす（前置除去・MODULEOFFSET 0・`__SRP_*` 空・`_VBA_PROJECT` の版）。**4つは分割できない。** 文字コードで表せない文字は `U+XXXX` を名指しして失敗させる |
@@ -151,7 +151,8 @@ runner は相互の WPF/COM/static 状態を持ち越さないよう、各 test 
 - `test-live-canvas`: child HWND なし、UIA-EMPTYTREE、**構造を公開しないことが両出力に明記されること**
 - `test-scan`: 4経路の統合、HWND 無し要素、独自描画時の sampling 起動、値漏れ0
 - `test-autosave`: **製品が実際に書く `SessionStore.Append` 経路で**、強制終了しても記録と索引が残ること、書けない時に `STORE-WRITE` の理由を出して別の場所へ勝手に出さないこと
-- `test-artefact-e2e`: **ビルドした `.cmd` を、ダブルクリックと同じやり方で起動する。** `test-code-run-e2e` が見ているのは ScriptRun の経路であって、人が手渡されるものではない。両者のあいだには batch header・PowerShell ラッパー・here-string に畳んだ C# の全部がある。合格条件は exit code ではなく **fixture の窓が実際に変わったこと**、および成功した実行も log に残ること
+- `test-artefact-e2e`: **ビルドした `.cmd` を、ダブルクリックと同じやり方で起動する。** `test-code-run-e2e` が見ているのは ScriptRun の経路であって、人が手渡されるものではない。両者のあいだには batch header・PowerShell ラッパー・here-string に畳んだ C# の全部がある。ダブルクリックで開くのは窓なので、実行は**その窓のボタンを押すこと**。合格条件は exit code ではなく **fixture の窓が実際に変わったこと**、および成功した実行も log に残ること
+- `test-artefact-window`: **生成物の窓そのもの**を、人と同じやり方で駆動する。ビルドが**1ファイルしか置かないこと**、窓に**ボタン1つと読み取り専用フィールド1つしか無いこと**（タイトルバーは窓枠なので数えない）、完走・中断・失敗の3経路で**ボタン文言（実行↔中断）・タイトルバーの状態・結果と所要時間**が正しいこと、**中断が10秒の窓探しを待たずに実際に止めていること**、止めたあとも**もう一度走らせられること**、そして**窓を閉じたら何も残らないこと**を見る。実画面は `tests/.build/artefact/*.png` に残す。**実マウスも実キーも使わない**（片方は step 0件の録画、もう片方は存在しない窓を指す録画）ので既定の集合に入る
 - `test-replay-fidelity`: 再生が **記録どおりのものを・記録どおりの相手へ・記録どおりの順で** 行ったかを見る。「落ちなかった」は答えになっていない ― 順序を入れ替えても、値を別の欄へ入れても、3件成功と報告されるからである。だから終状態が1つの順序からしか作れない記録を使う（入力→押下→同じ欄へ別の入力）。加えて速度を変えて同じことを繰り返し、**速度は待ちを縮めるだけで、行うことも順序も変えない**ことを確かめる
 - `test-report-states`: 成功／一部失敗／多数失敗／空／長文の5状態で `report.html` を生成し、結論が最初に出ること、`<details>` が入れ子でないこと、各節が要約1行＋詳細1段であること、長文が桁溢れしないことを確認する
 - `test-input-timeline`: **実マウス・実キー**で、click／double click／drag／wheel／command key の down と up／録画開始時点で既にフォーカスがある欄への打鍵／Tab 移動が、生タイムラインと step の両方に落ちることを確認する
